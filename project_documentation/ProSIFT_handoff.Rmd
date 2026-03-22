@@ -1,0 +1,450 @@
+---
+title: "ProSIFT -- Handoff File"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+    toc_depth: 3
+    theme: default
+---
+
+# ProSIFT -- Handoff File
+
+**Last Updated:** 2026-03-20
+
+**Purpose:** Operational coordination across Claude sessions. Tracks current development state, active tasks, blockers, and environment details. Updated every session.
+
+**Key principle:** The Project Documentation (ProSIFT_project_documentation.Rmd) is the architectural reference. This handoff is purely operational -- it tracks *what is happening now*, not *why things are designed the way they are*. Reference the Project Documentation for explanations rather than restating them.
+
+---
+
+### DOCUMENT MAINTENANCE RULES:
+- **ADD** new information to appropriate sections; do not remove existing content unless archiving
+- **EDIT** only when specific information needs correction
+- **ARCHIVE** session log entries older than 4-6 weeks once their content has been captured in the Project Documentation
+- **REFERENCE** the Project Documentation for design rationale (format: [See Project Documentation Section X.X: Title])
+
+---
+
+# 1. Instance Instructions
+
+## 1.1 Instructions for Claude Code
+
+### Session Protocol
+
+**AT SESSION START:**
+
+- Read the Project Documentation (if instructed) and this Handoff File
+- Check "Current Development State" (Section 2) for module status overview
+- Check "Pending Tasks" (Section 4.1) for assigned work items
+- Review the File System Map (Section 7) to orient yourself to the project structure
+- Check Computational Environment (Section 8) for environment setup
+- Review Code and Style Preferences (Section 9) before writing any code
+
+**DURING THE SESSION:**
+
+- Follow the QC check protocol below -- pause between major steps, report metrics, and ask before proceeding
+- When writing scripts, use the header format and style conventions from Section 9
+- When referencing architectural decisions or design rationale, check the Project Documentation or ask the user to provide it if deeper context is needed
+- When implementing cross-module interfaces, check "Integration Points" (Section 6) for data contracts
+- If a module's expected inputs or outputs change during implementation, update Section 6 immediately
+
+**AT SESSION END:**
+
+- Update Session Log (Section 3) with a dated entry of work done, including:
+  - Scripts created or modified (with file paths)
+  - Output files generated (with file paths)
+  - Tests run and their outcomes
+  - Any warnings, unexpected results, or concerns
+- Update "Current Development State" (Section 2) if module statuses changed
+- Move completed tasks to "Completed Tasks" (Section 4.3) with date
+- Update File System Map (Section 7) if files were created, moved, or deleted
+- Flag any issues or questions in Section 5
+- If a significant design decision was made, note it here and flag it for promotion to the Project Documentation Decision Register
+
+### QC Check Protocol (Mandatory)
+
+- Pause between major implementation steps to verify outputs before proceeding
+- Report QC metrics after each step -- do not continue silently
+- Ask the user if results look reasonable before moving to the next part
+- If any test fails or produces unexpected results, STOP and report
+
+**Check-in format after major steps:**
+```
+Step [X] complete.
+  Results:
+  - Output file: [path]
+  - [Key metric 1]: [value] (expected: [range])
+  - [Key metric 2]: [value] (expected: [range])
+  QC Status: [PASS / WARNING / FAIL]
+  [Notes or concerns]
+  Ready to proceed to Step [Y]. Continue? (y/n)
+```
+
+**Red flags to watch for and report:**
+
+- Tests that pass when they should fail (or vice versa)
+- Unexpected file sizes, row counts, or data dimensions
+- Schema mismatches between modules (check Section 6)
+- Warnings from statistical or data processing functions
+- Discrepancies between what was specified and what the data supports
+- Silent data loss (rows/columns dropped without explanation)
+
+---
+
+## 1.2 Instructions for Claude.ai
+
+### Session Protocol
+
+**AT SESSION START:**
+
+- Read the Project Documentation (if instructed) and this Handoff File
+- Review recent Session Log entries (Section 3) to understand what has been done since your last session
+- Check "Open Questions" (Section 5) for items that may need attention
+
+**DURING THE SESSION:**
+
+- When making significant design or architectural decisions, document them using the Decision Register format in Project Documentation Section 9
+- When drafting implementation tasks, write them as actionable entries with clear acceptance criteria for the Pending Tasks queue (Section 4.1)
+- When reviewing code or implementation approaches, cross-reference with the Project Documentation for architectural consistency
+
+**AT SESSION END:**
+
+- Promote Session Log content to the Project Documentation as appropriate:
+  - Significant decisions go to Project Documentation Section 9 (Decision Register)
+  - Development milestones go to Project Documentation Section 10 (Development Log)
+  - New limitations discovered go to Project Documentation Section 8
+- Add any new tasks to "Pending Tasks" (Section 4.1)
+- Flag any open questions or blockers in Section 5
+
+### Role and Responsibilities
+
+**Primary responsibilities:**
+
+- Architectural decisions and design review
+- Evaluating implementation approaches and tradeoffs
+- Reviewing code logic and analytical methodology
+- Drafting task specifications with clear acceptance criteria
+- Literature review and biological context for module design (e.g., imputation method selection, enrichment analysis design)
+
+**Quality and validation mindset:**
+
+- Question whether implementation choices match the architectural intent in the Project Documentation
+- Consider edge cases: what happens with missing data, many-to-many ID mappings, API failures
+- Verify that module interfaces match the data contracts in Section 6
+- Be critical of Claude Code's outputs -- check whether the approach was sound, not just whether the code ran
+- Flag scope creep: is this implementation adding complexity beyond what was specified?
+
+---
+
+# 2. Current Development State
+
+## 2.1 Phase Overview
+
+| Phase | Description | Status | Notes |
+|---|---|---|---|
+| Phase 1 | Core pipeline skeleton + QC module | Not started | [See Project Documentation Section 6.1] |
+| Phase 2 | Statistical analysis + enrichment | Not started | [See Project Documentation Section 6.2] |
+| Phase 3 | Database integration layer | Not started | [See Project Documentation Section 6.3] |
+| Phase 4 | Interactive frontend | Not started | [See Project Documentation Section 6.4] |
+
+**Current phase:** Not yet started.
+
+**Current focus:** --
+
+## 2.2 Module Status
+
+Tracks implementation status of individual modules within and across phases. A module may be: Not started, In progress, Functional (works but incomplete), Complete, or Blocked.
+
+| Module | Phase | Status | Last Touched | Blocking Issues | Notes |
+|---|---|---|---|---|---|
+| Project structure / repo setup | 1 | Not started | -- | -- | |
+| YAML config schema | 1 | Not started | -- | -- | |
+| Input validation | 1 | Not started | -- | -- | |
+| UniProt ID mapping | 1 | Not started | -- | -- | |
+| QC/EDA | 1 | Not started | -- | -- | |
+| Conda environment | 1 | Not started | -- | -- | |
+| Singularity definition | 1 | Not started | -- | Dependency list needed first | |
+| Snakemake SLURM profile | 1 | Not started | -- | -- | |
+| Imputation | 2 | Not started | -- | -- | |
+| Differential abundance (DEqMS) | 2 | Not started | -- | -- | |
+| ORA / GSEA enrichment | 2 | Not started | -- | -- | |
+| Caching / rate-limiting framework | 3 | Not started | -- | -- | |
+| UniProt annotation retrieval | 3 | Not started | -- | -- | |
+| PubMed E-utilities queries | 3 | Not started | -- | -- | |
+| DisGeNET queries | 3 | Not started | -- | -- | |
+| DGIdb queries | 3 | Not started | -- | -- | |
+| CTD queries | 3 | Not started | -- | -- | |
+| Protein profile assembly | 3 | Not started | -- | -- | |
+| Biological process profiles | 3 | Not started | -- | -- | |
+| Interactive frontend | 4 | Not started | -- | Tech selection deferred | |
+
+## 2.3 Snakemake Rules Status
+
+Tracks which Snakemake rules exist and whether they are functional. Populated as rules are implemented.
+
+| Rule Name | Module | Status | Notes |
+|---|---|---|---|
+| -- | -- | -- | Implementation not yet started |
+
+---
+
+# 3. Session Log
+
+Maintained by Claude Code. Claude.ai reads these entries to understand what work has been done and promotes substantive content to the Project Documentation (decisions to Section 9, milestones to Section 10).
+
+> **Entry template:**
+>
+> ### [DATE] ([Claude Code / Claude.ai])
+> - [What was done]
+> - [Key outputs generated with file paths]
+> - [Tests run and outcomes]
+> - [Decisions made -- flag for promotion to Project Documentation Decision Register if significant]
+> - [Issues encountered or flagged]
+
+### 2026-03-20 (Claude Code)
+
+- Project documentation reviewed and handoff file created
+- No code implementation yet; project is in planning stage
+- Handoff structure adapted from analysis-project template to software-development format
+
+---
+
+# 4. Task Queue
+
+## 4.1 Pending Tasks
+
+> **Entry template:**
+>
+> ### [Task Title]
+> - **Assigned to:** [Claude.ai / Claude Code]
+> - **Priority:** [High / Medium / Low]
+> - **Phase:** [1 / 2 / 3 / 4]
+> - **Module:** [Which module this belongs to]
+> - **Description:** [What needs to be done]
+> - **Context/References:** [Relevant Project Documentation sections, prior session log entries]
+> - **Acceptance criteria:** [How to know when it's done]
+> - **Dependencies:** [Other tasks or modules that must be complete first]
+
+None currently.
+
+## 4.2 Decisions and Designs for Review
+
+> Implementation choices, design tradeoffs, or prototype outputs produced by Claude Code
+> that need user or Claude.ai sign-off before building further.
+
+None currently.
+
+## 4.3 Completed Tasks
+
+> **Entry format:** [Task name] -- [Date completed] -- [Output location / notes]
+
+---
+
+# 5. Open Questions and Blockers
+
+## 5.1 Blockers
+
+> Issues that are preventing progress on a specific module or task.
+>
+> **Entry format:** [DATE opened] [Module affected] [Description] [Status/progress]
+
+None currently.
+
+## 5.2 Open Questions
+
+> Questions that need resolution but are not blocking immediate work.
+>
+> **Entry format:** [DATE opened] [Question] [Status/progress]
+
+- 2026-03-20 -- Survey of existing proteomics analysis tools needed [See Project Documentation Section 1.4]
+- 2026-03-20 -- Benchmark/validation dataset not yet identified [See Project Documentation Section 7]
+- 2026-03-20 -- PubMed co-occurrence normalization approach not yet selected [See Project Documentation Section 4.3]
+- 2026-03-20 -- Frontend technology not yet selected (deferred to after Phase 2) [See Project Documentation Section 3.4]
+
+## 5.3 Resolved Questions
+
+> **Entry format:** **Q:** [Question] **A:** [Answer] ([Date resolved])
+
+---
+
+# 6. Integration Points
+
+This section tracks the data contracts between modules -- what each module produces and what downstream modules expect to consume. When a module's interface changes during implementation, update this section immediately and check all affected downstream modules.
+
+[See Project Documentation Section 2.2 for the full pipeline DAG and dependency logic.]
+
+## 6.1 Data Contracts
+
+Each entry defines what a module outputs and which downstream modules consume that output. Add entries here as modules are implemented, using the following template:
+
+> ### [Producer Module] --> [Consumer Module]
+> - **Producer:** [Snakemake rule or module name]
+> - **Consumer:** [Snakemake rule or module name]
+> - **Format:** [Parquet / CSV / JSON / etc.]
+> - **Schema:** [Column names, types, and any constraints]
+> - **Notes:** [Edge cases, relevant Project Documentation references]
+
+[See Project Documentation Section 2.2 for the full pipeline DAG and dependency logic.]
+
+No data contracts defined yet. Populate as modules are implemented.
+
+---
+
+# 7. File System Map
+
+## 7.1 Directory Structure
+
+**Last updated by Claude Code:** 2026-03-20
+
+```
+ProSIFT/
+│
+├── project_documentation/
+│   ├── ProSIFT_project_documentation.Rmd    # Architectural reference (Project Documentation)
+│   ├── ProSIFT_handoff.Rmd                  # THIS FILE - operational coordination
+│   └── prosift_pipeline_dag.svg             # Pipeline DAG diagram
+│
+└── [project structure TBD during Phase 1 implementation]
+```
+
+## 7.2 Scripts Reference
+
+| Script | Module | Description | Last Updated |
+|---|---|---|---|
+| -- | -- | Implementation not yet started | -- |
+
+## 7.3 File System Update Instructions
+
+When creating, moving, or deleting files:
+
+1. Update the directory tree above
+2. Update the "Last updated" date
+3. Add notes for new directories or significant files
+4. Update Scripts Reference table if new scripts created
+5. Check if new files need GitHub inclusion/exclusion (see Section 8.3)
+
+---
+
+# 8. Computational Environment
+
+## 8.1 Platform
+
+[To be documented when development begins.]
+
+## 8.2 Environment Setup
+
+**Development environment:** Conda (environment.yml to be created in Phase 1)
+
+```bash
+# Activate before running any scripts
+conda activate prosift
+
+# Verify environment is active
+```
+
+**Production environment:** Singularity container (.sif) [See Project Documentation Section 5.2]
+
+**Key dependencies (preliminary -- finalize during Phase 1):**
+
+- Python 3.11+
+- R (for DEqMS, limma via rpy2)
+- Snakemake
+- pandas, numpy, scipy, scikit-learn
+- pyarrow (Parquet support)
+- matplotlib, seaborn, plotly
+- gseapy
+- rpy2
+- requests (API queries)
+
+## 8.3 Repository Configuration
+
+**Include in version control:**
+```
+# Code
+workflow/         # Snakemake rules and scripts
+scripts/          # Standalone utility scripts
+config/           # Default configuration files
+
+# Documentation
+project_documentation/*.Rmd
+project_documentation/*.svg
+
+# Environment
+environment.yml
+Singularity.def
+
+# Pipeline
+Snakefile
+```
+
+**Exclude from version control (.gitignore):**
+```
+# Data (user-specific)
+data/
+results/
+
+# Container images
+*.sif
+
+# Cache files
+.cache/
+.snakemake/
+
+# System files
+.DS_Store
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# IDE files
+.vscode/
+.idea/
+```
+
+---
+
+# 9. Code and Style Preferences
+
+## 9.1 Code Header Format
+
+```python
+# title: script_name.py
+# project: ProSIFT
+# author: Reina Hastings
+# contact: reinahastings13@gmail.com
+# date created: YYYY-MM-DD
+# last modified: YYYY-MM-DD
+#
+# purpose:
+#   [Description of what the script does]
+#
+# inputs:
+#   - [Input files/parameters]
+#
+# outputs:
+#   - [Output files/locations]
+#
+# usage example:
+#   python script_name.py --input data.csv --output results/
+```
+
+## 9.2 Code Style Conventions
+
+- Use single quotes (`'`) instead of double quotes (`"`) where language allows
+- Include argument parsing with `argparse` (Python) or `getopts`/`getopt` (Bash) for script versatility
+- Include usage messages so scripts are easy to use by anyone
+- Include a copy/paste-ready command in the header's usage example section
+- Comment in a visually organized way:
+  - Use section headers to delineate major parts of the script
+  - Number steps in multi-step algorithms
+  - Explain the *why*, not just the *what*, for non-obvious logic
+- Write detailed inline comments for complex operations or domain-specific logic
+
+---
+
+# Archived Sessions
+
+[Old session log entries moved here after their content has been captured in the Project Documentation. Kept for reference but not expected to be read routinely.]

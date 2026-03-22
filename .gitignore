@@ -1,0 +1,20 @@
+# Data (user-specific)
+data/
+results/
+
+# Container images
+*.sif
+
+# Cache files
+.cache/
+.snakemake/
+
+# System files
+.DS_Store
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# IDE files
+.vscode/
+.idea/

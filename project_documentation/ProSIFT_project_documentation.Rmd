@@ -1,0 +1,746 @@
+---
+title: "ProSIFT -- Project Documentation"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+    toc_depth: 3
+    theme: default
+---
+
+**Last Updated:** 2026-03-20
+
+**Working Project Name:** ProSIFT (PROtein Statistical Integration and Filtering Tool)
+
+**Name Status:** Working name; may be revised before publication. Name collision search conducted 2026-03-20 confirmed no existing bioinformatics tool with this name.
+
+**Purpose:** This document is the cumulative, archival record of the ProSIFT project. It contains all background context, architectural decisions, design rationale, development progress, and detailed explanations. It serves as both a development reference and a record of the reasoning behind every major choice.
+
+---
+
+# 1. Project Overview
+
+## 1.1 Purpose and Motivation
+
+ProSIFT is a pipeline and interactive exploration platform for discovery proteomics data. Its purpose is to take quantitative protein abundance data, run it through quality control, statistical analysis, functional enrichment, and multi-database annotation, and produce comprehensive "protein profiles" that consolidate all available information about each protein into a single, searchable, sortable resource.
+
+The core problem ProSIFT addresses: researchers conducting discovery proteomics experiments typically identify hundreds to thousands of proteins, many of which are differentially abundant across conditions. Evaluating which of these proteins are biologically interesting requires manually querying multiple databases (UniProt, DisGeNET, DGIdb, PubMed, CTD, etc.), cross-referencing enrichment results, and mentally integrating statistical evidence with biological context. This process is time-consuming, error-prone, and difficult to systematize. ProSIFT automates and integrates these steps into a single pipeline with an interactive frontend for exploration.
+
+## 1.2 Target Users and Use Cases
+
+**Primary audience:** The developer's own lab, working with discovery proteomics datasets. The tool is designed with the possibility of broader community adoption if it proves effective, but generalizability is a secondary concern during initial development.
+
+**Typical use case:** A researcher has a quantitative proteomics dataset (tens of samples, thousands of proteins) from a discovery experiment. They want to:
+
+- Assess data quality (missingness, outliers, replicate concordance)
+- Identify differentially abundant proteins across conditions
+- Run functional enrichment analyses (ORA, GSEA)
+- Query external databases for disease associations, druggability, literature co-occurrence, and general protein annotation
+- Explore results interactively, sorting/filtering proteins by various criteria (fold change, significance, disease relevance, druggability, literature hits)
+- View biological process-level summaries alongside protein-level profiles
+
+## 1.3 Project Scope
+
+**In scope (current vision):**
+
+- Ingestion of protein-level abundance matrices with metadata
+- QC/EDA module (missingness analysis, replicate variability, PCA, outlier detection, distributional assessment)
+- Imputation with multiple method support and sensitivity diagnostics
+- Differential abundance analysis (DEqMS or limma via rpy2)
+- Overrepresentation analysis (ORA) and Gene Set Enrichment Analysis (GSEA) via gseapy
+- Database integration layer (UniProt, DisGeNET, DGIdb, CTD, PubMed E-utilities)
+- Protein profile assembly (per-protein JSON combining all annotations and statistics)
+- Biological process view (GO/KEGG term-level profiles)
+- Interactive frontend for exploration (technology TBD; Shiny for Python under consideration)
+- Snakemake-orchestrated pipeline targeting SLURM cluster
+- Singularity container for reproducibility
+
+**Explicitly out of scope (current phase):**
+
+- Raw MS spectra processing (no .raw or .mzML ingestion)
+- Ingestion modules for specific search engine outputs (MaxQuant, DIA-NN, etc.) -- deferred to later phase
+- AWS/cloud deployment
+- SQLite compiled database for the frontend (deferred to future consideration)
+- Multi-organism support (initial development assumes human proteomics data)
+
+**Future considerations (not committed, but noted for later evaluation):**
+
+- Ingestion modules for common search engine output formats (MaxQuant proteinGroups.txt, DIA-NN report.tsv, FragPipe combined_protein.tsv)
+- AlphaFold structure integration
+- Reactome pathway integration
+- BioGRID protein-protein interaction data
+- SQLite database as compiled results backend for the frontend
+- AWS deployment for hosted access
+- Multi-organism support
+
+## 1.4 Existing Tools and Landscape
+
+*[To be populated. Should include a survey of existing proteomics analysis tools (Perseus, Proteoscanner, ProTIGY, ProteoSign, LFQ-Analyst, ProVision, Amica, etc.), what they do well, and where ProSIFT's multi-database annotation and protein profiling approach fills a gap. This section establishes why ProSIFT is worth building rather than using an existing tool.]*
+
+**[FOLLOW-UP NEEDED]** Conduct a systematic survey of existing proteomics analysis platforms to document where ProSIFT's approach differs and what unique value it provides.
+
+---
+
+# 2. Architecture and Design
+
+## 2.1 High-Level System Architecture
+
+ProSIFT is organized into three decoupled layers:
+
+**Layer 1 -- Snakemake Pipeline (compute layer).** Runs on the SLURM cluster. Handles all computation: ingestion, QC, normalization, imputation, statistical analysis, enrichment analysis, database queries, and profile assembly. Produces a structured results directory.
+
+**Layer 2 -- Structured Results Directory (data contract).** A well-defined directory structure of Parquet, CSV, JSON, and image files that serves as the interface between the pipeline and the frontend. The format and organization of this directory constitutes the "contract" between layers 1 and 3 -- either can evolve independently as long as this contract is maintained.
+
+**Layer 3 -- Interactive Exploration Frontend (presentation layer).** Reads the results directory and provides the protein profiles, biological process view, and sortable/filterable database. Technology not yet finalized; Shiny for Python, Streamlit, Panel, or a static HTML approach are under consideration.
+
+**Rationale for this separation:** The pipeline and the frontend serve fundamentally different purposes and have different computational requirements. The pipeline needs cluster resources and runs in batch mode; the frontend needs responsiveness and runs interactively. Decoupling them means: (a) someone can use just the pipeline and explore results in their own way, (b) the frontend can run on a laptop without cluster access, (c) either layer can be replaced or upgraded independently.
+
+## 2.2 Pipeline DAG Overview
+
+The diagram below shows the directed acyclic graph (DAG) of the ProSIFT Snakemake pipeline. Each node represents a major rule or rule group. Arrows indicate data dependencies. Color coding: teal nodes are computational/analytical steps, purple nodes are external database operations, coral is the convergence/assembly step, and gray nodes are inputs or outputs.
+
+![ProSIFT Pipeline DAG](ProSIFT_pipeline_DAG.svg){width=100%}
+
+*Figure 1. ProSIFT pipeline DAG showing the dependency structure of all major processing steps. Dashed elements indicate future components (interactive frontend) or long-range dependencies (QC flags feeding into profile assembly). The horizontal dashed line marks the Snakemake checkpoint where the significant protein list becomes available. Diagram generated 2026-03-20.*
+
+### DAG structure and dependency logic
+
+The pipeline has a clear main spine running down the right side of the diagram: input validation, normalization, imputation, and differential abundance. This is the core statistical path that transforms raw abundance data into a list of differentially abundant proteins with effect sizes and significance values.
+
+Two major branching points structure the rest of the pipeline:
+
+**First fork (after validation):** The QC/EDA module branches off to the left and runs on the validated but un-normalized data. This is intentional -- the QC module needs to assess raw distributional properties (skewness, dynamic range, missingness patterns) before any transformation is applied. QC outputs a report and a set of per-protein and per-sample flags. These flags take a long-range path through the pipeline (represented by the dashed arrow on the left) and are incorporated into protein profiles at the assembly stage. The main analytical path continues rightward through normalization and imputation.
+
+**Second fork (after differential abundance):** This is the pivot point of the entire pipeline. Everything above it is about producing statistically sound abundance estimates. Everything below it is about interpreting those results. The fork produces two parallel branches:
+
+- **Enrichment analysis (left branch):** ORA and GSEA run against the differential abundance results. These are independent of the database queries and can execute in parallel.
+- **Database queries (right branch):** All five external databases (UniProt, PubMed E-utilities, DisGeNET, DGIdb, CTD) are queried for the proteins of interest. Individual database queries are independent of each other and are parallelized both across databases and across proteins.
+
+**Snakemake checkpoint:** The dashed horizontal line between differential abundance and the two downstream branches marks a critical architectural feature. The list of proteins that need database querying is not known until differential abundance completes (it depends on which proteins pass the significance threshold, though the user can also configure the pipeline to query all detected proteins). This requires Snakemake's checkpoint mechanism: differential abundance is declared as a checkpoint rule, and the downstream database query rules dynamically determine their targets based on the checkpoint's output.
+
+**Convergence at profile assembly:** The profile assembly step (coral) is the most complex join in the pipeline. It requires inputs from four upstream sources: QC flags, differential abundance results, enrichment results, and all database query outputs. In Snakemake terms, this rule's input function aggregates across all these outputs to construct the per-protein JSON profiles and the biological process (GO/KEGG term) profiles.
+
+**Results directory and frontend:** The structured results directory is the terminal output of the Snakemake pipeline and serves as the data contract between the pipeline (Layer 1) and the interactive frontend (Layer 3). The frontend is shown as a dashed outline because it is a Phase 4 deliverable and is architecturally separate from the pipeline.
+
+## 2.3 Input Specification
+
+**Primary input (Phase 1):** A protein-level abundance matrix plus a metadata file.
+
+**Abundance matrix:**
+
+- Format: CSV or TSV
+- Rows: proteins (one per row)
+- Columns: one protein ID column, then one column per sample containing abundance values
+- Protein IDs: UniProt accessions preferred; gene symbols accepted (will be mapped internally)
+- Abundance values: can be raw intensities, normalized values, or log-transformed values (pipeline configuration specifies the state of the input data)
+- Missing values: represented as NA or empty cells
+
+**Metadata file:**
+
+- Format: CSV or TSV
+- Rows: one per sample (sample IDs must match column headers in the abundance matrix)
+- Columns: sample ID, condition/group, and any additional covariates (batch, replicate number, etc.)
+- Must include a column specifying the grouping variable for differential abundance analysis
+
+**Future ingestion modules (not Phase 1):** Will accept structured output from common search engines (MaxQuant, DIA-NN, FragPipe) and transform them into the standardized abundance matrix + metadata format.
+
+## 2.4 File Format Strategy
+
+The following file format strategy was adopted based on a consideration of performance, usability, type safety, and the needs of both the pipeline (computational) and the frontend (interactive exploration).
+
+**Parquet -- internal pipeline intermediates.** Used for all rectangular numerical data passing between Snakemake rules (abundance matrices, statistical results, QC metrics tables). Rationale: columnar storage enables fast analytical queries; built-in type information prevents the type-guessing problems that plague CSVs (e.g., gene name "NA" interpreted as missing, numeric gene IDs interpreted as integers); compressed by default (5-10x smaller than CSV); fast read/write with pandas and pyarrow.
+
+**CSV -- user-facing exports.** Key results tables (differential abundance results, significant protein lists, enrichment results) are also exported as CSV for users who want to open results in Excel or import into other tools. These are "deliverables," not pipeline intermediates.
+
+**JSON -- hierarchical annotation data.** Used for protein profiles and database query results, where the data is naturally hierarchical (a protein has metadata fields, a list of disease associations each with sub-fields, literature results, abundance statistics, etc.). JSON preserves this structure natively and is readable by web frontends.
+
+**YAML -- configuration and metadata.** Pipeline configuration file specifying paths, parameters, contrasts, database query settings, etc.
+
+**PNG + interactive HTML (Plotly) -- visualizations.** Static PNGs for archival and documentation; interactive HTML plots for the exploration frontend (hover for values, zoom, pan, toggle traces). Both produced from the same underlying data.
+
+**SQLite -- future consideration.** A compiled single-file database assembling all Parquet tables and JSON profiles for fast indexed querying by the frontend. Deferred; noted here for architectural awareness.
+
+## 2.5 Configuration Schema
+
+Pipeline behavior is controlled by a YAML configuration file. The schema is not yet finalized but will include at minimum:
+
+- Paths: input abundance matrix, metadata file, output directory
+- ID column name and ID type (UniProt accession, gene symbol, Ensembl ID)
+- Metadata: grouping variable, contrasts to test, covariates
+- QC parameters: missingness thresholds, CV thresholds for flagging
+- Imputation: method selection, parameters
+- Differential abundance: method (DEqMS, limma), significance thresholds (adjusted p-value, fold change)
+- Enrichment: gene set libraries to test, background definition
+- Database queries: which databases to query, API keys where required, PubMed search terms of interest
+- Pipeline: number of threads, Singularity image path, SLURM profile
+
+**[FOLLOW-UP NEEDED]** Finalize YAML schema during Phase 1 implementation.
+
+## 2.6 ID Mapping Strategy
+
+Protein ID mapping is handled centrally at the start of each pipeline run using UniProt's ID mapping API. The pipeline queries UniProt once in bulk for all protein IDs in the input dataset and caches the resulting mapping table locally. This mapping table is then used by all downstream modules that need to translate between ID types (e.g., UniProt accessions for database queries, gene symbols for enrichment analysis, Entrez IDs where needed).
+
+**Rationale:** Centralizing ID mapping avoids redundant lookups across modules and ensures consistency (the same protein always maps to the same gene symbol everywhere in the results). The UniProt API supports bulk mapping, making a single upfront call efficient. Caching the mapping locally means the pipeline is not dependent on network access after the initial mapping step.
+
+**Known challenges:** Many-to-many mappings (one UniProt accession mapping to multiple gene symbols, or vice versa) will need explicit handling rules. Deprecated or unrecognized IDs will be flagged rather than silently dropped.
+
+---
+
+# 3. Module Specifications
+
+Each subsection follows a consistent structure: purpose, inputs, outputs, tools/libraries, design decisions and rationale, known limitations, and current status.
+
+## 3.1 QC/EDA Module
+
+**Purpose:** Assess data quality, identify problematic samples or proteins, characterize distributional properties, and produce diagnostic visualizations that inform downstream analytical decisions.
+
+**Inputs:** Standardized abundance matrix (Parquet), metadata file.
+
+**Outputs:** QC report (HTML with interactive plots), QC summary table (Parquet + CSV), flagged samples list, flagged proteins list, PCA coordinates, correlation matrix.
+
+**Planned analyses:**
+
+- **Missingness analysis:** Per-protein and per-sample missing value counts and percentages. Distinguish between structured missingness (patterned by condition, which may be biologically meaningful) and sporadic missingness (data quality issue). This distinction matters because proteomics missing data is overwhelmingly "missing not at random" (MNAR) -- low-abundance proteins drop below the detection limit. A protein absent in treatment but present in control is potentially interesting biology, not a QC failure.
+- **Replicate variability:** Coefficient of variation (CV) distributions within groups. Flag proteins with unusually high CVs.
+- **Sample-level QC:** Sample-to-sample correlation heatmap, PCA to check for clustering by condition, batch, or unexpected groupings. Flag samples that are clear outliers.
+- **Distributional assessment:** Distribution shapes of abundance values, assessment of whether transformation (log2, etc.) is needed, comparison across samples/conditions.
+- **Imputation diagnostics:** If imputation is applied, provide sensitivity analysis showing how results change with different imputation methods.
+
+**Tools/Libraries:** pandas, numpy, scipy, matplotlib, seaborn, plotly, scikit-learn (for PCA).
+
+**Design decisions:**
+
+- Imputation is performed with multiple method support (MinProb, KNN, left-censored/Perseus-style). The default method is configurable. Sensitivity of downstream results to imputation method choice is reported as a diagnostic, since imputation method can materially affect differential abundance results, especially for MNAR data.
+
+**Known limitations:** Automated outlier detection is advisory, not prescriptive -- the tool flags potential issues but does not automatically exclude samples or proteins without user confirmation.
+
+**Status:** Not yet implemented.
+
+## 3.2 Statistical Analysis Module
+
+**Purpose:** Identify differentially abundant proteins between conditions and provide robust statistical measures of significance and effect size.
+
+**Inputs:** Normalized, imputed abundance matrix (Parquet), metadata file, contrast specification from config.
+
+**Outputs:** Differential abundance results table (Parquet + CSV) with columns for protein ID, log2 fold change, p-value, adjusted p-value, and method-specific statistics. Volcano plots, MA plots (PNG + interactive HTML).
+
+**Planned methods:**
+
+- **DEqMS** (preferred default): Specifically designed for MS proteomics data. Accounts for the relationship between the number of peptides/PSMs quantified for a protein and the variance of that protein's abundance estimate. This is a key advantage over generic methods like a standard t-test or even limma, because in proteomics, proteins quantified by more peptides have more reliable abundance estimates.
+- **limma** (alternative): The established standard for differential expression analysis, originally from microarray analysis. Well-suited to proteomics data when peptide count information is not available.
+- Both accessed via rpy2 (Python-to-R bridge) or subprocess calls to R scripts within the Snakemake pipeline.
+
+**Multiple testing correction:** Benjamini-Hochberg FDR correction as default. Significance thresholds configurable in the YAML config.
+
+**Design decisions:**
+
+- DEqMS chosen over limma as the default because it explicitly models the peptide count-variance relationship, which is specific to MS proteomics. Limma is retained as an alternative for cases where peptide count information is unavailable.
+- Both methods use the empirical Bayes moderated t-statistic framework, which borrows information across proteins to stabilize variance estimates -- particularly important with small sample sizes (tens of samples).
+
+**Known limitations:** Statistical power is constrained by sample size (tens of samples). The tool cannot detect small effect sizes reliably. This is inherent to the data, not the method. Power limitations should be noted in result interpretation.
+
+**Status:** Not yet implemented.
+
+## 3.3 Enrichment Analysis Module
+
+**Purpose:** Identify biological pathways, processes, and functional categories that are overrepresented among differentially abundant proteins (ORA) or show coordinated changes across the ranked protein list (GSEA).
+
+**Inputs:** Differential abundance results table (for both ORA and GSEA). For ORA: a list of significant proteins and a background/universe set. For GSEA: a ranked list of all proteins (typically by signed log10 p-value or log2 fold change).
+
+**Outputs:** Enrichment results tables (Parquet + CSV), enrichment dot plots, GSEA running enrichment score plots (PNG + interactive HTML).
+
+**Tools/Libraries:** gseapy (Python wrapper for GSEA algorithm, also supports ORA).
+
+**Gene set libraries:** Default set includes GO Biological Process, GO Molecular Function, GO Cellular Component, KEGG pathways, and Reactome pathways. Additional libraries configurable via YAML.
+
+**Design decisions:**
+
+- Both ORA and GSEA are run because they answer complementary questions. ORA asks "are significant proteins enriched for a particular function?" but depends on an arbitrary significance cutoff. GSEA uses the full ranked list and can detect coordinated changes in a pathway even if no individual protein crosses the significance threshold.
+- Background/universe for ORA: by default, all proteins detected in the dataset (not the entire proteome), since the set of detectable proteins is already biased by the experimental method.
+
+**Known limitations:** Enrichment results are sensitive to the background set definition and to the quality of gene set annotations. GO annotations are biased toward well-studied organisms and proteins. Results should be interpreted as hypothesis-generating, not confirmatory.
+
+**Status:** Not yet implemented.
+
+## 3.4 Interactive Frontend
+
+**Purpose:** Provide an interactive environment for exploring pipeline results, including a sortable/filterable protein database, individual protein profile pages, and a biological process view.
+
+**Technology:** Not yet finalized. Candidates under evaluation:
+
+- **Shiny for Python:** Closest equivalent to R Shiny, which is familiar in the bioinformatics community. Still maturing; smaller extension ecosystem compared to R Shiny.
+- **Streamlit:** Simple, rapid prototyping. Less flexible for complex multi-page layouts.
+- **Panel (HoloViz):** More flexible than Streamlit, good for dashboards.
+- **Static HTML + JavaScript:** Self-contained output, no server needed. Most portable but less interactive. Potential use of AG Grid or DataTables.js for the sortable table.
+
+**Key design features:**
+
+- **Protein database view:** Sortable, filterable table of all proteins with key metrics (fold change, adjusted p-value, disease interaction score, druggability, literature co-occurrence score). Users can sort by any column to find proteins matching their criteria of interest.
+- **Protein profile pages:** Per-protein comprehensive view consolidating abundance statistics, QC flags, differential abundance results, disease associations, druggability annotations, literature hits, functional annotations, and any available structural information. The "baseball card" concept.
+- **Biological process view:** Term-level profiles (GO/KEGG) aggregating the proteins annotated to each term, their collective behavior in the dataset, and enrichment statistics. Allows searching by pathway/process rather than by protein.
+
+**Deployment considerations:** The pipeline runs on a SLURM cluster; the frontend should not require cluster resources. Current architectural plan: the pipeline produces the structured results directory, and the frontend reads it. The frontend can run on a laptop, a lab server, or be containerized. This decoupling means the frontend is a "viewer" that does no computation.
+
+**[FOLLOW-UP NEEDED]** Select frontend technology after Phase 2, when the results data structure is more concrete and the interactive requirements are better understood.
+
+**Status:** Not yet implemented. Targeted for Phase 4.
+
+---
+
+# 4. Database Integration Layer
+
+This section documents each external database queried by ProSIFT, including what information is extracted, API details, rate limiting considerations, and data freshness strategy.
+
+## 4.1 General Architecture
+
+The database integration layer queries multiple external databases for each protein of interest and assembles the results into a per-protein JSON profile. Two strategies are employed depending on the database:
+
+- **Bulk local download:** For databases with stable, periodic releases (UniProt, CTD, DGIdb), periodic bulk downloads are stored locally and queried without network access. Faster, more reliable, not subject to rate limits.
+- **API queries:** For databases where recency matters (PubMed E-utilities) or where bulk download is impractical or restricted (DisGeNET), per-protein API calls are used with caching and rate limiting.
+
+**Caching strategy:** All API responses are cached locally (keyed by protein ID and query parameters) to avoid redundant network requests across pipeline runs. Cache invalidation is time-based (configurable; default 30 days).
+
+**Error handling:** API failures (timeouts, rate limit hits, server errors) are logged and retried with exponential backoff. Proteins for which a database query fails are flagged in the output rather than causing the pipeline to halt.
+
+## 4.2 UniProt
+
+**What it provides:** General protein information -- gene name, protein name, function description, subcellular location, tissue expression, GO annotations, pathway membership, protein-protein interactions, disease associations, and cross-references to other databases.
+
+**Access method:** UniProt REST API for initial bulk ID mapping; UniProt bulk download (Swiss-Prot XML or flat files) for annotation retrieval.
+
+**Rate limits:** UniProt's REST API is generous but should not be abused. Bulk download is preferred for annotation retrieval.
+
+**Data freshness:** UniProt releases are updated approximately every 8 weeks. Local copies should be updated periodically.
+
+**Priority:** High -- this is the foundational annotation source. Implemented first.
+
+## 4.3 PubMed E-utilities
+
+**What it provides:** Literature co-occurrence counts. For each protein, the pipeline queries PubMed for the co-occurrence of the protein name/gene symbol with user-defined terms of interest (e.g., protein + "stroke," protein + "ketamine" + "TBI"). This provides a rough measure of how well-studied a protein is in the context of the user's research area.
+
+**Access method:** NCBI E-utilities API (ESearch endpoint). Requires an API key for higher rate limits.
+
+**Rate limits:** 3 requests/second without API key; 10 requests/second with API key. For thousands of proteins and multiple search terms, this is a bottleneck. Parallelization within rate limits and caching are essential.
+
+**Data freshness:** High value in recency -- literature is continuously published. API queries are the correct approach here (not bulk download).
+
+**Important caveat -- normalization:** Raw co-occurrence counts are heavily biased by how well-studied a protein is overall. TP53 will co-occur with almost any disease term simply because it has ~100,000 publications. Normalization is required. Options under consideration:
+
+- Normalize by total publication count for that protein (co-occurrence count / total protein publications)
+- Pointwise mutual information (PMI): measures whether the co-occurrence is higher than expected by chance given the individual frequencies of the protein and the search term
+- Both metrics may be reported to give users different perspectives
+
+**[FOLLOW-UP NEEDED]** Select and validate a normalization approach for PubMed co-occurrence scores.
+
+**Priority:** High -- this provides unique value that no other database offers in an automated way.
+
+## 4.4 DisGeNET
+
+**What it provides:** Gene-disease associations with association scores. Useful for identifying proteins with known links to diseases of interest.
+
+**Access method:** DisGeNET REST API. Requires registration for full access; the public API has restricted query limits.
+
+**Rate limits:** The public API is quite restricted. Full academic access requires registration and an API key.
+
+**Data freshness:** DisGeNET integrates data from multiple sources and is updated periodically. Local caching with periodic refresh is appropriate.
+
+**Licensing note:** DisGeNET has specific licensing terms for academic and commercial use. Terms should be reviewed before any distribution of the tool.
+
+**Priority:** High.
+
+## 4.5 DGIdb (Drug Gene Interaction Database)
+
+**What it provides:** Druggability annotations -- whether a protein is a known drug target, what drugs interact with it, and interaction types. Useful for identifying proteins that could be therapeutically actionable.
+
+**Access method:** DGIdb API or bulk data download.
+
+**Rate limits:** Generally permissive.
+
+**Data freshness:** Updated periodically. Bulk download is appropriate.
+
+**Priority:** High.
+
+## 4.6 CTD (Comparative Toxicogenomics Database)
+
+**What it provides:** Chemical-gene interactions and chemical-disease associations. Useful for identifying environmental or pharmacological exposures associated with proteins of interest.
+
+**Access method:** Bulk data download (CTD provides downloadable datasets).
+
+**Rate limits:** Not applicable for bulk download.
+
+**Data freshness:** CTD is updated monthly. Periodic re-download is appropriate.
+
+**Priority:** Medium -- useful but less commonly needed than disease and druggability annotations.
+
+## 4.7 Protein Profile Data Structure
+
+Each protein's profile is stored as a JSON object with the following top-level structure (preliminary; will be refined during implementation):
+
+- **identifiers:** UniProt accession, gene symbol, Entrez ID, protein name, organism
+- **dataset_statistics:** abundance values per sample, group means, fold change, p-value, adjusted p-value, QC flags, imputation status
+- **functional_annotation:** GO terms (BP, MF, CC), KEGG pathways, Reactome pathways
+- **disease_associations:** DisGeNET entries (disease name, association score, source)
+- **druggability:** DGIdb entries (drug name, interaction type, source)
+- **chemical_interactions:** CTD entries (chemical name, interaction type)
+- **literature:** PubMed co-occurrence results (search term, raw count, normalized score)
+- **uniprot_annotation:** function description, subcellular location, tissue expression, cross-references
+- **enrichment_membership:** which enriched GO/KEGG terms include this protein, and the enrichment statistics for those terms
+
+---
+
+# 5. Infrastructure and Deployment
+
+## 5.1 Cluster Configuration
+
+ProSIFT is designed to run on an HPC cluster managed by SLURM. Snakemake's SLURM profile handles job submission, resource allocation, and dependency management.
+
+**Snakemake SLURM integration:** Each Snakemake rule specifies resource requirements (CPUs, memory, walltime). The SLURM profile translates these into sbatch directives. Snakemake monitors job status and handles retries for failed jobs.
+
+*[Specific SLURM profile configuration and cluster details to be documented once implementation begins.]*
+
+## 5.2 Singularity/Apptainer Container
+
+**Purpose:** Package the complete software environment (OS, Python, R, all dependencies) into a single portable, reproducible image file (.sif). Ensures the pipeline runs identically regardless of the host system's software configuration.
+
+**Why Singularity, not Docker:** Docker requires root privileges, which are not available (and generally not permitted for security reasons) on shared HPC clusters. Singularity (now Apptainer) runs without root, integrates with SLURM and shared filesystems, and respects the cluster's user permission model.
+
+**How it works in practice:** A Singularity definition file specifies a base OS image (e.g., Ubuntu 22.04), installs Python 3.11+, R, and all required packages. This is built into a .sif file (typically done on a machine with root access or via a remote build service). The .sif file is copied to the cluster and referenced in Snakemake rules via the `singularity:` directive. Snakemake automatically handles bind-mounting data directories and executing inside the container.
+
+**Key detail:** Singularity containers are read-only at runtime. The pipeline's code and libraries inside the container cannot be modified during execution. Data is read from and written to the host filesystem via bind mounts. This is a feature: the container provides a stable, immutable environment, and data lives outside it.
+
+**Build workflow:**
+
+1. Develop and test locally or in a Conda environment
+2. Write Singularity definition file capturing all dependencies with pinned versions
+3. Build .sif image (on a machine with root access, or via Sylabs Cloud remote build)
+4. Test pipeline inside container
+5. Version the .sif file alongside the codebase
+
+**[FOLLOW-UP NEEDED]** Write the Singularity definition file during Phase 1 once the dependency list is established.
+
+## 5.3 Conda Environment
+
+During development (before the Singularity container is finalized), a Conda environment specification (environment.yml) manages dependencies. This also serves as the source of truth for what goes into the Singularity image.
+
+## 5.4 Directory Structure
+
+*[To be defined during Phase 1 implementation. Will include: source code layout, config file location, input/output directory conventions, results directory structure, and the Singularity image location.]*
+
+---
+
+# 6. Development Roadmap
+
+## 6.1 Phase 1 -- Core Pipeline Skeleton and QC Module
+
+**Goal:** Establish the Snakemake workflow structure, input format specification, ID mapping layer, and QC/EDA module. Produce a working pipeline that takes an abundance matrix + metadata, runs QC diagnostics, and produces a QC report.
+
+**Deliverables:**
+
+- Project directory structure and repository initialization
+- YAML configuration schema (initial version)
+- Input validation rules (Snakemake rule)
+- UniProt ID mapping module (bulk API call + local cache)
+- QC/EDA module with: missingness analysis, CV distributions, PCA, sample correlation heatmap, distributional assessment
+- QC report generation (HTML with interactive plots)
+- Conda environment.yml
+- Singularity definition file (initial version)
+- Snakemake SLURM profile configuration
+
+**Key decisions to finalize during this phase:**
+
+- Exact YAML config schema
+- Directory structure conventions
+- Snakemake checkpoint strategy for dynamic DAG sections
+
+**Status:** Not yet started.
+
+## 6.2 Phase 2 -- Statistical Analysis
+
+**Goal:** Add differential abundance analysis, imputation, and ORA/GSEA.
+
+**Deliverables:**
+
+- Imputation module (multiple methods: MinProb, KNN, left-censored)
+- Imputation sensitivity diagnostic
+- Differential abundance module (DEqMS via rpy2, with limma as alternative)
+- Volcano plots, MA plots
+- ORA and GSEA via gseapy
+- Enrichment result visualization
+
+**At end of phase:** A pipeline that goes from abundance matrix to differentially abundant proteins with enrichment results. Useful as a standalone analytical tool.
+
+**Status:** Not yet started.
+
+## 6.3 Phase 3 -- Database Integration Layer
+
+**Goal:** Build the multi-database querying infrastructure and protein profile assembly.
+
+**Deliverables:**
+
+- Caching and rate-limiting framework
+- UniProt annotation retrieval module
+- PubMed E-utilities query module with normalization
+- DisGeNET query module
+- DGIdb query module
+- CTD query module
+- Protein profile JSON assembly
+- Biological process (GO/KEGG term) profile assembly
+
+**Risks:** This phase carries the most technical risk due to external API dependencies, rate limiting, and the complexity of integrating heterogeneous data sources. UniProt and PubMed should be implemented first (most stable API, highest unique value respectively).
+
+**Status:** Not yet started.
+
+## 6.4 Phase 4 -- Interactive Frontend
+
+**Goal:** Build the exploration interface.
+
+**Deliverables:**
+
+- Protein database view (sortable/filterable table)
+- Protein profile pages
+- Biological process view
+- Frontend technology selection and implementation
+
+**Status:** Not yet started.
+
+## 6.5 Deferred / Future Considerations
+
+The following ideas have been discussed and noted but are explicitly not committed to any phase. They are recorded here so they are not lost.
+
+- **Ingestion modules** for MaxQuant, DIA-NN, FragPipe output formats (Phase 2+)
+- **SQLite compiled database** as backend for frontend queries (Phase 4+)
+- **AWS deployment** for hosted access if the tool gains community adoption
+- **AlphaFold integration** for structure thumbnails in protein profiles
+- **Reactome** pathway-level integration
+- **BioGRID** protein-protein interaction data
+- **Multi-organism support** beyond human
+
+---
+
+# 7. Testing and Validation
+
+*[To be populated as the tool is developed. Will include:]*
+
+- Test datasets: at least one well-characterized dataset where expected results are known (e.g., a published proteomics dataset with validated differentially abundant proteins)
+- Per-module validation approach
+- Benchmarking results
+- Known issues and bugs
+
+**[FOLLOW-UP NEEDED]** Identify a suitable benchmark dataset for validation during Phase 1.
+
+---
+
+# 8. Known Limitations and Caveats
+
+## 8.1 Tool-Level Limitations
+
+- **Input scope:** ProSIFT currently accepts only protein-level abundance matrices. It cannot assess upstream data quality issues that may be visible at the peptide or PSM level but are hidden after protein rollup.
+- **Organism assumption:** Initial implementation assumes human proteomics data. ID mapping, gene set libraries, and database queries are configured for human proteins. Multi-organism support would require parameterizing these components.
+- **External database dependencies:** Results depend on the completeness and accuracy of external databases (UniProt, DisGeNET, DGIdb, CTD, PubMed). Well-studied proteins will have richer profiles than understudied ones, introducing an inherent bias toward known biology.
+- **Literature co-occurrence is not causation:** PubMed co-occurrence scores measure how often a protein appears in the literature alongside a term of interest. This is a measure of existing research attention, not of biological relevance. Highly studied proteins will score higher regardless of their actual importance to the user's research question.
+
+## 8.2 Statistical Limitations
+
+- **Sample size constraints:** With tens of samples, statistical power for detecting small effect sizes is limited. The empirical Bayes framework (DEqMS/limma) helps by borrowing information across proteins, but it cannot fully compensate for small sample sizes.
+- **Imputation assumptions:** All imputation methods make assumptions about the missing data mechanism. MNAR-aware methods (MinProb, left-censored) assume that missing values correspond to low-abundance proteins, which is generally but not always true in MS proteomics.
+- **Multiple testing:** With thousands of proteins tested, multiple testing correction is essential but conservative. Some truly differentially abundant proteins may not reach significance after correction.
+
+---
+
+# 9. Decision Register
+
+Significant methodological, architectural, and design decisions logged in a consistent format.
+
+### 2026-03-20 -- Input Format: Abundance Matrix + Metadata (with Future Ingestion Modules)
+
+**Decision:** ProSIFT accepts a protein-level abundance matrix plus metadata file as its primary input. Future ingestion modules will parse common search engine outputs into this format.
+
+**Rationale:** This middle-ground approach avoids the complexity of building parsers for every search engine output format (MaxQuant, DIA-NN, FragPipe, Spectronaut, etc.) in Phase 1, while still allowing integrated support for common formats later. It also makes the tool accessible to users regardless of their upstream processing pipeline.
+
+**Alternatives considered:** (1) Accept raw MS spectra -- rejected as massive scope expansion with high complexity and low value-add, since excellent tools for this step already exist. (2) Accept only a specific search engine output (e.g., MaxQuant) -- rejected as unnecessarily restrictive.
+
+**Impact:** Defines the pipeline's entry point and the input validation requirements.
+
+### 2026-03-20 -- Pipeline Orchestration: Snakemake on SLURM Cluster
+
+**Decision:** Use Snakemake as the workflow manager, targeting a SLURM-managed HPC cluster.
+
+**Rationale:** Snakemake handles dependency resolution, cluster job submission (via SLURM profiles), and selective re-execution of only changed/failed steps. It is widely used in bioinformatics, well-documented, and supports Singularity containers natively.
+
+**Alternatives considered:** Nextflow -- equally capable but the developer has more familiarity with Snakemake and the Python ecosystem.
+
+**Impact:** All computational steps are defined as Snakemake rules. Pipeline portability depends on Snakemake + Singularity.
+
+### 2026-03-20 -- Reproducibility: Singularity Containers
+
+**Decision:** Package the pipeline environment in a Singularity (Apptainer) container for reproducibility and portability.
+
+**Rationale:** Ensures the pipeline runs identically regardless of the host system. Singularity is preferred over Docker because it runs without root privileges on shared HPC clusters. A Conda environment.yml is used during development; the Singularity image is the canonical runtime for production use.
+
+**Alternatives considered:** Docker -- rejected because it requires root privileges not available on shared clusters. Conda-only -- rejected because Conda environments can drift over time and are less reliably reproducible than containers.
+
+**Impact:** Adds an initial setup step (building the .sif image) but prevents "works on my machine" problems.
+
+### 2026-03-20 -- Cluster vs. AWS: Cluster-First
+
+**Decision:** Target the SLURM cluster for all computation. AWS deployment is deferred.
+
+**Rationale:** The computational demands of ProSIFT (differential abundance on tens of samples, thousands of proteins; API queries) are modest by HPC standards. The most intensive part (database querying) is I/O-bound, not CPU-bound, so elastic cloud compute provides no advantage. AWS would introduce cloud infrastructure management overhead (IAM, S3, cost monitoring, security) that is not justified for a solo developer building a lab tool. The Snakemake + Singularity architecture does not lock out cloud deployment later if needed.
+
+**Alternatives considered:** AWS from the start -- rejected due to unnecessary complexity for current scale and development capacity.
+
+**Impact:** No cloud infrastructure to manage. Pipeline deployment is simpler. Cloud migration remains possible as a future option.
+
+### 2026-03-20 -- File Formats: Parquet/CSV/JSON Strategy
+
+**Decision:** Use Parquet for internal pipeline intermediates, CSV for user-facing exports, JSON for hierarchical annotation data, YAML for configuration, PNG + HTML for visualizations.
+
+**Rationale:** Parquet provides type-safe, compressed, fast columnar storage for analytical workloads. CSV ensures accessibility for users who want to inspect results in Excel. JSON naturally represents the hierarchical protein profile data structure. See Section 2.4 for detailed rationale.
+
+**Alternatives considered:** CSV-only -- rejected due to type-guessing issues, lack of compression, and slower read performance. Feather/Arrow IPC -- considered for its near-zero-copy read speed, but Parquet's compression advantage was preferred for a pipeline that produces many intermediate files.
+
+**Impact:** Requires pyarrow as a dependency. Users who want to inspect intermediate files need pandas or DuckDB rather than a text editor.
+
+### 2026-03-20 -- ID Mapping: UniProt Bulk API + Local Cache
+
+**Decision:** Map all protein IDs at the start of each pipeline run using UniProt's ID mapping API in bulk, then cache the mapping locally for use by all downstream modules.
+
+**Rationale:** Centralizes ID mapping, ensures consistency across modules, and avoids redundant API calls. UniProt's API supports bulk mapping efficiently.
+
+**Alternatives considered:** Per-module ID mapping -- rejected because it would lead to inconsistencies and redundant network calls. Local mapping table from biomaRt -- considered as an alternative source but UniProt was preferred as the authoritative protein database.
+
+**Impact:** All modules use the same cached mapping table. Pipeline requires network access at the start of a run (for the UniProt API call) but is self-contained after that for ID mapping purposes.
+
+### 2026-03-20 -- Project Name: ProSIFT (Working Name)
+
+**Decision:** Use "ProSIFT" (PROtein Statistical Integration and Filtering Tool) as the working project name.
+
+**Rationale:** Name collision search (2026-03-20) confirmed no existing bioinformatics tool with this name. The name is intuitive (sifting through proteins), the acronym maps to the tool's function, it is short enough for command-line use, and it is distinctive enough to be searchable. Multiple other candidate names were evaluated and rejected due to collisions with existing tools (ProteoForge, COMPASS, PRISM, MIDAS) or confusingly similar names (ProteoScope/ProteoScape, ProteoScout/ProteomeScout, ProVISTA/ProVision/ProViz).
+
+**Alternatives considered:** ProteoScope, ProteoScout, ProteoForge, PRISM, PROPHET, COMPASS, SPARK, MIDAS, PORTICO, CAIRN, QUARRY, SENTINEL, ProDIGY, ProVISTA, ProCARTA, ProMINE, ProTRAK, APROPOS, PRONTO -- all rejected due to existing name collisions or near-collisions documented in the search results.
+
+**Impact:** All file paths, module names, and documentation use "ProSIFT." Name may be changed before publication.
+
+---
+
+# 10. Development Log
+
+Chronological record of substantive development work.
+
+### 2026-03-20 -- Project Inception and Planning
+
+**Work performed:** Initial project concept discussion and architectural planning. Covered: input format strategy, pipeline architecture (three-layer model), QC/EDA module design, statistical methods selection (DEqMS, limma), enrichment analysis approach (gseapy), database integration layer design (UniProt, PubMed, DisGeNET, DGIdb, CTD), interactive frontend concept (protein profiles, biological process view, sortable database), infrastructure decisions (Snakemake, SLURM, Singularity), file format strategy (Parquet/CSV/JSON), ID mapping strategy (UniProt bulk API), cluster vs. AWS analysis (cluster-first), and development phasing (4 phases).
+
+**Outputs:** This project documentation file (ProSIFT_Project_Documentation.Rmd).
+
+**Key findings:** Project scope is ambitious for a solo developer. The four-phase plan is designed so each phase produces something independently useful, reducing risk of an "all or nothing" outcome. Phase 3 (database integration) carries the most technical risk due to external API dependencies.
+
+**Decisions made:** See Decision Register entries dated 2026-03-20.
+
+**Next steps identified:**
+
+- Conduct survey of existing proteomics analysis tools (Section 1.4)
+- Identify a benchmark dataset for validation (Section 7)
+- Begin Phase 1 implementation: project directory structure, YAML config schema, input validation, ID mapping module
+- Write Singularity definition file once dependency list is established
+- Finalize PubMed co-occurrence normalization approach (Section 4.3)
+
+### 2026-03-20 -- Pipeline DAG Design
+
+**Work performed:** Designed and diagrammed the full pipeline DAG, mapping all dependency relationships between modules. Analyzed the branching structure, identified the two major fork points (post-validation and post-differential abundance), documented the Snakemake checkpoint requirement at the differential abundance step, and characterized the convergence complexity at the profile assembly step.
+
+**Outputs:** ProSIFT_pipeline_DAG.svg (standalone SVG diagram), Section 2.2 of this document updated with full DAG description and embedded figure reference.
+
+**Key findings:** The DAG has a clean main spine (validate, normalize, impute, differential abundance) with two well-defined branching points. The most architecturally significant feature is the Snakemake checkpoint at differential abundance, where the downstream DAG becomes dynamic (the database query targets depend on which proteins are significant). The profile assembly step is the most complex join, requiring inputs from four upstream branches (QC flags, differential abundance results, enrichment results, and all database query outputs). The enrichment and database query branches are fully independent and can execute in parallel.
+
+**Decisions made:** Confirmed that QC/EDA runs on pre-normalization data (to assess raw distributional properties). Confirmed that the database query branch and enrichment branch are independent and parallelizable. Documented the long-range dependency from QC flags to profile assembly.
+
+**Next steps identified:** Begin Phase 1 implementation. The DAG provides the structural blueprint for the Snakemake workflow file.
+
+---
+
+# 11. References and Resources
+
+## 11.1 Key Papers
+
+*[To be populated as the project progresses. Will include citations for:]*
+
+- DEqMS methodology
+- limma methodology
+- GSEA methodology
+- Imputation methods for proteomics (MNAR-aware approaches)
+- DisGeNET, DGIdb, CTD database publications
+
+## 11.2 Databases and Tools
+
+| Resource | URL | Purpose in ProSIFT | Access Notes |
+|---|---|---|---|
+| UniProt | https://www.uniprot.org/ | ID mapping, protein annotation | REST API + bulk download |
+| PubMed E-utilities | https://www.ncbi.nlm.nih.gov/books/NBK25501/ | Literature co-occurrence | API key recommended for higher rate limits |
+| DisGeNET | https://www.disgenet.org/ | Gene-disease associations | Registration required for full API access |
+| DGIdb | https://www.dgidb.org/ | Druggability, drug-gene interactions | API + bulk download |
+| CTD | https://ctdbase.org/ | Chemical-gene interactions | Bulk download |
+| gseapy | https://gseapy.readthedocs.io/ | ORA and GSEA | Python package |
+| Snakemake | https://snakemake.readthedocs.io/ | Pipeline orchestration | Python package |
+| Singularity/Apptainer | https://apptainer.org/ | Container runtime | Available on most HPC clusters |
+
+## 11.3 Collaborators
+
+| Role | Name | Affiliation | Contact | Contribution |
+|---|---|---|---|---|
+| Developer | Reina Hastings | | reinahastings13@gmail.com | Sole developer |
+| | | | | |
+
+*[Add collaborators, advisors, lab members, or other contributors as the project progresses.]*
+
+---
+
+# 12. Instructions for Claude
+
+This section governs how Claude should interact with this document across sessions. These rules apply whenever this document is provided as context.
+
+## 12.1 Core Editing Rules
+
+**This document is append-only for log sections.** Content in Sections 9 (Decision Register) and 10 (Development Log) is never deleted or modified except to fix factual errors. The full history of the project's development reasoning must remain intact and traceable.
+
+Living sections (Sections 1-8, 11) may be updated in place when new information refines or extends what is already there. Always date significant updates.
+
+When updating this document, Claude must preserve all existing information and details. New content should be added to the appropriate section. If a section needs revision, annotate the change with the date and reason rather than silently overwriting.
+
+## 12.2 Section-Specific Behavior
+
+**Living sections** (Sections 1-5, 7, 8, 11) may be updated in place when new information refines or extends existing content. Date significant updates.
+
+**Append-only sections** (Sections 6.1-6.5 status fields, 9, 10) receive new entries but existing entries are never modified except to fix factual errors. Decision Register and Development Log entries are permanent records.
+
+**Section 6 (Roadmap)** is a hybrid. Phase descriptions and deliverable lists are living text that can be refined. Status fields are updated as phases progress. Completed phases should not have their original scope rewritten -- instead, note what was actually delivered versus what was planned.
+
+## 12.3 What Claude Should Always Do
+
+- **Date everything.** Every log entry, decision, and significant update gets a date.
+- **Document the "why."** Never record a methodological or design choice without its rationale. If the rationale is uncertain, say so explicitly rather than omitting it.
+- **Flag uncertainty.** If Claude is not confident in a technical claim, architectural recommendation, or biological inference, it must say so clearly. Use language like "tentative," "requires validation," or "assuming X holds" rather than presenting uncertain conclusions as settled.
+- **Flag follow-ups.** If work in a session reveals something that needs future attention, note it explicitly with a **[FOLLOW-UP NEEDED]** tag so it is not lost between sessions.
+- **State limitations proactively.** When recording design decisions, include caveats and known limitations in the same entry rather than deferring them exclusively to Section 8.
+- **Maintain consistency.** If a decision recorded in Section 9 contradicts content elsewhere in the document, update the relevant sections to reflect the current state.
+
+## 12.4 What Claude Should Never Do
+
+- **Never silently overwrite content.** If something needs to change, the change and its reason must be visible.
+- **Never fabricate citations or database details.** If Claude is unsure whether an API endpoint, rate limit, or database feature is correct, it must flag the uncertainty rather than stating it as fact.
+- **Never omit caveats to make the tool sound more capable.** This document is an internal development record, not a marketing document. Honest assessment serves the developer better than clean narratives.
+- **Never assume context not present in this document.** If Claude needs information that is not here (e.g., cluster configuration details, specific dataset characteristics, API key availability), it should ask rather than guess.
+
+## 12.5 Tone and Voice
+
+This document should read as the working notebook of a careful developer-researcher. Write in a direct, precise, academic style. Avoid hedging where the evidence is clear, but be explicit about uncertainty where it exists. No filler, no fluff, no motivational framing. The goal is a record that the developer can trust as accurate and complete.
+
+## 12.6 Handling Conflicts
+
+If the user states something in conversation that contradicts what is recorded in this document, Claude should surface the contradiction rather than silently going along with either version. The document may be outdated, or the user may be misremembering -- either way, the discrepancy deserves attention.
+
+## 12.7 When This Document Is Not Provided
+
+If a session involves project-relevant work but this document was not uploaded, Claude should remind the user that updates may need to be logged here afterward. Claude should not attempt to reconstruct or update this document from memory alone.
