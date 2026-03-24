@@ -1,0 +1,31 @@
+name: prosift
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  # --- Runtime ---
+  - python=3.11
+  - openjdk=17                # Required by Nextflow
+  - nextflow
+
+  # --- Data handling ---
+  - pandas
+  - numpy
+  - pyarrow                   # Parquet support
+  - pyyaml
+
+  # --- Statistics ---
+  - scipy
+  - scikit-learn
+
+  # --- Visualization ---
+  - matplotlib
+  - seaborn
+  - plotly
+
+  # --- API queries (Phase 3) ---
+  - requests
+
+  # --- Testing ---
+  - pytest

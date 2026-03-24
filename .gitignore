@@ -1,13 +1,22 @@
 # Data (user-specific)
 data/
 results/
+CTX_synaptosome_project_data/
+prosift_inputs/
+
+# Rendered HTML
+*.html
 
 # Container images
 *.sif
 
+# Nextflow work directory and metadata
+.nextflow/
+.nextflow.log*
+work/
+
 # Cache files
 .cache/
-.snakemake/
 
 # System files
 .DS_Store

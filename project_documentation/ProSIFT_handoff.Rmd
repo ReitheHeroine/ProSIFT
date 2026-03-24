@@ -12,7 +12,7 @@ output:
 
 # ProSIFT -- Handoff File
 
-**Last Updated:** 2026-03-20
+**Last Updated:** 2026-03-23
 
 **Purpose:** Operational coordination across Claude sessions. Tracks current development state, active tasks, blockers, and environment details. Updated every session.
 
@@ -150,9 +150,9 @@ Step [X] complete.
 | Phase 3 | Database integration layer | Not started | [See Project Documentation Section 6.3] |
 | Phase 4 | Interactive frontend | Not started | [See Project Documentation Section 6.4] |
 
-**Current phase:** Not yet started.
+**Current phase:** Phase 1 (pre-pipeline: data preparation scripts)
 
-**Current focus:** --
+**Current focus:** Data preparation tooling for CTX/Synaptosome dataset
 
 ## 2.2 Module Status
 
@@ -160,14 +160,13 @@ Tracks implementation status of individual modules within and across phases. A m
 
 | Module | Phase | Status | Last Touched | Blocking Issues | Notes |
 |---|---|---|---|---|---|
-| Project structure / repo setup | 1 | Not started | -- | -- | |
-| YAML config schema | 1 | Not started | -- | -- | |
-| Input validation | 1 | Not started | -- | -- | |
+| Project structure / repo setup | 1 | Not started | -- | -- | Follow nf-core conventions |
+| nextflow.config + params.yml schema | 1 | Not started | -- | -- | Split: infrastructure vs. scientific params |
+| Input validation | 1 | Not started | -- | -- | Nextflow process |
 | UniProt ID mapping | 1 | Not started | -- | -- | |
 | QC/EDA | 1 | Not started | -- | -- | |
 | Conda environment | 1 | Not started | -- | -- | |
 | Singularity definition | 1 | Not started | -- | Dependency list needed first | |
-| Snakemake SLURM profile | 1 | Not started | -- | -- | |
 | Imputation | 2 | Not started | -- | -- | |
 | Differential abundance (DEqMS) | 2 | Not started | -- | -- | |
 | ORA / GSEA enrichment | 2 | Not started | -- | -- | |
@@ -177,15 +176,15 @@ Tracks implementation status of individual modules within and across phases. A m
 | DisGeNET queries | 3 | Not started | -- | -- | |
 | DGIdb queries | 3 | Not started | -- | -- | |
 | CTD queries | 3 | Not started | -- | -- | |
-| Protein profile assembly | 3 | Not started | -- | -- | |
-| Biological process profiles | 3 | Not started | -- | -- | |
+| SQLite results database assembly | 3 | Not started | -- | -- | Replaces JSON profiles |
+| Biological process aggregation | 3 | Not started | -- | -- | |
 | Interactive frontend | 4 | Not started | -- | Tech selection deferred | |
 
-## 2.3 Snakemake Rules Status
+## 2.3 Nextflow Process Status
 
-Tracks which Snakemake rules exist and whether they are functional. Populated as rules are implemented.
+Tracks which Nextflow processes exist and whether they are functional. Populated as processes are implemented.
 
-| Rule Name | Module | Status | Notes |
+| Process Name | Module | Status | Notes |
 |---|---|---|---|
 | -- | -- | -- | Implementation not yet started |
 
@@ -203,6 +202,24 @@ Maintained by Claude Code. Claude.ai reads these entries to understand what work
 > - [Tests run and outcomes]
 > - [Decisions made -- flag for promotion to Project Documentation Decision Register if significant]
 > - [Issues encountered or flagged]
+
+### 2026-03-23 (Claude Code) -- Session 2
+
+- Implemented three data preparation scripts:
+  - `scripts/prepare_ctx_data.py` -- CTX/Synaptosome-specific format conversion. Reads raw DIA-NN Filtered Proteins CSV (8,948 proteins x 178 columns), outputs master ProSIFT-format files: `CTX_synaptosome_abundance.csv` (protein_id + 24 abundance_ columns + 24 peptide_count_ columns), `CTX_synaptosome_metadata.csv` (24 samples with genotype/region/fraction), `CTX_synaptosome_protein_reference.csv`
+  - `scripts/generate_run_config.py` -- Interactive run definition tool. Reads master abundance + metadata files, auto-detects protein_id/abundance_/peptide_count_ columns, derives sample groups by stripping replicate suffixes, user selects pairs to compare, auto-infers group_column from metadata. Outputs `run_config.yml`
+  - `scripts/prepare_prosift_input.py` -- Reads run_config.yml + master files, splits into per-run directories with {run}_abundance.csv, {run}_metadata.csv, {run}_params.yml
+- Generated 12 pairwise runs for CTX dataset: 4 genotype (KO vs WT), 4 fraction (synap vs cyto), 4 region (HIP vs CTX)
+- All output files validated against source data (row counts, random value spot-checks, missing value preservation, metadata correctness)
+- Output location: `prosift_inputs/` with 12 run subdirectories + master files
+
+### 2026-03-23 (Claude Code)
+
+- Handoff file updated to reflect Nextflow (replacing all Snakemake references)
+- Updated module status table: nextflow.config + params.yml schema, SQLite results database assembly, Nextflow process status tracker
+- Added GitHub repository section (Section 8.3) with remote URL, workflow instructions, and commit guidelines
+- Updated .gitignore: replaced .snakemake/ with .nextflow/, .nextflow.log*, work/
+- Updated file system map to reflect current directory contents
 
 ### 2026-03-20 (Claude Code)
 
@@ -240,6 +257,9 @@ None currently.
 ## 4.3 Completed Tasks
 
 > **Entry format:** [Task name] -- [Date completed] -- [Output location / notes]
+
+- Data preparation scripts (prepare_ctx_data.py, generate_run_config.py, prepare_prosift_input.py) -- 2026-03-23 -- scripts/
+- CTX/Synaptosome 12-run input generation -- 2026-03-23 -- prosift_inputs/
 
 ---
 
@@ -281,8 +301,8 @@ This section tracks the data contracts between modules -- what each module produ
 Each entry defines what a module outputs and which downstream modules consume that output. Add entries here as modules are implemented, using the following template:
 
 > ### [Producer Module] --> [Consumer Module]
-> - **Producer:** [Snakemake rule or module name]
-> - **Consumer:** [Snakemake rule or module name]
+> - **Producer:** [Nextflow process or module name]
+> - **Consumer:** [Nextflow process or module name]
 > - **Format:** [Parquet / CSV / JSON / etc.]
 > - **Schema:** [Column names, types, and any constraints]
 > - **Notes:** [Edge cases, relevant Project Documentation references]
@@ -297,24 +317,50 @@ No data contracts defined yet. Populate as modules are implemented.
 
 ## 7.1 Directory Structure
 
-**Last updated by Claude Code:** 2026-03-20
+**Last updated by Claude Code:** 2026-03-23
 
 ```
 ProSIFT/
 │
+├── .gitignore
+├── environment.yml
 ├── project_documentation/
 │   ├── ProSIFT_project_documentation.Rmd    # Architectural reference (Project Documentation)
 │   ├── ProSIFT_handoff.Rmd                  # THIS FILE - operational coordination
-│   └── prosift_pipeline_dag.svg             # Pipeline DAG diagram
+│   ├── ProSIFT_handoff.html                 # Rendered handoff
+│   ├── prosift_pipeline_dag.svg             # Pipeline DAG diagram
+│   └── modules/
+│       └── 01_input_validation.Rmd          # Module 01 design spec
 │
-└── [project structure TBD during Phase 1 implementation]
+├── CTX_synaptosome_project_data/
+│   └── Filtered Proteins-Table 1.csv        # Raw DIA-NN output (source data, not committed)
+│
+├── scripts/
+│   ├── prepare_ctx_data.py                  # CTX-specific: raw DIA-NN -> master ProSIFT files
+│   ├── generate_run_config.py               # Interactive: master files -> run_config.yml
+│   └── prepare_prosift_input.py             # run_config.yml -> per-run input directories
+│
+├── prosift_inputs/
+│   ├── CTX_synaptosome_abundance.csv        # Master abundance (8,948 proteins x 49 cols)
+│   ├── CTX_synaptosome_metadata.csv         # Master metadata (24 samples)
+│   ├── CTX_synaptosome_protein_reference.csv # Protein reference (gene symbols, descriptions)
+│   ├── run_config.yml                       # 12 run definitions
+│   ├── CTXcyto_WT_vs_CTXcyto_KO/           # Per-run directories (12 total)
+│   │   ├── CTXcyto_WT_vs_CTXcyto_KO_abundance.csv
+│   │   ├── CTXcyto_WT_vs_CTXcyto_KO_metadata.csv
+│   │   └── CTXcyto_WT_vs_CTXcyto_KO_params.yml
+│   └── [11 more run directories...]
+│
+└── [pipeline structure TBD during Phase 1 implementation -- follow nf-core conventions]
 ```
 
 ## 7.2 Scripts Reference
 
 | Script | Module | Description | Last Updated |
 |---|---|---|---|
-| -- | -- | Implementation not yet started | -- |
+| scripts/prepare_ctx_data.py | Data prep | Converts raw DIA-NN CTX output to master ProSIFT-format files | 2026-03-23 |
+| scripts/generate_run_config.py | Data prep | Interactive tool: define pairwise runs from master files, outputs run_config.yml | 2026-03-23 |
+| scripts/prepare_prosift_input.py | Data prep | Splits master files into per-run input directories using run_config.yml | 2026-03-23 |
 
 ## 7.3 File System Update Instructions
 
@@ -324,7 +370,7 @@ When creating, moving, or deleting files:
 2. Update the "Last updated" date
 3. Add notes for new directories or significant files
 4. Update Scripts Reference table if new scripts created
-5. Check if new files need GitHub inclusion/exclusion (see Section 8.3)
+5. Check if new files need GitHub inclusion/exclusion (see Sections 8.4-8.5)
 
 ---
 
@@ -332,9 +378,60 @@ When creating, moving, or deleting files:
 
 ## 8.1 Platform
 
-[To be documented when development begins.]
+**Local machine:** macOS (development, documentation, git)
 
-## 8.2 Environment Setup
+**Cluster:** mesx.sdsu.edu (pipeline execution)
+
+- SSH access: `ssh rhastings@mesx.sdsu.edu` (key-based auth, no password)
+- Home directory: `/usr/scratch2/userdata2/rhastings`
+- Conda: miniconda3 installed at `/home2/rhastings/miniconda3`
+- Job scheduler: Torque/PBS (not SLURM -- confirmed 2026-03-23). Nextflow supports PBS natively via the `pbspro` or `pbs` executor.
+- No git, Nextflow, Singularity, or Apptainer installed on the cluster as of 2026-03-23. These will be installed via conda or other means during setup.
+
+## 8.2 Development Workflow: Local + Cluster via rsync
+
+**Decision (2026-03-23):** Code is developed and documented locally. Files are synced to the cluster via `rsync` for execution. Git is used only for intentional milestones, not for shuttling changes between machines.
+
+**Why this approach:** The cluster lacks git. Installing it is possible (via conda) but using git to sync between local and cluster would clutter the commit history with small "fix path" / "increase memory" commits during iterative debugging. rsync provides instant, low-friction syncing over SSH with no version control overhead. Git commits are reserved for meaningful checkpoints ("QC module working", "imputation implemented").
+
+**Sync local to cluster (push code for execution):**
+
+```bash
+rsync -avz --exclude='.git' --exclude='data/' --exclude='results/' \
+  --exclude='.nextflow/' --exclude='work/' --exclude='.DS_Store' \
+  "/Users/reina/Library/Mobile Documents/com~apple~CloudDocs/Blanco-Suárez Lab/ProSIFT/" \
+  rhastings@mesx.sdsu.edu:~/ProSIFT/
+```
+
+**Sync cluster to local (pull back bug fixes or results):**
+
+```bash
+# Pull back code changes (e.g., after fixing a bug on the cluster)
+rsync -avz rhastings@mesx.sdsu.edu:~/ProSIFT/workflow/ \
+  "/Users/reina/Library/Mobile Documents/com~apple~CloudDocs/Blanco-Suárez Lab/ProSIFT/workflow/"
+
+# Pull back results (when needed for local inspection)
+rsync -avz rhastings@mesx.sdsu.edu:~/ProSIFT/results/ \
+  "/Users/reina/Library/Mobile Documents/com~apple~CloudDocs/Blanco-Suárez Lab/ProSIFT/results/"
+```
+
+**What does NOT get synced to the cluster:**
+
+- `.git/` directory (git is local only)
+- `data/` and `results/` (data lives on the cluster; results are pulled back selectively)
+- `.nextflow/` and `work/` (Nextflow work directories are cluster-local)
+- Project documentation (not needed for pipeline execution)
+
+**Instructions for Claude Code sessions:**
+
+- Use `rsync` commands above to sync code to/from the cluster. Do not attempt to use git on the cluster.
+- Always sync local → cluster before asking the user to run on the cluster.
+- After debugging on the cluster, sync cluster → local to capture fixes before committing.
+- Do not sync without explicit user approval -- rsync can overwrite files in either direction.
+
+**When to graduate to git-on-cluster:** If iterative cluster debugging becomes frequent enough that rsync feels limiting (e.g., needing to track what changed on the cluster between runs), install git via conda on the cluster and switch to a `dev` branch workflow with squash merges to `main`.
+
+## 8.3 Environment Setup
 
 **Development environment:** Conda (environment.yml to be created in Phase 1)
 
@@ -351,7 +448,7 @@ conda activate prosift
 
 - Python 3.11+
 - R (for DEqMS, limma via rpy2)
-- Snakemake
+- Nextflow
 - pandas, numpy, scipy, scikit-learn
 - pyarrow (Parquet support)
 - matplotlib, seaborn, plotly
@@ -359,50 +456,58 @@ conda activate prosift
 - rpy2
 - requests (API queries)
 
-## 8.3 Repository Configuration
+## 8.4 GitHub Repository
 
-**Include in version control:**
+**Remote:** `git@github.com:ReitheHeroine/ProSIFT.git` (SSH)
+
+**Branch strategy:** `main` is the default and primary branch. Feature branches may be used as the project grows.
+
+**Common operations:**
+
+```bash
+# Check status before committing
+git status
+
+# Stage specific files (preferred over git add -A)
+git add <file1> <file2>
+
+# Commit with a descriptive message
+git commit -m "Short summary of what changed and why"
+
+# Push to remote
+git push origin main
+
+# Pull latest changes (e.g., after editing on another machine or via GitHub)
+git pull origin main
 ```
-# Code
-workflow/         # Snakemake rules and scripts
-scripts/          # Standalone utility scripts
-config/           # Default configuration files
 
-# Documentation
-project_documentation/*.Rmd
-project_documentation/*.svg
+**What gets committed:**
 
-# Environment
-environment.yml
-Singularity.def
+- All code (Nextflow workflows, scripts, modules)
+- Configuration files (nextflow.config, default params.yml)
+- Documentation (project_documentation/*.Rmd, *.svg)
+- Environment definitions (environment.yml, Singularity.def)
+- Pipeline entry point (main.nf)
 
-# Pipeline
-Snakefile
-```
+**What does NOT get committed** (handled by .gitignore):
 
-**Exclude from version control (.gitignore):**
-```
-# Data (user-specific)
-data/
-results/
+- Data files (data/, results/)
+- Container images (*.sif)
+- Nextflow work directory (.nextflow/, work/)
+- Cache files (.cache/)
+- System/IDE files (.DS_Store, .vscode/, __pycache__/)
 
-# Container images
-*.sif
+**Instructions for Claude Code sessions:**
 
-# Cache files
-.cache/
-.snakemake/
+- Do not push to remote without explicit user approval
+- Stage files by name, not with `git add -A`
+- Do not commit files that may contain sensitive data (.env, API keys, credentials)
+- When committing, write messages that describe the *why*, not just the *what*
+- Git commits are for meaningful milestones only (see Section 8.2) -- do not commit to shuttle small fixes between machines
 
-# System files
-.DS_Store
-__pycache__/
-*.pyc
-.ipynb_checkpoints/
+## 8.5 Repository Configuration (.gitignore)
 
-# IDE files
-.vscode/
-.idea/
-```
+The .gitignore file is maintained at the project root. Update it when new file types or directories need to be excluded. Current contents reflect the exclusions listed above in Section 8.4.
 
 ---
 

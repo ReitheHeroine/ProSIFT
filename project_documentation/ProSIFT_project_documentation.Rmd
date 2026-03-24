@@ -10,7 +10,7 @@ output:
     theme: default
 ---
 
-**Last Updated:** 2026-03-20
+**Last Updated:** 2026-03-23
 
 **Working Project Name:** ProSIFT (PROtein Statistical Integration and Filtering Tool)
 
@@ -51,10 +51,10 @@ The core problem ProSIFT addresses: researchers conducting discovery proteomics 
 - Differential abundance analysis (DEqMS or limma via rpy2)
 - Overrepresentation analysis (ORA) and Gene Set Enrichment Analysis (GSEA) via gseapy
 - Database integration layer (UniProt, DisGeNET, DGIdb, CTD, PubMed E-utilities)
-- Protein profile assembly (per-protein JSON combining all annotations and statistics)
+- Protein profile assembly (compiled SQLite database combining all annotations, statistics, and enrichment results)
 - Biological process view (GO/KEGG term-level profiles)
 - Interactive frontend for exploration (technology TBD; Shiny for Python under consideration)
-- Snakemake-orchestrated pipeline targeting SLURM cluster
+- Nextflow-orchestrated pipeline targeting Torque/PBS cluster
 - Singularity container for reproducibility
 
 **Explicitly out of scope (current phase):**
@@ -62,8 +62,7 @@ The core problem ProSIFT addresses: researchers conducting discovery proteomics 
 - Raw MS spectra processing (no .raw or .mzML ingestion)
 - Ingestion modules for specific search engine outputs (MaxQuant, DIA-NN, etc.) -- deferred to later phase
 - AWS/cloud deployment
-- SQLite compiled database for the frontend (deferred to future consideration)
-- Multi-organism support (initial development assumes human proteomics data)
+- Multi-organism support (initial development targets mouse proteomics data)
 
 **Future considerations (not committed, but noted for later evaluation):**
 
@@ -71,7 +70,6 @@ The core problem ProSIFT addresses: researchers conducting discovery proteomics 
 - AlphaFold structure integration
 - Reactome pathway integration
 - BioGRID protein-protein interaction data
-- SQLite database as compiled results backend for the frontend
 - AWS deployment for hosted access
 - Multi-organism support
 
@@ -89,9 +87,9 @@ The core problem ProSIFT addresses: researchers conducting discovery proteomics 
 
 ProSIFT is organized into three decoupled layers:
 
-**Layer 1 -- Snakemake Pipeline (compute layer).** Runs on the SLURM cluster. Handles all computation: ingestion, QC, normalization, imputation, statistical analysis, enrichment analysis, database queries, and profile assembly. Produces a structured results directory.
+**Layer 1 -- Nextflow Pipeline (compute layer).** Runs on the HPC cluster (Torque/PBS). Handles all computation: ingestion, QC, normalization, imputation, statistical analysis, enrichment analysis, database queries, and profile assembly. Produces a structured results directory.
 
-**Layer 2 -- Structured Results Directory (data contract).** A well-defined directory structure of Parquet, CSV, JSON, and image files that serves as the interface between the pipeline and the frontend. The format and organization of this directory constitutes the "contract" between layers 1 and 3 -- either can evolve independently as long as this contract is maintained.
+**Layer 2 -- Structured Results Directory (data contract).** A well-defined directory containing the SQLite results database, CSV exports, and visualization files that serves as the interface between the pipeline and the frontend. The format and organization of this directory constitutes the "contract" between layers 1 and 3 -- either can evolve independently as long as this contract is maintained.
 
 **Layer 3 -- Interactive Exploration Frontend (presentation layer).** Reads the results directory and provides the protein profiles, biological process view, and sortable/filterable database. Technology not yet finalized; Shiny for Python, Streamlit, Panel, or a static HTML approach are under consideration.
 
@@ -99,11 +97,11 @@ ProSIFT is organized into three decoupled layers:
 
 ## 2.2 Pipeline DAG Overview
 
-The diagram below shows the directed acyclic graph (DAG) of the ProSIFT Snakemake pipeline. Each node represents a major rule or rule group. Arrows indicate data dependencies. Color coding: teal nodes are computational/analytical steps, purple nodes are external database operations, coral is the convergence/assembly step, and gray nodes are inputs or outputs.
+The diagram below shows the directed acyclic graph (DAG) of the ProSIFT Nextflow pipeline. Each node represents a major process or process group. Arrows indicate data dependencies (channel connections). Color coding: teal nodes are computational/analytical steps, purple nodes are external database operations, coral is the convergence/assembly step, and gray nodes are inputs or outputs.
 
-![ProSIFT Pipeline DAG](ProSIFT_pipeline_DAG.svg){width=100%}
+![ProSIFT Pipeline DAG](./figures/prosift_pipeline_dag.svg){width=100%}
 
-*Figure 1. ProSIFT pipeline DAG showing the dependency structure of all major processing steps. Dashed elements indicate future components (interactive frontend) or long-range dependencies (QC flags feeding into profile assembly). The horizontal dashed line marks the Snakemake checkpoint where the significant protein list becomes available. Diagram generated 2026-03-20.*
+*Figure 1. ProSIFT pipeline DAG showing the dependency structure of all major processing steps. Dashed elements indicate future components (interactive frontend) or long-range dependencies (QC flags feeding into profile assembly). The horizontal dashed line marks the point where the differential abundance process emits a channel of significant protein IDs and downstream processes dynamically fan out. Updated 2026-03-21 to reflect Nextflow terminology and SQLite output.*
 
 ### DAG structure and dependency logic
 
@@ -118,11 +116,11 @@ Two major branching points structure the rest of the pipeline:
 - **Enrichment analysis (left branch):** ORA and GSEA run against the differential abundance results. These are independent of the database queries and can execute in parallel.
 - **Database queries (right branch):** All five external databases (UniProt, PubMed E-utilities, DisGeNET, DGIdb, CTD) are queried for the proteins of interest. Individual database queries are independent of each other and are parallelized both across databases and across proteins.
 
-**Snakemake checkpoint:** The dashed horizontal line between differential abundance and the two downstream branches marks a critical architectural feature. The list of proteins that need database querying is not known until differential abundance completes (it depends on which proteins pass the significance threshold, though the user can also configure the pipeline to query all detected proteins). This requires Snakemake's checkpoint mechanism: differential abundance is declared as a checkpoint rule, and the downstream database query rules dynamically determine their targets based on the checkpoint's output.
+**Dynamic fanout after differential abundance:** The dashed horizontal line between differential abundance and the two downstream branches marks a critical architectural feature. The list of proteins that need database querying is not known until differential abundance completes (it depends on which proteins pass the significance threshold, though the user can also configure the pipeline to query all detected proteins). In Nextflow, this is handled naturally by the dataflow model: the differential abundance process emits a channel of significant protein IDs, and the downstream database query processes consume from that channel. Each protein ID fans out to all five database query processes in parallel. This scatter-gather pattern is native to Nextflow's channel system and does not require a special checkpoint mechanism (unlike Snakemake, which would need an explicit checkpoint rule).
 
-**Convergence at profile assembly:** The profile assembly step (coral) is the most complex join in the pipeline. It requires inputs from four upstream sources: QC flags, differential abundance results, enrichment results, and all database query outputs. In Snakemake terms, this rule's input function aggregates across all these outputs to construct the per-protein JSON profiles and the biological process (GO/KEGG term) profiles.
+**Convergence at profile assembly:** The profile assembly step (coral) is the most complex join in the pipeline. It requires inputs from four upstream sources: QC flags, differential abundance results, enrichment results, and all database query outputs. In Nextflow terms, this process collects from multiple input channels, waiting for all upstream processes to complete before writing all results into the SQLite results database and generating the biological process (GO/KEGG term) aggregations.
 
-**Results directory and frontend:** The structured results directory is the terminal output of the Snakemake pipeline and serves as the data contract between the pipeline (Layer 1) and the interactive frontend (Layer 3). The frontend is shown as a dashed outline because it is a Phase 4 deliverable and is architecturally separate from the pipeline.
+**Results directory and frontend:** The structured results directory is the terminal output of the Nextflow pipeline and serves as the data contract between the pipeline (Layer 1) and the interactive frontend (Layer 3). The frontend is shown as a dashed outline because it is a Phase 4 deliverable and is architecturally separate from the pipeline. Note that Nextflow also maintains its own internal work directory for intermediate files; the structured results directory is a separate, explicitly published set of outputs intended for consumption by the frontend and by users.
 
 ## 2.3 Input Specification
 
@@ -148,43 +146,106 @@ Two major branching points structure the rest of the pipeline:
 
 ## 2.4 File Format Strategy
 
-The following file format strategy was adopted based on a consideration of performance, usability, type safety, and the needs of both the pipeline (computational) and the frontend (interactive exploration).
+The following file format strategy was adopted based on a consideration of performance, usability, type safety, queryability, and the needs of both the pipeline (computational) and the frontend (interactive exploration). Updated 2026-03-20 to replace JSON with SQLite as the primary compiled output format.
 
-**Parquet -- internal pipeline intermediates.** Used for all rectangular numerical data passing between Snakemake rules (abundance matrices, statistical results, QC metrics tables). Rationale: columnar storage enables fast analytical queries; built-in type information prevents the type-guessing problems that plague CSVs (e.g., gene name "NA" interpreted as missing, numeric gene IDs interpreted as integers); compressed by default (5-10x smaller than CSV); fast read/write with pandas and pyarrow.
+**Parquet -- internal pipeline intermediates.** Used for all rectangular numerical data passing between Nextflow processes (abundance matrices, statistical results, QC metrics tables). Rationale: columnar storage enables fast analytical queries; built-in type information prevents the type-guessing problems that plague CSVs (e.g., gene name "NA" interpreted as missing, numeric gene IDs interpreted as integers); compressed by default (5-10x smaller than CSV); fast read/write with pandas and pyarrow.
 
 **CSV -- user-facing exports.** Key results tables (differential abundance results, significant protein lists, enrichment results) are also exported as CSV for users who want to open results in Excel or import into other tools. These are "deliverables," not pipeline intermediates.
 
-**JSON -- hierarchical annotation data.** Used for protein profiles and database query results, where the data is naturally hierarchical (a protein has metadata fields, a list of disease associations each with sub-fields, literature results, abundance statistics, etc.). JSON preserves this structure natively and is readable by web frontends.
+**SQLite -- compiled results database.** The pipeline's final assembly step writes all results into a single SQLite database file. This is the primary output that the interactive frontend consumes. SQLite replaces the originally planned JSON protein profiles (see Decision Register entry dated 2026-03-20). Rationale: SQLite provides indexed, queryable access to all protein data, enabling the frontend to sort, filter, and join across tables (e.g., "all proteins with FDR < 0.05 and druggability annotation, sorted by fold change") without loading everything into memory. It is a single portable file with no server requirement. Python's sqlite3 module is part of the standard library -- no additional dependencies needed. The relational schema naturally represents the one-to-many relationships in protein annotations (one protein has many disease associations, many drug interactions, many literature hits, etc.) without the redundancy that a flat CSV would require or the loading overhead of thousands of individual JSON files. SQL is also a broadly valuable skill in industry.
 
-**YAML -- configuration and metadata.** Pipeline configuration file specifying paths, parameters, contrasts, database query settings, etc.
+**YAML/Nextflow config -- configuration.** Pipeline infrastructure configuration (executor, containers, resource limits) is handled by Nextflow's native nextflow.config file. Scientific parameters (contrasts, thresholds, database settings, organism, PubMed search terms) are specified in a separate params file (YAML or JSON) passed via Nextflow's -params-file flag. This separation keeps infrastructure concerns distinct from scientific concerns.
 
 **PNG + interactive HTML (Plotly) -- visualizations.** Static PNGs for archival and documentation; interactive HTML plots for the exploration frontend (hover for values, zoom, pan, toggle traces). Both produced from the same underlying data.
 
-**SQLite -- future consideration.** A compiled single-file database assembling all Parquet tables and JSON profiles for fast indexed querying by the frontend. Deferred; noted here for architectural awareness.
+**JSON -- limited role.** JSON is retained for API response caching (storing raw database query responses during pipeline execution) and for the params file if YAML is not preferred. It is no longer the format for protein profiles or the frontend's data source.
 
 ## 2.5 Configuration Schema
 
-Pipeline behavior is controlled by a YAML configuration file. The schema is not yet finalized but will include at minimum:
+*Updated 2026-03-20 to reflect Nextflow's dual configuration model.*
 
-- Paths: input abundance matrix, metadata file, output directory
-- ID column name and ID type (UniProt accession, gene symbol, Ensembl ID)
-- Metadata: grouping variable, contrasts to test, covariates
-- QC parameters: missingness thresholds, CV thresholds for flagging
-- Imputation: method selection, parameters
-- Differential abundance: method (DEqMS, limma), significance thresholds (adjusted p-value, fold change)
-- Enrichment: gene set libraries to test, background definition
-- Database queries: which databases to query, API keys where required, PubMed search terms of interest
-- Pipeline: number of threads, Singularity image path, SLURM profile
+Pipeline configuration is split into two files, separating infrastructure concerns from scientific parameters:
 
-**[FOLLOW-UP NEEDED]** Finalize YAML schema during Phase 1 implementation.
+**nextflow.config -- infrastructure configuration.** Managed by Nextflow's native configuration system. Handles:
+
+- Executor settings (PBS/Torque queue, local, or cloud)
+- Container directive (Singularity image path)
+- Resource defaults per process (CPUs, memory, time limits)
+- Retry and error handling strategies
+- Work directory location
+- Profiles for different execution environments (e.g., a "cluster" profile and a "local" profile)
+
+This file follows nf-core conventions where practical, making the pipeline recognizable to the Nextflow community.
+
+**params.yml -- scientific parameters.** A YAML file passed to Nextflow via the `-params-file` flag. Contains all parameters that control what analysis is performed and how. The schema is not yet finalized but will include at minimum:
+
+- Project: name, organism (mouse/human), description
+- Input: paths to abundance matrix and metadata file, file format, protein ID column name, protein ID type, abundance data state (raw/log2/normalized)
+- Experimental design: group column, contrasts to test, covariates, batch column
+- QC: missingness thresholds, CV thresholds, minimum samples per group, outlier detection settings
+- Normalization: method (median/quantile/vsn/none), log transformation toggle
+- Imputation: method (minprob/knn/left_censored/none), method-specific parameters, sensitivity analysis toggle
+- Differential abundance: method (deqms/limma), FDR threshold, fold change threshold, peptide count column
+- Enrichment: ORA/GSEA toggles, gene set libraries, background definition
+- Database queries: which databases to enable, API keys, PubMed search terms of interest, cache lifetime
+- Output: results directory path
+
+**[FOLLOW-UP NEEDED]** Finalize exact params.yml schema during Phase 1 implementation. Draft a nextflow.config with PBS executor profile.
 
 ## 2.6 ID Mapping Strategy
 
-Protein ID mapping is handled centrally at the start of each pipeline run using UniProt's ID mapping API. The pipeline queries UniProt once in bulk for all protein IDs in the input dataset and caches the resulting mapping table locally. This mapping table is then used by all downstream modules that need to translate between ID types (e.g., UniProt accessions for database queries, gene symbols for enrichment analysis, Entrez IDs where needed).
+*Updated 2026-03-20 with expanded details on many-to-many handling, ortholog mapping, and mapping table schema.*
 
-**Rationale:** Centralizing ID mapping avoids redundant lookups across modules and ensures consistency (the same protein always maps to the same gene symbol everywhere in the results). The UniProt API supports bulk mapping, making a single upfront call efficient. Caching the mapping locally means the pipeline is not dependent on network access after the initial mapping step.
+Protein ID mapping is handled centrally at the start of each pipeline run using UniProt's ID mapping API. The pipeline queries UniProt once in bulk for all protein IDs in the input dataset and caches the resulting mapping table locally. This mapping table is then used by every downstream module that needs to translate between ID types (e.g., UniProt accessions for database queries, gene symbols for enrichment analysis, Entrez IDs where needed).
 
-**Known challenges:** Many-to-many mappings (one UniProt accession mapping to multiple gene symbols, or vice versa) will need explicit handling rules. Deprecated or unrecognized IDs will be flagged rather than silently dropped.
+**Why centralized mapping matters:** ID mapping is one of the most common sources of silent data loss in proteomics pipelines. Proteins can be identified by many different naming systems (UniProt accessions, gene symbols, Entrez IDs, Ensembl IDs), and none of them map cleanly to each other. Gene symbols are organism-specific (mouse Tp53 vs. human TP53), change over time, and can be ambiguous. If each module independently resolves IDs using different methods or resources, inconsistencies arise: a protein's QC flags might not correctly associate with its enrichment results in the final profile. Centralizing the mapping produces a single source of truth used everywhere.
+
+**Why UniProt as the mapping authority:** UniProt is the canonical protein database and maintains cross-references to essentially every other biological identifier system (Entrez, Ensembl, KEGG, PDB, Reactome, etc.). Its ID mapping API accepts bulk queries (thousands of IDs in one request) and returns mappings to any supported target database. For a proteomics pipeline where the input IDs are likely UniProt accessions or gene symbols, UniProt is the most natural authority.
+
+**Alternatives considered:** biomaRt (Ensembl-centric, less natural for protein-level data), local mapping files from NCBI/UniProt (large files, staleness risk), g:Profiler (web service dependency), and manual mapping tables (don't scale). UniProt's bulk API was preferred for its directness, currency, and authority for protein data.
+
+### Many-to-many mapping handling
+
+ID mapping is not always one-to-one. Explicit handling rules are needed for each edge case:
+
+**One gene symbol, multiple UniProt accessions (isoform collapse):** A single gene can produce multiple protein isoforms (splice variants), each with its own UniProt accession. When the input contains isoform-level IDs, the mapping to gene symbol is many-to-one. The pipeline maps all isoforms to their canonical UniProt entry and flags these cases. Downstream modules that operate at the gene level (enrichment analysis, database queries) use the canonical entry. Isoform-level abundance data is retained for QC and differential abundance analysis.
+
+**One UniProt accession, multiple gene symbols:** This can occur when a protein is known by different names or when entries have been merged. The pipeline uses the primary (recommended) gene symbol from UniProt and records alternatives in the mapping table as synonyms.
+
+**Unmapped IDs:** Input IDs that cannot be mapped (obsolete accessions, contaminant proteins, non-standard identifiers) are not silently dropped. They are logged, included in the QC report as unmapped, and carried through the pipeline with empty annotations. The user sees which proteins could not be mapped and can investigate.
+
+### Ortholog mapping (mouse to human)
+
+For mouse proteomics data queried against human-centric databases (DisGeNET, PubMed human literature), a second layer of ID mapping is required:
+
+- **Layer 1:** Input protein IDs (mouse UniProt accessions) to mouse gene symbols and other mouse IDs. Source: UniProt ID mapping API.
+- **Layer 2:** Mouse gene symbols to human ortholog gene symbols. Source: Ensembl BioMart ortholog tables (preferred for currency and comprehensiveness) or JAX MGI (authoritative for mouse genetics). HomoloGene was considered but has not been updated since 2014.
+
+The ortholog mapping introduces genuine biological uncertainty. Not all protein functions are conserved between mouse and human orthologs. However, since ProSIFT's primary use case is identifying candidates for human therapeutics, users understand that annotations from human-centric databases (DGIdb, DisGeNET) are about the human ortholog. Rather than flagging every annotation as ortholog-inferred, ortholog status is tracked at the protein level: the `proteins` table includes `human_ortholog_symbol`, `human_ortholog_entrez`, and `ortholog_mapping_status` columns. Proteins with no human ortholog have empty DGIdb and DisGeNET results, and the ortholog_mapping_status field explains why. (See Decision Register entry dated 2026-03-21 for full rationale.)
+
+**PubMed queries** use both the mouse gene symbol and the human ortholog symbol, since relevant literature may use either. Results are labeled with which symbol generated the hit.
+
+**[FOLLOW-UP NEEDED]** Select the ortholog mapping resource (Ensembl BioMart vs. JAX MGI) and implement the Layer 2 mapping during Phase 3.
+
+### Mapping table output schema
+
+The mapping module produces a single table (Parquet file) with one row per input protein ID:
+
+- input_id: the original ID from the user's abundance matrix
+- uniprot_accession: canonical UniProt accession
+- gene_symbol_mouse: primary mouse gene symbol
+- entrez_id_mouse: NCBI Entrez Gene ID (mouse)
+- ensembl_gene_mouse: Ensembl gene ID (mouse)
+- human_ortholog_symbol: human ortholog gene symbol (null if no ortholog found)
+- human_ortholog_entrez: human ortholog Entrez ID (null if no ortholog found)
+- mapping_status: one of [mapped, unmapped, isoform_collapsed, multiple_mappings]
+- mapping_notes: free text for edge cases and diagnostics
+
+Every downstream module reads this table and joins it with its input data to get the IDs it needs. The enrichment module uses gene_symbol_mouse. The PubMed module uses both gene_symbol_mouse and human_ortholog_symbol. DGIdb and DisGeNET use human_ortholog_entrez (and are skipped for proteins where it is null).
+
+### Caching strategy
+
+The mapping table is cached locally as a Parquet file after the initial API call. The cache is keyed by the set of input IDs and the mapping parameters (source ID type, target ID types, organism). If the pipeline is re-run on the same dataset with the same parameters, the cached mapping is reused without an API call. Cache lifetime is configurable (default 30 days), after which the mapping is regenerated to pick up any updates in UniProt's cross-references.
 
 ---
 
@@ -230,7 +291,7 @@ Each subsection follows a consistent structure: purpose, inputs, outputs, tools/
 
 - **DEqMS** (preferred default): Specifically designed for MS proteomics data. Accounts for the relationship between the number of peptides/PSMs quantified for a protein and the variance of that protein's abundance estimate. This is a key advantage over generic methods like a standard t-test or even limma, because in proteomics, proteins quantified by more peptides have more reliable abundance estimates.
 - **limma** (alternative): The established standard for differential expression analysis, originally from microarray analysis. Well-suited to proteomics data when peptide count information is not available.
-- Both accessed via rpy2 (Python-to-R bridge) or subprocess calls to R scripts within the Snakemake pipeline.
+- Both accessed via rpy2 (Python-to-R bridge) or subprocess calls to R scripts within the Nextflow pipeline.
 
 **Multiple testing correction:** Benjamini-Hochberg FDR correction as default. Significance thresholds configurable in the YAML config.
 
@@ -281,7 +342,9 @@ Each subsection follows a consistent structure: purpose, inputs, outputs, tools/
 - **Protein profile pages:** Per-protein comprehensive view consolidating abundance statistics, QC flags, differential abundance results, disease associations, druggability annotations, literature hits, functional annotations, and any available structural information. The "baseball card" concept.
 - **Biological process view:** Term-level profiles (GO/KEGG) aggregating the proteins annotated to each term, their collective behavior in the dataset, and enrichment statistics. Allows searching by pathway/process rather than by protein.
 
-**Deployment considerations:** The pipeline runs on a SLURM cluster; the frontend should not require cluster resources. Current architectural plan: the pipeline produces the structured results directory, and the frontend reads it. The frontend can run on a laptop, a lab server, or be containerized. This decoupling means the frontend is a "viewer" that does no computation.
+**Data access:** The frontend reads from the SQLite results database (`prosift_results.db`). Every user interaction -- filtering, sorting, switching between protein and process views -- maps to a SQL query. This means the frontend does not need to hold all protein data in memory; it queries what it needs on demand. All candidate frontend technologies (Shiny, Streamlit, Panel, static HTML with JavaScript) can interface with SQLite easily. Python's built-in sqlite3 module handles server-side frameworks; for static HTML, sql.js (a JavaScript SQLite implementation compiled to WebAssembly) enables client-side queries directly in the browser.
+
+**Deployment considerations:** The pipeline runs on an HPC cluster (Torque/PBS); the frontend should not require cluster resources. Current architectural plan: the pipeline produces the structured results directory (anchored by the SQLite database), and the frontend reads it. The frontend can run on a laptop, a lab server, or be containerized. This decoupling means the frontend is a "viewer" that does no computation.
 
 **[FOLLOW-UP NEEDED]** Select frontend technology after Phase 2, when the results data structure is more concrete and the interactive requirements are better understood.
 
@@ -295,7 +358,7 @@ This section documents each external database queried by ProSIFT, including what
 
 ## 4.1 General Architecture
 
-The database integration layer queries multiple external databases for each protein of interest and assembles the results into a per-protein JSON profile. Two strategies are employed depending on the database:
+The database integration layer queries multiple external databases for each protein of interest. During pipeline execution, individual database responses are cached locally as JSON files. At the profile assembly step, all cached results are consolidated and written into the SQLite results database. Two strategies are employed depending on the database:
 
 - **Bulk local download:** For databases with stable, periodic releases (UniProt, CTD, DGIdb), periodic bulk downloads are stored locally and queried without network access. Faster, more reliable, not subject to rate limits.
 - **API queries:** For databases where recency matters (PubMed E-utilities) or where bulk download is impractical or restricted (DisGeNET), per-protein API calls are used with caching and rate limiting.
@@ -374,19 +437,42 @@ The database integration layer queries multiple external databases for each prot
 
 **Priority:** Medium -- useful but less commonly needed than disease and druggability annotations.
 
-## 4.7 Protein Profile Data Structure
+## 4.7 Results Database Schema (SQLite)
 
-Each protein's profile is stored as a JSON object with the following top-level structure (preliminary; will be refined during implementation):
+The pipeline's final assembly step writes all results into a single SQLite database file (e.g., `prosift_results.db`). This replaces the originally planned per-protein JSON profiles (see Decision Register). The relational schema represents the one-to-many relationships in protein annotations naturally via separate tables joined on protein_id. Preliminary schema (will be refined during implementation):
 
-- **identifiers:** UniProt accession, gene symbol, Entrez ID, protein name, organism
-- **dataset_statistics:** abundance values per sample, group means, fold change, p-value, adjusted p-value, QC flags, imputation status
-- **functional_annotation:** GO terms (BP, MF, CC), KEGG pathways, Reactome pathways
-- **disease_associations:** DisGeNET entries (disease name, association score, source)
-- **druggability:** DGIdb entries (drug name, interaction type, source)
-- **chemical_interactions:** CTD entries (chemical name, interaction type)
-- **literature:** PubMed co-occurrence results (search term, raw count, normalized score)
-- **uniprot_annotation:** function description, subcellular location, tissue expression, cross-references
-- **enrichment_membership:** which enriched GO/KEGG terms include this protein, and the enrichment statistics for those terms
+**Core tables:**
+
+- **proteins** -- one row per protein. Primary table. Columns include: protein_id (PRIMARY KEY), gene_symbol_mouse, entrez_id_mouse, protein_name, organism, function_description, subcellular_location, human_ortholog_symbol, human_ortholog_entrez, ortholog_mapping_status (one_to_one, one_to_many, no_ortholog), fold_change, pvalue, adj_pvalue, mean_abundance_group1, mean_abundance_group2, qc_flag_missingness, qc_flag_cv, qc_flag_outlier, imputation_fraction. Indexed on protein_id, adj_pvalue, fold_change for fast filtering and sorting.
+
+- **sample_abundances** -- one row per protein-sample combination. Columns: protein_id (FOREIGN KEY), sample_id, abundance, group, is_imputed. Enables per-sample access for detailed profile views.
+
+**Annotation tables (one-to-many with proteins):**
+
+- **disease_associations** -- DisGeNET results. Only populated for proteins with a human ortholog. Columns: protein_id, disease_id, disease_name, association_score, evidence_source.
+
+- **drug_interactions** -- DGIdb results. Only populated for proteins with a human ortholog. Columns: protein_id, drug_name, interaction_type, source.
+
+- **chemical_interactions** -- CTD results. Queried for all proteins. Columns: protein_id, chemical_name, chemical_id, interaction_type.
+
+- **literature_hits** -- PubMed co-occurrence results. Queried for all proteins (using mouse symbol; also human ortholog symbol when available). Columns: protein_id, search_term, raw_count, total_protein_publications, normalized_score, query_gene_symbol, query_date.
+
+- **uniprot_annotations** -- Extended UniProt data. Queried for all proteins directly with mouse accessions. Columns: protein_id, tissue_expression, pathway_membership, cross_references.
+
+**Enrichment tables:**
+
+- **enrichment_results** -- one row per tested term. Columns: term_id, term_name, library (GO_BP, GO_MF, GO_CC, KEGG, Reactome), pvalue, adj_pvalue, odds_ratio, combined_score, analysis_type (ORA or GSEA), leading_edge_size.
+
+- **protein_terms** -- many-to-many mapping between proteins and GO/KEGG terms. Columns: protein_id, term_id, is_leading_edge (for GSEA). Enables both protein-to-terms and term-to-proteins lookups.
+
+**Design notes:**
+
+- Ortholog information is tracked at the protein level (human_ortholog_symbol, human_ortholog_entrez, ortholog_mapping_status in the proteins table), not as per-annotation flags. The tool's primary use case is identifying candidates for human therapeutics; users understand that annotations from DGIdb and DisGeNET are about the human ortholog. Proteins with no human ortholog have empty disease_associations and drug_interactions tables, and the ortholog_mapping_status field explains why.
+- Database query gating rule: UniProt, PubMed, and CTD query all proteins regardless of ortholog status. DGIdb and DisGeNET query only proteins where human_ortholog_symbol is not null.
+- Indexes are created on protein_id in all tables (for fast profile assembly) and on adj_pvalue, fold_change, and association_score in their respective tables (for fast sorting/filtering in the frontend).
+- The schema is designed so that a protein profile page is assembled by querying `proteins` for the core row and then LEFT JOINing each annotation table on protein_id. The biological process view is assembled by querying `enrichment_results` joined to `protein_terms` joined to `proteins`.
+
+**[FOLLOW-UP NEEDED]** Finalize exact column definitions, data types, and index strategy during Phase 3 implementation when the actual database response structures are known.
 
 ---
 
@@ -394,19 +480,33 @@ Each protein's profile is stored as a JSON object with the following top-level s
 
 ## 5.1 Cluster Configuration
 
-ProSIFT is designed to run on an HPC cluster managed by SLURM. Snakemake's SLURM profile handles job submission, resource allocation, and dependency management.
+*Updated 2026-03-23 to reflect confirmed cluster environment (Torque/PBS, not SLURM).*
 
-**Snakemake SLURM integration:** Each Snakemake rule specifies resource requirements (CPUs, memory, walltime). The SLURM profile translates these into sbatch directives. Snakemake monitors job status and handles retries for failed jobs.
+ProSIFT is designed to run on the mesx.sdsu.edu HPC cluster, which uses Torque/PBS as its job scheduler (not SLURM as originally assumed). Nextflow supports PBS natively via the `pbspro` executor, handling job submission, resource allocation, and dependency management through its configuration system.
 
-*[Specific SLURM profile configuration and cluster details to be documented once implementation begins.]*
+**Target cluster details (confirmed 2026-03-23):**
+
+- Host: mesx.sdsu.edu
+- Job scheduler: Torque/PBS (qsub/qstat, not sbatch/squeue)
+- User home: /usr/scratch2/userdata2/rhastings
+- Conda: miniconda3 at /home2/rhastings/miniconda3
+- Git: not installed (not needed on cluster; see development workflow below)
+- Singularity/Apptainer: not installed as of 2026-03-23
+- Nextflow: not installed as of 2026-03-23 (will be installed via conda)
+
+**Nextflow PBS integration:** Each Nextflow process specifies resource requirements (CPUs, memory, time) via process directives or in nextflow.config. Nextflow translates these into PBS qsub directives automatically when the `pbspro` executor is selected. Nextflow monitors job status, handles retries for failed jobs, and manages the work directory where intermediate files are staged.
+
+**Development workflow:** Code is developed locally (macOS) and synced to the cluster via rsync over SSH for execution. Git is used locally only, for tracking meaningful milestones -- not for shuttling changes between machines. This avoids cluttering the git history with small iterative fixes during cluster debugging. See Handoff File Section 8.2 for rsync commands and operational details.
+
+*[Specific nextflow.config executor settings to be documented once implementation begins.]*
 
 ## 5.2 Singularity/Apptainer Container
 
 **Purpose:** Package the complete software environment (OS, Python, R, all dependencies) into a single portable, reproducible image file (.sif). Ensures the pipeline runs identically regardless of the host system's software configuration.
 
-**Why Singularity, not Docker:** Docker requires root privileges, which are not available (and generally not permitted for security reasons) on shared HPC clusters. Singularity (now Apptainer) runs without root, integrates with SLURM and shared filesystems, and respects the cluster's user permission model.
+**Why Singularity, not Docker:** Docker requires root privileges, which are not available (and generally not permitted for security reasons) on shared HPC clusters. Singularity (now Apptainer) runs without root, integrates with PBS/Torque and shared filesystems, and respects the cluster's user permission model.
 
-**How it works in practice:** A Singularity definition file specifies a base OS image (e.g., Ubuntu 22.04), installs Python 3.11+, R, and all required packages. This is built into a .sif file (typically done on a machine with root access or via a remote build service). The .sif file is copied to the cluster and referenced in Snakemake rules via the `singularity:` directive. Snakemake automatically handles bind-mounting data directories and executing inside the container.
+**How it works in practice:** A Singularity definition file specifies a base OS image (e.g., Ubuntu 22.04), installs Python 3.11+, R, and all required packages. This is built into a .sif file (typically done on a machine with root access or via a remote build service). The .sif file is copied to the cluster and referenced in Nextflow process directives or in nextflow.config via the `container` directive. Nextflow automatically handles bind-mounting data directories and executing inside the container when the Singularity engine is enabled.
 
 **Key detail:** Singularity containers are read-only at runtime. The pipeline's code and libraries inside the container cannot be modified during execution. Data is read from and written to the host filesystem via bind mounts. This is a feature: the container provides a stable, immutable environment, and data lives outside it.
 
@@ -428,31 +528,33 @@ During development (before the Singularity container is finalized), a Conda envi
 
 *[To be defined during Phase 1 implementation. Will include: source code layout, config file location, input/output directory conventions, results directory structure, and the Singularity image location.]*
 
+**[FOLLOW-UP NEEDED]** Restructure project documentation from single file into master overview + module files before implementation begins. Planned structure: `ProSIFT_Project_Overview.Rmd` (architecture, DAG, config, roadmap, decision register, dev log, Claude instructions) plus separate module files for input validation/ID mapping, QC/EDA, normalization/imputation, differential abundance, enrichment, database queries, results assembly/SQLite schema, and frontend design. This keeps the master document concise while allowing module-level detail to grow without making the file unwieldy.
+
 ---
 
 # 6. Development Roadmap
 
 ## 6.1 Phase 1 -- Core Pipeline Skeleton and QC Module
 
-**Goal:** Establish the Snakemake workflow structure, input format specification, ID mapping layer, and QC/EDA module. Produce a working pipeline that takes an abundance matrix + metadata, runs QC diagnostics, and produces a QC report.
+**Goal:** Establish the Nextflow workflow structure, input format specification, ID mapping layer, and QC/EDA module. Produce a working pipeline that takes an abundance matrix + metadata, runs QC diagnostics, and produces a QC report.
 
 **Deliverables:**
 
-- Project directory structure and repository initialization
-- YAML configuration schema (initial version)
-- Input validation rules (Snakemake rule)
+- Project directory structure and repository initialization (following nf-core conventions where applicable)
+- nextflow.config with PBS executor profile, container directive, and parameter defaults
+- params.yml for scientific parameters (contrasts, thresholds, database settings)
+- Input validation process (Nextflow process)
 - UniProt ID mapping module (bulk API call + local cache)
 - QC/EDA module with: missingness analysis, CV distributions, PCA, sample correlation heatmap, distributional assessment
 - QC report generation (HTML with interactive plots)
 - Conda environment.yml
 - Singularity definition file (initial version)
-- Snakemake SLURM profile configuration
 
 **Key decisions to finalize during this phase:**
 
-- Exact YAML config schema
-- Directory structure conventions
-- Snakemake checkpoint strategy for dynamic DAG sections
+- Nextflow config and params schema
+- Directory structure conventions (aligning with nf-core standards)
+- Channel design for the main pipeline flow
 
 **Status:** Not yet started.
 
@@ -485,8 +587,8 @@ During development (before the Singularity container is finalized), a Conda envi
 - DisGeNET query module
 - DGIdb query module
 - CTD query module
-- Protein profile JSON assembly
-- Biological process (GO/KEGG term) profile assembly
+- SQLite results database assembly (schema design, table creation, index optimization)
+- Biological process (GO/KEGG term) aggregation queries
 
 **Risks:** This phase carries the most technical risk due to external API dependencies, rate limiting, and the complexity of integrating heterogeneous data sources. UniProt and PubMed should be implemented first (most stable API, highest unique value respectively).
 
@@ -515,7 +617,7 @@ The following ideas have been discussed and noted but are explicitly not committ
 - **AlphaFold integration** for structure thumbnails in protein profiles
 - **Reactome** pathway-level integration
 - **BioGRID** protein-protein interaction data
-- **Multi-organism support** beyond human
+- **Multi-organism support** beyond mouse (e.g., human, rat)
 
 ---
 
@@ -537,7 +639,7 @@ The following ideas have been discussed and noted but are explicitly not committ
 ## 8.1 Tool-Level Limitations
 
 - **Input scope:** ProSIFT currently accepts only protein-level abundance matrices. It cannot assess upstream data quality issues that may be visible at the peptide or PSM level but are hidden after protein rollup.
-- **Organism assumption:** Initial implementation assumes human proteomics data. ID mapping, gene set libraries, and database queries are configured for human proteins. Multi-organism support would require parameterizing these components.
+- **Organism assumption:** Initial implementation targets mouse proteomics data. ID mapping, gene set libraries, and database queries are configured for mouse proteins (Mus musculus). Multi-organism support would require parameterizing these components. Human-centric databases (DGIdb, DisGeNET) are queried via human orthologs where available; proteins with no human ortholog will have empty disease association and druggability sections. UniProt, PubMed, and CTD are queried for all proteins regardless of ortholog status.
 - **External database dependencies:** Results depend on the completeness and accuracy of external databases (UniProt, DisGeNET, DGIdb, CTD, PubMed). Well-studied proteins will have richer profiles than understudied ones, introducing an inherent bias toward known biology.
 - **Literature co-occurrence is not causation:** PubMed co-occurrence scores measure how often a protein appears in the literature alongside a term of interest. This is a measure of existing research attention, not of biological relevance. Highly studied proteins will score higher regardless of their actual importance to the user's research question.
 
@@ -587,7 +689,7 @@ Significant methodological, architectural, and design decisions logged in a cons
 
 **Decision:** Target the SLURM cluster for all computation. AWS deployment is deferred.
 
-**Rationale:** The computational demands of ProSIFT (differential abundance on tens of samples, thousands of proteins; API queries) are modest by HPC standards. The most intensive part (database querying) is I/O-bound, not CPU-bound, so elastic cloud compute provides no advantage. AWS would introduce cloud infrastructure management overhead (IAM, S3, cost monitoring, security) that is not justified for a solo developer building a lab tool. The Snakemake + Singularity architecture does not lock out cloud deployment later if needed.
+**Rationale:** The computational demands of ProSIFT (differential abundance on tens of samples, thousands of proteins; API queries) are modest by HPC standards. The most intensive part (database querying) is I/O-bound, not CPU-bound, so elastic cloud compute provides no advantage. AWS would introduce cloud infrastructure management overhead (IAM, S3, cost monitoring, security) that is not justified for a solo developer building a lab tool. The Nextflow + Singularity architecture does not lock out cloud deployment later -- in fact, Nextflow has first-class AWS Batch support, making future cloud migration straightforward if needed.
 
 **Alternatives considered:** AWS from the start -- rejected due to unnecessary complexity for current scale and development capacity.
 
@@ -602,6 +704,20 @@ Significant methodological, architectural, and design decisions logged in a cons
 **Alternatives considered:** CSV-only -- rejected due to type-guessing issues, lack of compression, and slower read performance. Feather/Arrow IPC -- considered for its near-zero-copy read speed, but Parquet's compression advantage was preferred for a pipeline that produces many intermediate files.
 
 **Impact:** Requires pyarrow as a dependency. Users who want to inspect intermediate files need pandas or DuckDB rather than a text editor.
+
+### 2026-03-20 -- File Formats Revised: SQLite Replaces JSON for Compiled Output
+
+**Decision:** Replace JSON with SQLite as the primary compiled output format for protein profiles and all queryable results. This supersedes the JSON component of the original file format decision from the same date. The revised format strategy is: Parquet for pipeline intermediates, CSV for user-facing exports, SQLite for the compiled results database, and PNG/HTML for visualizations. JSON is retained only for API response caching and params files.
+
+**Rationale:** The interactive frontend's core features (sorting, filtering, joining across data types) are fundamentally database operations. With JSON, these operations require loading all protein profiles into memory and filtering client-side, which is inelegant and scales poorly. With SQLite, every frontend interaction maps to a SQL query: "all proteins where adj_pvalue < 0.05 AND druggability IS NOT NULL ORDER BY fold_change DESC" is a single indexed query. The biological process view (aggregating protein-level data by GO/KEGG term) becomes a JOIN + GROUP BY rather than a manual aggregation across JSON files.
+
+Additionally, SQL is a core skill in data science and bioinformatics hiring. Building and querying a SQLite database provides transferable experience with schema design, indexing, and SQL query writing.
+
+SQLite's practical advantages for this use case: single portable file (no server), zero-configuration, Python's sqlite3 module is in the standard library (no additional dependencies), supports indexes for fast lookups, and the relational schema naturally represents the one-to-many relationships in protein annotations.
+
+**Alternatives considered:** (1) JSON profiles (the original plan) -- rejected because JSON lacks queryability, requires loading everything into memory for filtering, and produces thousands of individual files for large datasets. (2) PostgreSQL or MySQL -- rejected because they require a running server, which conflicts with the goal of a portable, self-contained results directory. (3) DuckDB -- an analytical database ("SQLite for analytics") that can read Parquet files directly. Compelling, but newer with a smaller ecosystem. SQLite is more universally recognized and the SQL skills transfer. Could be revisited in the future. (4) Both JSON and SQLite -- rejected as unnecessary duplication; SQLite covers all use cases that JSON was serving, plus queryability.
+
+**Impact:** The profile assembly step writes to SQLite instead of producing JSON files. The frontend queries SQLite instead of loading JSON. The SQLite schema (Section 4.7) becomes a key design artifact. Python's sqlite3 replaces json as the primary output serialization library for compiled results.
 
 ### 2026-03-20 -- ID Mapping: UniProt Bulk API + Local Cache
 
@@ -622,6 +738,76 @@ Significant methodological, architectural, and design decisions logged in a cons
 **Alternatives considered:** ProteoScope, ProteoScout, ProteoForge, PRISM, PROPHET, COMPASS, SPARK, MIDAS, PORTICO, CAIRN, QUARRY, SENTINEL, ProDIGY, ProVISTA, ProCARTA, ProMINE, ProTRAK, APROPOS, PRONTO -- all rejected due to existing name collisions or near-collisions documented in the search results.
 
 **Impact:** All file paths, module names, and documentation use "ProSIFT." Name may be changed before publication.
+
+### 2026-03-20 -- Target Organism: Mouse (Mus musculus)
+
+**Decision:** Initial implementation targets mouse (Mus musculus) proteomics data. The organism is specified in the YAML config and parameterizes ID mapping, gene set libraries, and database queries.
+
+**Rationale:** The developer's current datasets are mouse proteomics. Building and testing against the actual use case ensures the pipeline works end-to-end before generalizing to other organisms.
+
+**Implications for database queries:** Some external databases are more richly annotated for human than for mouse. DisGeNET in particular has far more gene-disease associations for human genes. Two strategies may be needed: (1) query databases directly with mouse gene identifiers where supported, and (2) for databases with poor mouse coverage, map mouse genes to human orthologs (via HomoloGene, Ensembl BioMart, or JAX MGI), query with the human ortholog, and flag the result as ortholog-inferred. The ortholog mapping approach introduces uncertainty (not all functions are conserved across species) and this should be clearly flagged in protein profiles.
+
+**Implications for gene set libraries:** GO and KEGG have mouse-specific annotations. gseapy supports organism specification. Reactome also has mouse pathway annotations.
+
+**Implications for ID mapping:** Mouse UniProt accessions follow the same format as human. The UniProt bulk mapping API supports mouse. Gene symbols may differ between mouse and human orthologs (e.g., mouse Tp53 vs. human TP53), which is important for PubMed literature queries -- searching for the mouse gene symbol may miss relevant human literature and vice versa.
+
+**[FOLLOW-UP NEEDED]** Design and implement the ortholog mapping strategy for databases with poor mouse coverage. Determine which databases need ortholog-based querying vs. direct mouse queries.
+
+**Impact:** Organism choice propagates to ID mapping, enrichment, and all database query modules. The YAML config must include an organism field.
+
+### 2026-03-20 -- Pipeline Orchestration Revised: Nextflow (replacing Snakemake)
+
+**Decision:** Use Nextflow as the workflow manager instead of Snakemake, targeting a SLURM-managed HPC cluster. This supersedes the earlier Snakemake decision from the same date.
+
+**Rationale:** The decision was revisited after evaluating career positioning alongside technical fit. Nextflow has become the dominant workflow manager in the -omics biotech industry, with survey data showing it experienced the highest growth in adoption between 2021-2024 while Snakemake usage declined from 27% to 17% in the same period. Since one goal of this project is to build skills transferable to industry roles in -omics biotech, learning Nextflow through a substantial project provides directly applicable experience. Nextflow's dataflow/channel model is also arguably more natural for ProSIFT's scatter-gather patterns (e.g., fanning out database queries across thousands of proteins and five databases, then collecting results).
+
+**Tradeoffs acknowledged:** Nextflow uses a Groovy-based DSL, which is a new language to learn. The learning curve is steeper than Snakemake for a Python-centric developer. Error messages and debugging are generally considered less transparent than Snakemake's file-based model. Development will be slower initially. These costs are accepted as the price of building industry-relevant skills.
+
+**Alternatives considered:** (1) Snakemake -- the original choice. Better fit for Python-native development, more intuitive file-based model, faster initial development. Rejected because the career value of Nextflow fluency outweighs the development speed advantage. (2) Snakemake now with Nextflow conversion later -- a reasonable middle path, but the developer preferred full commitment to Nextflow to build deeper fluency. (3) Other workflow managers (CWL, WDL, Airflow) -- CWL/WDL are more common in consortium settings and feel verbose for a solo project. Airflow is general-purpose, not bioinformatics-specific.
+
+**Architectural implications of the switch:**
+
+- **DAG expression:** Rules become Nextflow "processes" connected by "channels" rather than Snakemake rules connected by file dependencies. The DAG structure (module dependencies, fork/join points) does not change, but how it is expressed in code does.
+- **Checkpoint mechanism:** Snakemake's checkpoint feature (used for the dynamic post-differential-abundance DAG) has no direct equivalent in Nextflow. Instead, Nextflow handles this naturally: the differential abundance process emits a channel of significant protein IDs, and downstream processes (database queries) consume from that channel. The dynamic fanout is native to Nextflow's dataflow model and does not require a special mechanism.
+- **Configuration:** Nextflow has its own configuration system (nextflow.config) that handles executor profiles (SLURM, local, AWS), container directives, resource specifications, and parameter defaults. This partially overlaps with the YAML config we planned. The pipeline will use Nextflow's native config for infrastructure concerns (executor, containers, resources) and a separate params file (YAML or JSON) for scientific parameters (contrasts, thresholds, database settings). Nextflow supports this via the -params-file flag.
+- **Container integration:** Nextflow has native Docker and Singularity support via process directives. Each process can specify its container. This is functionally equivalent to Snakemake's singularity directive.
+- **SLURM integration:** Nextflow supports SLURM natively as an executor. Configuration is handled in nextflow.config rather than a separate SLURM profile.
+- **Intermediate files:** Nextflow manages its own work directory and handles intermediate file staging automatically. This is more opaque than Snakemake's explicit file-based intermediates but reduces boilerplate. The structured results directory (Layer 2 of the architecture) remains the explicit, well-defined output -- Nextflow's internal work directory is its own concern.
+- **nf-core conventions:** Adopting nf-core community conventions for pipeline structure, parameter naming, and documentation standards will make the pipeline more recognizable to the Nextflow community and potential employers.
+
+**Impact:** All references to Snakemake rules, checkpoints, and SLURM profiles in this document should be read as Nextflow processes, channels, and executor configuration respectively. The DAG structure and module specifications are unaffected. The primary impact is on the orchestration layer and configuration system.
+
+### 2026-03-21 -- Ortholog Tracking: Protein-Level Status Replaces Per-Annotation Flags
+
+**Decision:** Track ortholog mapping status at the protein level (columns in the `proteins` table) rather than as an `is_ortholog_inferred` flag on every row of every annotation table. DGIdb and DisGeNET are queried only for proteins with a human ortholog. UniProt, PubMed, and CTD are queried for all proteins regardless of ortholog status.
+
+**Rationale:** ProSIFT's primary use case is identifying candidates for human therapeutics. Users working with mouse proteomics data understand that annotations from human-centric databases (DGIdb, DisGeNET) are about the human ortholog -- this is the entire purpose of querying those databases. Per-annotation flags add clutter without informing any decision the researcher would make differently. What the researcher does need to know is: (1) which human gene this mouse protein maps to, and (2) when a protein has no human ortholog (explaining why DGIdb/DisGeNET sections are empty in its profile).
+
+**Database query gating rule:** UniProt queries use mouse accessions directly and are independent of ortholog status. PubMed queries use both mouse and human gene symbols (when available) and work for all proteins. CTD has some mouse data and is queried uniformly for simplicity. DGIdb and DisGeNET are human-centric with no meaningful mouse coverage; querying them without a human ortholog would return empty results, so they are skipped.
+
+**Alternatives considered:** (1) Per-annotation `is_ortholog_inferred` flag on all annotation tables -- the original design. Rejected as unnecessary clutter given the therapeutic use case. (2) Drop ortholog tracking entirely -- rejected because proteins with no human ortholog need a clear explanation for empty annotation sections. (3) Skip DGIdb/DisGeNET and CTD when no ortholog -- CTD was kept in the "query all" group because it has some mouse data and the simplicity of uniform querying outweighs the marginal wasted API calls.
+
+**Resolves:** Follow-up item from Decision Register entry "Target Organism: Mouse" regarding which databases need ortholog-based querying vs. direct mouse queries.
+
+**Impact:** The `is_ortholog_inferred` column is removed from disease_associations, drug_interactions, chemical_interactions, and literature_hits tables. The `proteins` table gains human_ortholog_symbol, human_ortholog_entrez, and ortholog_mapping_status columns. The database query module implements a simple conditional: check ortholog_mapping_status before querying DGIdb and DisGeNET.
+
+### 2026-03-23 -- Cluster Scheduler: Torque/PBS (Not SLURM)
+
+**Decision:** Update all infrastructure documentation to reflect the actual cluster scheduler: Torque/PBS (qsub/qstat), not SLURM (sbatch/squeue). Nextflow will use the `pbspro` executor instead of `slurm`.
+
+**Rationale:** SSH inspection of mesx.sdsu.edu (2026-03-23) confirmed the cluster uses Torque/PBS. The original documentation assumed SLURM based on its prevalence in bioinformatics, but the target cluster uses a different scheduler. Nextflow supports PBS natively, so the pipeline architecture and DAG design are unaffected -- only the executor configuration in nextflow.config changes.
+
+**Impact:** The nextflow.config executor profile targets `pbspro` instead of `slurm`. Resource directives (CPUs, memory, time) are translated to PBS qsub flags instead of SLURM sbatch flags. All other pipeline logic is unchanged. Prior Decision Register entries referencing SLURM are left as historical records.
+
+### 2026-03-23 -- Development Workflow: Local Development + rsync to Cluster
+
+**Decision:** Develop code locally (macOS) and sync to the cluster via rsync for execution. Git is used locally only, for meaningful milestones. The cluster does not need git installed.
+
+**Rationale:** The cluster lacks git, and installing it solely to shuttle code between machines would clutter the git history with small iterative fixes ("fix path", "increase memory") during cluster debugging. rsync provides instant, low-friction file syncing over SSH (which is already configured with key-based auth). Git commits are reserved for intentional checkpoints when a unit of work is complete. This keeps the git history clean and meaningful. The approach can be revisited if iterative cluster debugging becomes frequent enough that tracking changes on the cluster becomes valuable.
+
+**Alternatives considered:** (1) Install git on the cluster via conda and use a `dev` branch with squash merges -- viable but adds overhead for a solo developer. (2) Use git for all syncing -- rejected due to commit history clutter. (3) scp instead of rsync -- rejected because rsync is incremental (only transfers changed files) and supports exclusion patterns.
+
+**Impact:** Operational rsync commands are documented in the Handoff File Section 8.2. Git is configured locally only. The cluster has no .git directory.
 
 ---
 
@@ -657,7 +843,63 @@ Chronological record of substantive development work.
 
 **Decisions made:** Confirmed that QC/EDA runs on pre-normalization data (to assess raw distributional properties). Confirmed that the database query branch and enrichment branch are independent and parallelizable. Documented the long-range dependency from QC flags to profile assembly.
 
-**Next steps identified:** Begin Phase 1 implementation. The DAG provides the structural blueprint for the Snakemake workflow file.
+**Next steps identified:** Begin Phase 1 implementation. The DAG provides the structural blueprint for the Nextflow workflow file.
+
+### 2026-03-20 -- Workflow Manager Revised to Nextflow; Organism Corrected to Mouse
+
+**Work performed:** Revised workflow manager choice from Snakemake to Nextflow based on evaluation of career positioning alongside technical fit. Nextflow's dominance in -omics biotech industry makes it the higher-value skill investment. Also corrected the target organism from human to mouse throughout the documentation, with analysis of implications for database queries (ortholog mapping needed for human-centric databases like DisGeNET).
+
+**Outputs:** Updated Sections 1.3, 2.1, 2.2, 2.4, 3.2, 5.1, 5.2, 6.1, 8.1, 11.2 to reflect Nextflow. Added decision register entries for both changes. Original Snakemake decision preserved as historical record.
+
+**Key findings:** The switch to Nextflow has several architectural consequences: (1) Nextflow's channel-based dataflow model handles the post-differential-abundance scatter-gather pattern more naturally than Snakemake's checkpoint mechanism; (2) Nextflow has its own configuration system (nextflow.config) that partially overlaps with the planned YAML config, requiring a dual-config approach (nextflow.config for infrastructure, params.yml for science); (3) Nextflow manages its own work directory for intermediates, which is more opaque but reduces boilerplate; (4) the nf-core community provides conventions for pipeline structure and documentation that ProSIFT should adopt where practical.
+
+The organism correction to mouse surfaced the ortholog mapping problem: several databases (DisGeNET, PubMed) are human-centric and will need mouse-to-human ortholog mapping for effective querying. This is a Phase 3 design problem but has been flagged early.
+
+**Decisions made:** See Decision Register entries dated 2026-03-20 (Nextflow revision and organism correction).
+
+**Next steps identified:** Continue design phase -- walk through all solidified decisions in detail to ensure full understanding before implementation begins.
+
+### 2026-03-21 -- Design Phase Deep Dive: Reviewed Foundational Decisions; Revised File Format Strategy
+
+**Work performed:** Conducted thorough review of all six foundational architectural decisions with detailed examination of alternatives, tradeoffs, and rationale for each. Decisions reviewed: (1) three-layer architecture, (2) workflow manager (Nextflow), (3) input format (abundance matrix + metadata), (4) file formats, (5) ID mapping (UniProt bulk API), (6) Singularity containers.
+
+During review of file format strategy, revisited the JSON vs. SQLite decision. Analysis of the frontend's core access patterns (sorting, filtering, joining across data types) revealed that these are fundamentally database operations poorly served by JSON. Revised decision: SQLite replaces JSON as the primary compiled output format.
+
+During review of ID mapping, expanded documentation with detailed many-to-many handling rules (isoform collapse, multiple gene symbols, unmapped IDs), ortholog mapping strategy for mouse-to-human (Layer 1 via UniProt, Layer 2 via Ensembl BioMart or JAX MGI), the mapping table output schema, and caching strategy. Also discussed the biological rationale for the `is_ortholog_inferred` flag in depth: ortholog-inferred annotations carry lower confidence than direct annotations because protein function, disease relevance, and regulatory context are not fully conserved between species.
+
+Updated configuration schema documentation to reflect Nextflow's dual configuration model (nextflow.config for infrastructure, params.yml for scientific parameters).
+
+**Outputs:** Updated Sections 2.4 (file format strategy -- SQLite replacing JSON), 2.5 (configuration schema -- Nextflow dual config), 2.6 (ID mapping -- expanded with many-to-many handling, ortholog mapping, mapping table schema, caching), 3.4 (frontend -- SQLite as data source), 4.7 (complete rewrite from JSON to SQLite relational schema). Added decision register entry for SQLite revision. Updated DAG figure caption, Layer 2 description, scope, convergence description, and Phase 3 deliverables to reflect SQLite.
+
+**Key findings:** The SQLite decision is a cleaner architecture than JSON for several reasons: (1) the frontend's filtering/sorting/joining operations map directly to SQL queries rather than requiring client-side JavaScript processing; (2) a single database file is simpler than thousands of individual JSON profile files; (3) the relational schema naturally represents one-to-many relationships (one protein to many disease associations) without redundancy; (4) SQL is a transferable industry skill. The `is_ortholog_inferred` flag emerged as a cross-cutting design element that touches the ID mapping module, all database query modules, and the SQLite schema -- it needs to be implemented consistently across all of these.
+
+**Decisions made:** See Decision Register entries for SQLite revision (2026-03-20).
+
+**Next steps identified:** Continue design phase with unsolidified decisions: finalize YAML params schema, input validation specification, QC/EDA module details, normalization/imputation specification, differential abundance specification, enrichment specification, database integration specification, results directory structure, frontend specification, and project directory layout.
+
+### 2026-03-23 -- Data Preparation Scripts Implemented
+
+**Work performed:** Implemented three data preparation scripts that convert raw search engine output into ProSIFT-format input files. These scripts are not part of the ProSIFT pipeline itself -- they are preprocessing tools that bridge the gap between search engine output and ProSIFT's expected input format. See Module 01 documentation (Section 9) for the design rationale.
+
+**Script 1: `prepare_ctx_data.py`** -- Dataset-specific format conversion for the CTX/Synaptosome DIA-NN output. Reads the raw Filtered Proteins CSV (8,948 proteins x 178 columns), extracts first UniProt accession from semicolon-delimited protein groups, renames columns with standardized prefixes (`abundance_`, `peptide_count_`), parses sample metadata (genotype, region, fraction) from sample ID naming convention, and writes three master files.
+
+**Script 2: `generate_run_config.py`** -- Interactive run definition tool. Takes master abundance + metadata files as input. Auto-detects `protein_id`, `abundance_`, and `peptide_count_` columns (falls back to prompting if not found). Derives sample groups by stripping replicate suffixes (e.g., `CTXcyto_WT` from `CTXcyto_WT-1`). User selects pairs of groups to compare; the script auto-infers the group column by finding the metadata column that differs between the two groups, auto-generates run names, and writes a YAML run definition.
+
+**Script 3: `prepare_prosift_input.py`** -- Reads the run_config.yml and master files, splits into per-run directories. Each run gets an abundance CSV (bare sample IDs + peptide_count_ columns), metadata CSV (sample_id + group column), and draft params.yml with Module 01 parameters filled in.
+
+**Outputs:**
+- `scripts/prepare_ctx_data.py`, `scripts/generate_run_config.py`, `scripts/prepare_prosift_input.py`
+- `prosift_inputs/` directory with master files and 12 per-run subdirectories
+- 12 runs defined: 4 genotype (KO vs WT per region/fraction), 4 fraction (synap vs cyto per region/genotype), 4 region (HIP vs CTX per fraction/genotype)
+
+**Validation performed:** Source-to-output validation confirmed: row counts (8,948 proteins), 200 random abundance/peptide count value checks, 8,948 protein_id checks, metadata correctness (genotype/region/fraction parsing), missing value preservation (6,841 missing cells matched exactly).
+
+**Key design choices:**
+- Two-file input to `generate_run_config.py` (abundance + metadata) rather than a single raw search engine file. The metadata file provides structured grouping information, eliminating the need for complex column prefix auto-detection.
+- Group column auto-inference: when two groups are selected for comparison, the script finds the metadata column where the groups have different uniform values. This correctly identifies `genotype` for WT vs KO comparisons, `fraction` for synap vs cyto, and `region` for HIP vs CTX.
+- 12 runs instead of the original 10 from the CTX project: added 2 KO-only region comparisons (CTXcyto_KO vs HIPcyto_KO, CTXsynap_KO vs HIPsynap_KO) for completeness.
+
+**Next steps identified:** Begin Phase 1 pipeline implementation (project directory structure, Nextflow workflow skeleton, Module 01 input validation process).
 
 ---
 
@@ -683,7 +925,8 @@ Chronological record of substantive development work.
 | DGIdb | https://www.dgidb.org/ | Druggability, drug-gene interactions | API + bulk download |
 | CTD | https://ctdbase.org/ | Chemical-gene interactions | Bulk download |
 | gseapy | https://gseapy.readthedocs.io/ | ORA and GSEA | Python package |
-| Snakemake | https://snakemake.readthedocs.io/ | Pipeline orchestration | Python package |
+| Nextflow | https://www.nextflow.io/ | Pipeline orchestration | Groovy-based DSL |
+| nf-core | https://nf-co.re/ | Community pipeline standards and tools | Nextflow ecosystem |
 | Singularity/Apptainer | https://apptainer.org/ | Container runtime | Available on most HPC clusters |
 
 ## 11.3 Collaborators
