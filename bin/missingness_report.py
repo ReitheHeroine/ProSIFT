@@ -155,7 +155,7 @@ def plot_filter_categories(filter_df: pd.DataFrame, run_id: str) -> go.Figure:
         hovertemplate="<b>%{x}</b><br>%{y:,} proteins<extra></extra>",
     ))
     fig.update_layout(
-        title=dict(text=f"{run_id} -- Detection filter categories", x=0.5),
+        title=dict(text=f"{run_id} - Detection filter categories", x=0.5),
         xaxis_title="Filter category",
         yaxis_title="Number of proteins",
         yaxis=dict(range=[0, counts["count"].max() * 1.15]),
@@ -176,14 +176,15 @@ def plot_per_sample_detection(
     run_id: str,
 ) -> go.Figure:
     """Bar chart: number of proteins detected per sample, colored by group."""
-    # Identify abundance columns in the matrix
+    # Identify abundance columns in the matrix (may have an abundance_ prefix)
     abund_cols = [c for c in matrix_df.columns if c != "protein_id"
                   and not c.startswith("peptide_count_")]
-    # Count non-NaN per sample
+    # Count non-NaN per sample; strip abundance_ prefix to match metadata sample_ids
     detection = (
         matrix_df[abund_cols].notna().sum().rename("n_detected").reset_index()
     )
-    detection.columns = ["sample_id", "n_detected"]
+    detection.columns = ["col_name", "n_detected"]
+    detection["sample_id"] = detection["col_name"].str.removeprefix("abundance_")
 
     # Attach group labels
     group_col = [c for c in metadata_df.columns if c != "sample_id"][0]
@@ -209,7 +210,7 @@ def plot_per_sample_detection(
         ))
 
     fig.update_layout(
-        title=dict(text=f"{run_id} -- Per-sample detection counts (pre-filter)", x=0.5),
+        title=dict(text=f"{run_id} - Per-sample detection counts (pre-filter)", x=0.5),
         xaxis_title="Sample",
         yaxis_title="Proteins detected",
         legend_title="Group",
@@ -245,19 +246,27 @@ def plot_missingness_heatmap(
     if len(removed_ids) == 0:
         logging.warning("No filtered-out proteins found; skipping heatmap.")
         fig = go.Figure()
-        fig.update_layout(title=dict(text=f"{run_id} -- Missingness heatmap (no filtered proteins)", x=0.5))
+        fig.update_layout(title=dict(text=f"{run_id} - Missingness heatmap (no filtered proteins)", x=0.5))
         return fig
 
-    # Abundance columns ordered by group
+    # Abundance columns ordered by group.
+    # Matrix columns may carry an abundance_ prefix; build a mapping from
+    # bare sample_id -> actual column name so we can look them up correctly.
     group_col = [c for c in metadata_df.columns if c != "sample_id"][0]
-    sample_order = (
-        metadata_df.sort_values(group_col)["sample_id"].tolist()
-    )
-    abund_cols = [c for c in sample_order if c in matrix_df.columns]
+    all_abund_cols = {
+        c.removeprefix("abundance_"): c
+        for c in matrix_df.columns
+        if c != "protein_id" and not c.startswith("peptide_count_")
+    }
+    sample_order_bare = metadata_df.sort_values(group_col)["sample_id"].tolist()
+    abund_cols = [all_abund_cols[s] for s in sample_order_bare if s in all_abund_cols]
+    display_labels = [s for s in sample_order_bare if s in all_abund_cols]
 
     # Build binary presence/absence matrix for filtered proteins
     subset = matrix_df[matrix_df["protein_id"].isin(removed_ids)].copy()
     subset = subset.set_index("protein_id")[abund_cols]
+    # Rename columns to bare sample IDs for display
+    subset.columns = display_labels
     detected = subset.notna().astype(int)  # 1=detected, 0=missing
 
     # Add sort keys from filter table
@@ -287,7 +296,7 @@ def plot_missingness_heatmap(
                 # Draw horizontal line at boundary
                 shapes.append(dict(
                     type="line",
-                    x0=-0.5, x1=len(abund_cols) - 0.5,
+                    x0=-0.5, x1=len(display_labels) - 0.5,
                     y0=i - 0.5, y1=i - 0.5,
                     line=dict(color="black", width=1.5),
                 ))
@@ -306,7 +315,7 @@ def plot_missingness_heatmap(
 
     fig = go.Figure(data=go.Heatmap(
         z=detected.values,
-        x=abund_cols,
+        x=display_labels,
         y=y_labels,
         colorscale=colorscale,
         showscale=False,
@@ -316,7 +325,7 @@ def plot_missingness_heatmap(
 
     fig.update_layout(
         title=dict(
-            text=f"{run_id} -- Missingness heatmap (filtered-out proteins: {len(sorted_proteins)})",
+            text=f"{run_id} - Missingness heatmap (filtered-out proteins: {len(sorted_proteins)})",
             x=0.5,
         ),
         xaxis=dict(title="Sample", side="bottom", tickangle=-30),
@@ -395,7 +404,7 @@ def plot_missingness_histogram(
     ))
     fig.update_layout(
         title=dict(
-            text=f"{run_id} -- Per-protein missingness rate (pre-filter, n={len(matrix_df):,} proteins)",
+            text=f"{run_id} - Per-protein missingness rate (pre-filter, n={len(matrix_df):,} proteins)",
             x=0.5,
         ),
         xaxis=dict(
@@ -451,7 +460,7 @@ def generate_html_report(
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>ProSIFT Missingness Report -- {run_id}</title>
+<title>ProSIFT Missingness Report - {run_id}</title>
 <style>
   body {{ font-family: Arial, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }}
   h1   {{ color: #333; border-bottom: 2px solid #ccc; padding-bottom: 8px; }}
