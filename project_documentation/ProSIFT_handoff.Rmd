@@ -150,7 +150,7 @@ Step [X] complete.
 | Phase 3 | Database integration layer | Not started | [See Project Documentation Section 6.3] |
 | Phase 4 | Interactive frontend | Not started | [See Project Documentation Section 6.4] |
 
-**Current phase:** Phase 1 (Module 01 complete; Module 02 pre-normalization QC/EDA next)
+**Current phase:** Phase 1 (Modules 01 and 02 complete; MISSINGNESS_REPORT process 4.10 remaining before Phase 2)
 
 **Current focus:** Module 01 MISSINGNESS_REPORT process (Process 4.10, next up)
 
@@ -386,16 +386,6 @@ Maintained by Claude Code. Claude.ai reads these entries to understand what work
 > - **Acceptance criteria:** [How to know when it's done]
 > - **Dependencies:** [Other tasks or modules that must be complete first]
 
-### Finalize Module 02 (Pre-Normalization QC/EDA) Design Spec
-- **Assigned to:** Claude.ai
-- **Priority:** High
-- **Phase:** 1
-- **Module:** Module 02
-- **Description:** Write the detailed design specification for Module 02 (pre-normalization QC/EDA). Includes: specific analyses and their outputs, QC flag schema (what triggers each flag, value types), outlier detection method selection, Nextflow process structure (single process vs. split), params.yml parameters for QC thresholds, report format, and acceptance criteria for Claude Code implementation.
-- **Context/References:** Project Documentation Section 3.1 (updated 2026-03-27); QC/EDA analysis inventory from 2026-03-27 session; Module 01 output schema in Handoff Section 6.1
-- **Acceptance criteria:** Spec is detailed enough for Claude Code to implement without architectural ambiguity. All output schemas defined. QC flag values and thresholds specified. Nextflow process I/O defined.
-- **Dependencies:** Module architecture decision (completed 2026-03-27)
-
 ### Implement MISSINGNESS_REPORT Process (Module 01, Process 4.10)
 - **Assigned to:** Claude Code
 - **Priority:** High
@@ -436,6 +426,7 @@ None currently.
 - Module 01 end-to-end pipeline tested (all 3 processes, CTXcyto run): 6 output files in results_test/CTXcyto_WT_vs_CTXcyto_KO/validation/ -- 2026-03-26
 - accession_redirected mapping status added to bin/uniprot_mapping.py; spec updated (01_input_validation.Rmd sections 4.6 and 4.8) -- 2026-03-26
 - Module documentation renamed/split to match revised pipeline architecture -- 2026-03-27 -- split 03_normalization_imputation.Rmd -> 03_normalization.Rmd + 04_imputation.Rmd; created 04b_qc_report_assembly.Rmd; renumbered 04-08 -> 06-10 (git mv); updated 02_qc_eda.Rmd header
+- Module 02 design spec finalized (02_qc_eda.Rmd -- 9 design decisions, full output schema, test criteria) -- 2026-03-27 -- Claude.ai session
 - Module 02 (bin/prenorm_qc.py + PRENORM_QC process) implemented and tested -- 2026-03-27 -- 17 outputs; CTXcyto_KO-2 flagged (extreme_median + pca_outlier); standalone and stub runs verified
 
 ---

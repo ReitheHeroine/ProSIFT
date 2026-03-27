@@ -10,7 +10,7 @@ output:
 
 **Last Updated:** 2026-03-27
 
-**Module Status:** Design complete; not yet implemented.
+**Module Status:** Complete. Design and implementation both done. `bin/prenorm_qc.py` and `PRENORM_QC` Nextflow process implemented, tested standalone on CTXcyto benchmark, stub-verified on all 12 runs.
 
 **Pipeline Position:** [Module 01: Input Validation & ID Mapping] --> **Module 02: Pre-Normalization QC/EDA** --> [Module 03: Normalization]
 
@@ -363,56 +363,53 @@ Module 02 introduces no new parameters. It reads the following existing paramete
 
 # 8. Testing Notes
 
-**Tests to run on CTX benchmark data (CTXcyto run):**
+**Run date:** 2026-03-27. Tested standalone (`bin/prenorm_qc.py`) on CTXcyto_WT_vs_CTXcyto_KO benchmark. Nextflow stub verified on all 12 runs.
 
-**Per-sample summary:**
+**Per-sample summary (CTXcyto_WT_vs_CTXcyto_KO):**
 
-- Verify 6 rows in sample_summary table (one per sample)
-- Verify n_detected values are in expected range (~8,200-8,400)
-- Verify total_intensity is computed (abundance_type is raw for CTX data)
-- Verify skewness values are near 0 (log2-transformed proteomics data should be roughly symmetric)
-- Verify kurtosis values are modest (|excess kurtosis| < 3 for well-behaved data)
+| sample_id | group | n_detected | median_intensity | total_intensity | mad_intensity | skewness | kurtosis |
+|---|---|---|---|---|---|---|---|
+| CTXcyto_WT-1 | WT | 8,257 | 23.16 | 9.01e+11 | 2.14 | -0.070 | 0.049 |
+| CTXcyto_WT-2 | WT | 8,159 | 22.95 | 7.69e+11 | 2.09 | -0.061 | 0.120 |
+| CTXcyto_WT-3 | WT | 8,258 | 23.25 | 9.43e+11 | 2.14 | -0.072 | 0.076 |
+| CTXcyto_KO-1 | KO | 8,313 | 23.44 | 1.08e+12 | 2.16 | -0.105 | 0.093 |
+| CTXcyto_KO-2 | KO | 8,203 | 23.07 | 9.17e+11 | 2.16 | -0.052 | 0.090 |
+| CTXcyto_KO-3 | KO | 8,270 | 23.36 | 1.06e+12 | 2.15 | -0.061 | 0.076 |
 
-**Box plots:**
+All checks passed: 6 rows, n_detected 8,159-8,313 (within expected range), total_intensity computed (raw input confirmed), skewness -0.05 to -0.11 (near zero, well-behaved), excess kurtosis 0.05-0.12 (well within |< 3|), medians ~23 (expected for log2 DIA-NN intensities).
 
-- Verify 6 boxes appear, 3 per group, colored distinctly
-- Verify medians are on log2 scale (values in the range 15-25 for typical DIA-NN intensities)
-- Visually inspect for systematic shifts between groups vs. within groups
+**PCA (CTXcyto_WT_vs_CTXcyto_KO):**
 
-**Q-Q plot:**
+- Proteins used: 7,818 of 8,403 (585 dropped for any missing value across samples)
+- PC1 variance explained: 51.7%; PC2: 29.6%; cumulative: 81.3%
+- WT and KO separate cleanly on PC1 (all WT samples negative PC1, all KO samples positive PC1)
+- CTXcyto_KO-2 notably displaced on PC2 (-77.8 vs. others near 0 or positive), flagged as PCA outlier within KO group
 
-- Verify 6 sets of points, colored by group
-- Verify reference line present
-- Points should approximately follow the reference line if data is well-behaved
+**Correlation heatmap (CTXcyto_WT_vs_CTXcyto_KO):**
 
-**PCA:**
+- Within-group correlations: KO-KO 0.990-0.994, WT-WT 0.993-0.995
+- Between-group correlations: 0.977-0.980
+- Clear block structure visible; within-group uniformly higher than between-group
+- Color scale anchored to [0.977, 1.0] -- subtle differences visible
 
-- Verify number of proteins used for PCA (should be reported in output; expect ~8,000+ after dropping missing-value proteins)
-- Verify variance explained percentages sum to <= 100%
-- Verify WT and KO samples show some separation (or document if they don't)
-- Check for any sample far from its group centroid
+**Outlier flags (CTXcyto_WT_vs_CTXcyto_KO):**
 
-**Correlation heatmap:**
+| sample_id | flag_low_detection | flag_extreme_median | flag_pca_outlier | flag_low_correlation | n_flags |
+|---|---|---|---|---|---|
+| CTXcyto_WT-1 | False | False | False | False | 0 |
+| CTXcyto_WT-2 | False | True | False | False | 1 |
+| CTXcyto_WT-3 | False | False | False | False | 0 |
+| CTXcyto_KO-1 | False | False | False | True | 1 |
+| CTXcyto_KO-2 | False | True | True | False | **2** |
+| CTXcyto_KO-3 | False | False | False | False | 0 |
 
-- Verify 6x6 matrix
-- Verify within-group correlations are higher than between-group correlations (in a well-designed experiment)
-- Verify color scale uses observed range, not 0-to-1
-- Verify correlation values are annotated in cells
+CTXcyto_KO-2 flagged on 2 criteria: flag_extreme_median (median is the most extreme within the KO group at 23.07 vs. KO median-of-medians ~23.40) and flag_pca_outlier (max PCA distance from KO centroid in PC1-PC2 space, exceeding 1.5x the median distance). This is consistent with the visible PC2 displacement. The flag is advisory -- no data excluded.
 
-**Outlier detection:**
+**Report:** HTML report (`{run_id}.prenorm_qc_report.html`) produced at ~6.5MB with all 5 embedded interactive plots. Flagged sample alert (yellow/note level) correctly displayed for CTXcyto_KO-2.
 
-- Verify 6 rows in sample_flags table
-- Verify flag columns are boolean
-- Verify n_flags is the sum of the four flag columns
-- Manually cross-check: if a sample has a notably low detection count and is distant in PCA, it should have 2+ flags
+**Known implementation note:** `Path.with_suffix` strips the plot-type suffix when used on paths like `run.sample_intensity_summary` (it replaces the last dot-separated token). Fixed by using string concatenation (`str(base_path) + ".png"`) instead of `.with_suffix(".png")` in `save_plot()`.
 
-**Report:**
-
-- Verify HTML report renders with all 5 plots
-- Verify flagged sample section appears (even if "no samples flagged")
-- Verify interactive Plotly plots are functional (hover, zoom)
-
-**Edge case tests:**
+**Remaining edge case tests (not yet run):**
 
 - Test with `abundance_type: log2` -- verify log2 transformation is NOT applied, total_intensity is null
 - Test with a dataset where one sample has notably lower quality -- verify it accumulates 2+ flags
@@ -427,6 +424,13 @@ Module 02 introduces no new parameters. It reads the following existing paramete
 **Reason:** Documentation restructured into master overview + module files.
 **Affected processes:** All (initial design capture).
 **Downstream effects:** None.
+
+### 2026-03-27 -- Implementation
+
+**Change:** Module implemented as `bin/prenorm_qc.py` and `modules/local/prenorm_qc/main.nf` (PRENORM_QC process). Workflow wired in `workflows/prosift.nf`. `python-kaleido` added to `environment.yml` for static PNG export.
+**Reason:** Implementation follows the design established in the 2026-03-27 redesign. One bug discovered and fixed during testing: `Path.with_suffix` was stripping the plot-type component from output filenames (e.g., `run.sample_intensity_summary.with_suffix('.png')` = `run.png`); corrected to string concatenation.
+**Affected processes:** PRENORM_QC (new); `workflows/prosift.nf` updated to branch `VALIDATE_INPUTS.out.metadata` via multiMap and add PRENORM_QC channel join.
+**Downstream effects:** Outputs published to `{run_id}/qc/`. QC Report Assembly (Phase 2) will consume `sample_flags.parquet`, `pca_results.parquet`, `correlation_matrix.parquet`, and the plot files.
 
 ### 2026-03-27 -- Complete Redesign Based on QC Analysis Inventory
 
