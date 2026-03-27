@@ -1,0 +1,96 @@
+---
+title: "ProSIFT Module 04b: QC Report Assembly"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: default
+---
+
+**Last Updated:** 2026-03-27
+**Module Status:** Stub -- not yet designed
+**Pipeline Position:** [Module 04: Imputation] --> **Module 04b: QC Report Assembly** --> [Module 05: Differential Abundance]
+
+---
+
+# 1. Purpose and Scope
+
+This is a lightweight assembly process that compiles diagnostic outputs from Modules 02-04 into a single consolidated HTML QC report. It serves as the formal checkpoint between the data preparation stages (QC, normalization, imputation) and the analytical stages (differential abundance, enrichment).
+
+The report is designed to be reviewed by the analyst before differential abundance proceeds. It does not modify any data -- it only collects and renders existing outputs.
+
+**[FOLLOW-UP NEEDED]** Full design pending. Report sections, plot layout, and pass/warn/fail flag thresholds need to be defined once Modules 02-04 are designed.
+
+---
+
+# 2. Inputs and Outputs
+
+## 2.1 Inputs
+
+- Pre-normalization QC diagnostics (from Module 02)
+- Post-normalization diagnostics (from Module 03)
+- CV summary table and imputation diagnostics (from Module 04)
+- params.yml (for threshold values used in flag evaluation)
+
+## 2.2 Outputs
+
+- Consolidated QC report (HTML, interactive Plotly plots)
+- QC flag summary table (Parquet + CSV): per-sample and per-protein flags aggregated across Modules 02-04
+
+---
+
+# 3. Sub-Workflow Diagram
+
+*[To be designed.]*
+
+---
+
+# 4. Process Specifications
+
+*[To be designed. Will cover:]*
+
+- Report section layout (pre-norm QC, normalization diagnostics, imputation summary, CV distributions)
+- QC flag schema: per-sample flags (outlier, low detection rate) and per-protein flags (high CV, high missingness)
+- Pass/warn/fail thresholds for each flag type
+
+---
+
+# 5. Design Decisions
+
+### 2026-03-27 -- QC Report Assembly as Separate Process
+
+**Decision:** QC Report Assembly is a distinct Nextflow process (Module 04b) rather than a section of Module 04 (Imputation) or Module 05 (Differential Abundance).
+
+**Rationale:** The report draws on outputs from three upstream modules (02, 03, 04). Making it a section of any one of them would create an awkward dependency chain or require passing diagnostic outputs forward for no analytical reason. A dedicated assembly process with explicit inputs from all three upstream modules is cleaner and makes the checkpoint intent explicit.
+
+**Alternatives considered:** Include report assembly in Module 04 as a final step -- rejected because it would require Module 04 to depend on Module 02 and 03 diagnostic outputs, complicating the DAG. Include it in Module 05 as a pre-analysis check -- rejected because it would couple the checkpoint to the analytical module.
+
+---
+
+# 6. Parameters
+
+*[To be defined when Modules 02-04 are designed. Will include flag thresholds referenced during report assembly.]*
+
+---
+
+# 7. Known Limitations and Edge Cases
+
+- The QC report is advisory -- it documents data quality and flags potential issues but does not automatically halt the pipeline.
+- Flag thresholds are heuristic; appropriate values may differ between tissue types, sample preparation methods, or abundance dynamic ranges.
+
+---
+
+# 8. Testing Notes
+
+*[To be populated during implementation.]*
+
+---
+
+# 9. Change History
+
+### 2026-03-27 -- Created
+
+**Change:** New module stub created as part of the pipeline architecture revision (2026-03-27 session).
+**Reason:** QC Report Assembly identified as a dedicated checkpoint process between the data preparation stages (Modules 02-04) and the analytical stages (Modules 05+). Using "04b" numbering to indicate it follows Module 04 but precedes Module 05 without disrupting the module numbering of analytical stages.
+**Affected processes:** N/A (stub only).

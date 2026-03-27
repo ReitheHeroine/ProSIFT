@@ -1,5 +1,5 @@
 ---
-title: "ProSIFT Module 02: QC / EDA"
+title: "ProSIFT Module 02: Pre-Normalization QC / EDA"
 output:
   html_document:
     toc: true
@@ -8,9 +8,10 @@ output:
     theme: default
 ---
 
-**Last Updated:** 2026-03-23
+**Last Updated:** 2026-03-27
 **Module Status:** Design in progress
-**Pipeline Position:** [Input validation & ID mapping] --> **QC / EDA** --> [QC report + flags --> Results assembly]
+**Pipeline Position:** [Module 01: Input validation & ID mapping] --> **Module 02: Pre-Normalization QC/EDA** --> [Module 03: Normalization]
+**Scope note:** Pre-normalization only. CV analysis, post-normalization QC, and imputation diagnostics are handled in Modules 03-04. QC Report Assembly (Module 04b) compiles outputs from Modules 02-04 into a consolidated HTML report.
 
 ---
 

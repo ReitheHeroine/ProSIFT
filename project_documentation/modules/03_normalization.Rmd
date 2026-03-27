@@ -1,0 +1,93 @@
+---
+title: "ProSIFT Module 03: Normalization"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: default
+---
+
+**Last Updated:** 2026-03-27
+**Module Status:** Stub -- not yet designed
+**Pipeline Position:** [Module 02: Pre-Normalization QC/EDA] --> **Module 03: Normalization** --> [Module 04: Imputation]
+
+---
+
+# 1. Purpose and Scope
+
+This module normalizes the log-transformed abundance data to correct for systematic technical biases between samples (differences in sample loading, instrument drift, etc.). Normalization runs after pre-normalization QC (Module 02) so that the raw distributional properties are already documented.
+
+Post-normalization diagnostic plots are produced here so that normalization effectiveness can be evaluated before imputation begins.
+
+**[FOLLOW-UP NEEDED]** Full design of this module is pending. Normalization method selection, log transformation logic, post-normalization diagnostic output spec, and process specifications need to be defined.
+
+---
+
+# 2. Inputs and Outputs
+
+## 2.1 Inputs
+
+- Filtered abundance matrix (Parquet, from Module 01 Process 4.4)
+- Validated metadata (Parquet, from Module 01)
+- params.yml
+
+## 2.2 Outputs
+
+- Normalized abundance matrix (Parquet)
+- Post-normalization diagnostic plots (for QC Report Assembly, Module 04b)
+
+---
+
+# 3. Sub-Workflow Diagram
+
+*[To be designed.]*
+
+---
+
+# 4. Process Specifications
+
+*[To be designed. Will cover:]*
+
+- Log2 transformation (conditional on `input.abundance_type`)
+- Normalization method application (median centering, quantile, VSN)
+- Post-normalization distribution and sample-correlation diagnostics
+
+---
+
+# 5. Design Decisions
+
+*[No module-specific decisions recorded yet.]*
+
+---
+
+# 6. Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `normalization.method` | string | "median" | median, quantile, vsn, or none |
+| `normalization.log_transform` | bool | true | Apply log2 if `input.abundance_type` is "raw" |
+
+---
+
+# 7. Known Limitations and Edge Cases
+
+- Normalization assumes that most proteins are not differentially abundant (the majority rule). When a large fraction of proteins are truly changed between conditions, standard normalization methods can introduce bias.
+- VSN is a variance-stabilizing transformation that normalizes and log-transforms simultaneously; it should not be combined with a separate log2 step.
+
+---
+
+# 8. Testing Notes
+
+*[To be populated during implementation.]*
+
+---
+
+# 9. Change History
+
+### 2026-03-27 -- Split from 03_normalization_imputation.Rmd
+
+**Change:** Module file created by splitting the combined normalization/imputation stub into separate module files (03_normalization.Rmd and 04_imputation.Rmd) to match the revised pipeline architecture.
+**Reason:** Normalization and imputation are sequential but distinct steps with different diagnostic outputs and design considerations. Separating them allows each to have its own Nextflow process, parameter namespace, and output spec.
+**Affected processes:** N/A (stub only).
+**Downstream effects:** Module numbers 04-08 renumbered to 06-10.

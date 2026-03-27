@@ -12,7 +12,7 @@ output:
 
 # ProSIFT -- Handoff File
 
-**Last Updated:** 2026-03-26
+**Last Updated:** 2026-03-27
 
 **Purpose:** Operational coordination across Claude sessions. Tracks current development state, active tasks, blockers, and environment details. Updated every session.
 
@@ -145,14 +145,14 @@ Step [X] complete.
 
 | Phase | Description | Status | Notes |
 |---|---|---|---|
-| Phase 1 | Core pipeline skeleton + QC module | Not started | [See Project Documentation Section 6.1] |
-| Phase 2 | Statistical analysis + enrichment | Not started | [See Project Documentation Section 6.2] |
+| Phase 1 | Core pipeline skeleton + pre-normalization QC | In progress | [See Project Documentation Section 6.1] |
+| Phase 2 | Normalization, imputation, statistical analysis, enrichment + QC report assembly | Not started | [See Project Documentation Section 6.2] |
 | Phase 3 | Database integration layer | Not started | [See Project Documentation Section 6.3] |
 | Phase 4 | Interactive frontend | Not started | [See Project Documentation Section 6.4] |
 
-**Current phase:** Phase 1 (Module 01 complete; Module 02 QC/EDA next)
+**Current phase:** Phase 1 (Module 01 complete; Module 02 pre-normalization QC/EDA next)
 
-**Current focus:** Module 02 (QC/EDA) design
+**Current focus:** Module 02 (pre-normalization QC/EDA) design
 
 ## 2.2 Module Status
 
@@ -164,23 +164,19 @@ Tracks implementation status of individual modules within and across phases. A m
 | nextflow.config + params.yml schema | 1 | Functional | 2026-03-26 | -- | local/pbs/conda/singularity profiles; samplesheet param replaces params_file; conda PATH workaround for macOS; cluster path needs updating before first cluster run |
 | Conda environment | 1 | Complete | 2026-03-25 | -- | environment.yml finalized; prosift env exists locally; not yet created on cluster |
 | Data preparation scripts | Pre-1 | Complete | 2026-03-26 | -- | All 3 scripts tested; samplesheet.csv generated; abundance_prefix bug fixed in prepare_prosift_input.py; 12 per-run input directories regenerated |
-| Input validation (Processes 4.1-4.3) | 1 | Complete | 2026-03-26 | -- | bin/validate_inputs.py implemented and tested standalone and through Nextflow |
-| Detection filter (Process 4.4) | 1 | Complete | 2026-03-26 | -- | bin/filter_proteins.py implemented and tested standalone and through Nextflow |
-| UniProt ID mapping (Processes 4.5-4.9) | 1 | Complete | 2026-03-26 | -- | bin/uniprot_mapping.py implemented; paginated JSON API; MD5 cache; 5 mapping statuses; ortholog columns null (Phase 3); tested end-to-end |
-| QC/EDA | 1 | Not started | -- | -- | |
+| Module 01: Input validation (Processes 4.1-4.3) | 1 | Complete | 2026-03-26 | -- | bin/validate_inputs.py implemented and tested standalone and through Nextflow |
+| Module 01: Detection filter (Process 4.4) | 1 | Complete | 2026-03-26 | -- | bin/filter_proteins.py implemented and tested standalone and through Nextflow |
+| Module 01: UniProt ID mapping (Processes 4.5-4.9) | 1 | Complete | 2026-03-26 | -- | bin/uniprot_mapping.py implemented; paginated JSON API; MD5 cache; 5 mapping statuses; ortholog columns null (Phase 3); tested end-to-end |
+| Module 02: Pre-normalization QC/EDA | 1 | Not started | 2026-03-27 | -- | Rescoped 2026-03-27: pre-normalization only (missingness, raw distributions, PCA, correlation, distributional shape). CV, post-norm QC, imputation diagnostics moved to Modules 03-04. |
+| Module 03: Normalization | 2 | Not started | -- | -- | New module (split from combined normalization/imputation). Includes post-normalization diagnostic plots. |
+| Module 04: Imputation | 2 | Not started | -- | -- | New module (split from combined normalization/imputation). Includes imputation diagnostics, CV on normalized pre-imputation data. |
+| QC Report Assembly | 2 | Not started | -- | -- | New process (added 2026-03-27). Lightweight compilation of Module 02-04 diagnostics into consolidated HTML report. Checkpoint before differential abundance. |
+| Module 05: Differential abundance (DEqMS) | 2 | Not started | -- | -- | Renumbered from Module 04. Includes volcano and MA plots. |
+| Module 06: ORA / GSEA enrichment | 2 | Not started | -- | -- | Renumbered from Module 05. Includes dot plots, GSEA running score plots. |
+| Module 07: Database queries (all 5 databases) | 3 | Not started | -- | -- | Renumbered from Module 06. Caching/rate-limiting framework, UniProt, PubMed, DisGeNET, DGIdb, CTD. |
+| Module 08: Results assembly (SQLite) | 3 | Not started | -- | -- | Renumbered from Module 07. Replaces JSON profiles. |
+| Module 09: Interactive frontend | 4 | Not started | -- | Tech selection deferred | Renumbered from Module 08. |
 | Singularity definition | 1 | Not started | -- | -- | Dependency list now established (environment.yml); ready to write .def file |
-| Imputation | 2 | Not started | -- | -- | |
-| Differential abundance (DEqMS) | 2 | Not started | -- | -- | |
-| ORA / GSEA enrichment | 2 | Not started | -- | -- | |
-| Caching / rate-limiting framework | 3 | Not started | -- | -- | |
-| UniProt annotation retrieval | 3 | Not started | -- | -- | |
-| PubMed E-utilities queries | 3 | Not started | -- | -- | |
-| DisGeNET queries | 3 | Not started | -- | -- | |
-| DGIdb queries | 3 | Not started | -- | -- | |
-| CTD queries | 3 | Not started | -- | -- | |
-| SQLite results database assembly | 3 | Not started | -- | -- | Replaces JSON profiles |
-| Biological process aggregation | 3 | Not started | -- | -- | |
-| Interactive frontend | 4 | Not started | -- | Tech selection deferred | |
 
 ## 2.3 Nextflow Process Status
 
@@ -206,6 +202,18 @@ Maintained by Claude Code. Claude.ai reads these entries to understand what work
 > - [Tests run and outcomes]
 > - [Decisions made -- flag for promotion to Project Documentation Decision Register if significant]
 > - [Issues encountered or flagged]
+
+### 2026-03-27 (Claude.ai) -- Module 02 Architecture: QC/EDA Rescoped, Pipeline Modules Restructured
+
+- Conducted systematic inventory of all QC/EDA analyses for discovery proteomics, organized by pipeline timing: pre-normalization (missingness, detection counts, total intensity, raw distributions, distributional shape), both pre- and post-normalization (PCA, sample correlation, box/density plots), post-normalization pre-imputation (CV within groups), post-imputation (imputation diagnostics), post-differential-abundance (volcano/MA plots)
+- Evaluated four architectural options for Module 02: (A) thin QC module + diagnostics in each downstream module, (B) two-part QC wrapping normalization/imputation, (C) merged "Data Preparation and QC" supermodule, (D) maximum granularity with separate modules per analytical step
+- **Decision: Hybrid of Options A/D with QC Report Assembly checkpoint.** Module 02 rescoped to pre-normalization QC only. Normalization and imputation become separate modules (03 and 04), each producing their own diagnostic outputs. Lightweight QC Report Assembly process sits after Module 04 as a checkpoint before differential abundance.
+- Confirmed volcano plots and MA plots belong to Module 05 (Differential Abundance), not QC/EDA
+- Confirmed CV belongs in Module 04 (post-normalization, pre-imputation, observed values only)
+- New module numbering: 01 Input Validation [complete], 02 Pre-norm QC, 03 Normalization, 04 Imputation, QC Report Assembly, 05 Differential Abundance, 06 Enrichment, 07 Database Queries, 08 Results Assembly, 09 Frontend
+- Updated Project Documentation: Section 3 restructured (3.1-3.7 with new normalization, imputation, QC report assembly subsections), Section 2.2 DAG description updated, Section 6 Phase 1/2 deliverables updated, Decision Register entry added, Development Log entry added
+- Updated Handoff: module status table, session log, file system map notes
+- **[FOLLOW-UP NEEDED]:** Rename/split module doc files to match new numbering (03_normalization_imputation.Rmd -> 03_normalization.Rmd + 04_imputation.Rmd; renumber 04-08 -> 05-09; add QC report assembly doc)
 
 ### 2026-03-26 (Claude.ai) -- Module 01 Review; Architecture Decisions; Usability Assessment
 
@@ -358,6 +366,16 @@ Maintained by Claude Code. Claude.ai reads these entries to understand what work
 > - **Acceptance criteria:** [How to know when it's done]
 > - **Dependencies:** [Other tasks or modules that must be complete first]
 
+### Finalize Module 02 (Pre-Normalization QC/EDA) Design Spec
+- **Assigned to:** Claude.ai
+- **Priority:** High
+- **Phase:** 1
+- **Module:** Module 02
+- **Description:** Write the detailed design specification for Module 02 (pre-normalization QC/EDA). Includes: specific analyses and their outputs, QC flag schema (what triggers each flag, value types), outlier detection method selection, Nextflow process structure (single process vs. split), params.yml parameters for QC thresholds, report format, and acceptance criteria for Claude Code implementation.
+- **Context/References:** Project Documentation Section 3.1 (updated 2026-03-27); QC/EDA analysis inventory from 2026-03-27 session; Module 01 output schema in Handoff Section 6.1
+- **Acceptance criteria:** Spec is detailed enough for Claude Code to implement without architectural ambiguity. All output schemas defined. QC flag values and thresholds specified. Nextflow process I/O defined.
+- **Dependencies:** Module architecture decision (completed 2026-03-27)
+
 ## 4.2 Decisions and Designs for Review
 
 > Implementation choices, design tradeoffs, or prototype outputs produced by Claude Code
@@ -387,6 +405,7 @@ None currently.
 - bin/uniprot_mapping.py implemented and tested (Processes 4.5-4.9); UNIPROT_MAPPING process wired -- 2026-03-26 -- bin/uniprot_mapping.py, modules/local/uniprot_mapping/main.nf, workflows/prosift.nf
 - Module 01 end-to-end pipeline tested (all 3 processes, CTXcyto run): 6 output files in results_test/CTXcyto_WT_vs_CTXcyto_KO/validation/ -- 2026-03-26
 - accession_redirected mapping status added to bin/uniprot_mapping.py; spec updated (01_input_validation.Rmd sections 4.6 and 4.8) -- 2026-03-26
+- Module documentation renamed/split to match revised pipeline architecture -- 2026-03-27 -- split 03_normalization_imputation.Rmd -> 03_normalization.Rmd + 04_imputation.Rmd; created 04b_qc_report_assembly.Rmd; renumbered 04-08 -> 06-10 (git mv); updated 02_qc_eda.Rmd header
 
 ---
 
@@ -407,12 +426,13 @@ None currently.
 > **Entry format:** [DATE opened] [Question] [Status/progress]
 
 - 2026-03-20 -- PubMed co-occurrence normalization approach not yet selected [See Project Documentation Section 4.3]
-- 2026-03-20 -- Frontend technology not yet selected (deferred to after Phase 2) [See Project Documentation Section 3.4]
+- 2026-03-20 -- Frontend technology not yet selected (deferred to after Phase 2) [See Project Documentation Section 3.7]
 - ~~2026-03-26 -- nextflow.config conda profile has hardcoded local path~~ Resolved 2026-03-26: `process.beforeScript` now uses `$(conda info --base)/envs/prosift/bin` to find the conda prefix dynamically. Works on any machine where conda is on PATH and the `prosift` env exists -- no edits needed when deploying to cluster.
 - ~~2026-03-26 -- samplesheet.csv generation not yet added to `prepare_prosift_input.py`~~ Resolved 2026-03-26: `write_samplesheet()` added to `prepare_prosift_input.py`; samplesheet now auto-generated with absolute paths on every run.
 - 2026-03-26 -- ID mapping cache has no schema version. If parsing logic changes (new status added, field renamed), existing cache files will be loaded and served with the old classification without any warning. Adding a `schema_version` field to the cache metadata JSON would protect against this. Low priority now; becomes important before Phase 3 changes to the mapping logic.
 - 2026-03-26 -- UniProt cache dir on cluster must be on persistent storage. Currently `{params.outdir}/cache/id_mapping`. Confirm `params.outdir` resolves to a persistent mount (home2 or scratch, not a temp FS) before first cluster run. If outdir is on scratch, the cache may be deleted between submissions, defeating the point.
 - 2026-03-26 -- Input usability: current workflow requires 3 preprocessing scripts + samplesheet + per-run params/metadata before pipeline runs. Acceptable for development; not suitable for bench scientists. The usability layer sits entirely outside the pipeline and can be rewritten at any point without architectural changes. Deferred to post-Phase 1. [See also Project Documentation Section 6.5]
+- 2026-03-27 -- Module documentation files need renaming/splitting to match revised module architecture. Not blocking (existing files are placeholders for Modules 03-08 anyway), but should be done before writing detailed specs. See Pending Tasks.
 
 ## 5.3 Resolved Questions
 
@@ -444,9 +464,9 @@ Each entry defines what a module outputs and which downstream modules consume th
 
 No data contracts defined yet. Populate as modules are implemented.
 
-### Module 01 (Input Validation & ID Mapping) --> Module 02 (QC/EDA)
+### Module 01 (Input Validation & ID Mapping) --> Module 02 (Pre-Normalization QC/EDA)
 - **Producer:** FILTER_PROTEINS, UNIPROT_MAPPING
-- **Consumer:** Module 02 QC/EDA process(es) (not yet implemented)
+- **Consumer:** Module 02 Pre-Normalization QC/EDA process(es) (not yet implemented)
 - **Primary data artifacts:**
   - `{run_id}.filtered_matrix.parquet` -- post-detection-filter abundance data (~8,500-8,800 proteins x 6 samples per run, plus peptide count columns). Parquet format. Produced by FILTER_PROTEINS.
   - `{run_id}.id_mapping.parquet` -- protein ID mapping table (10 columns: protein_id, uniprot_accession, gene_symbol_mouse, entrez_id_mouse, ensembl_gene_mouse, human_ortholog_symbol [null], human_ortholog_entrez [null], ortholog_mapping_status [null], mapping_status, mapping_notes). One row per protein. Produced by UNIPROT_MAPPING.
@@ -459,7 +479,7 @@ No data contracts defined yet. Populate as modules are implemented.
 
 ## 7.1 Directory Structure
 
-**Last updated by Claude Code:** 2026-03-26
+**Last updated by Claude Code:** 2026-03-27
 
 ```
 ProSIFT/
@@ -496,13 +516,15 @@ ProSIFT/
 │   │   └── prosift_input_validation_workflow.svg
 │   └── modules/
 │       ├── 01_input_validation.Rmd          # Module 01: Input Validation & ID Mapping (design complete)
-│       ├── 02_qc_eda.Rmd                    # Module 02: QC/EDA (design in progress)
-│       ├── 03_normalization_imputation.Rmd  # Module 03 (design in progress)
-│       ├── 04_differential_abundance.Rmd    # Module 04 (design in progress)
-│       ├── 05_enrichment.Rmd                # Module 05 (design in progress)
-│       ├── 06_database_queries.Rmd          # Module 06 (design in progress)
-│       ├── 07_results_assembly.Rmd          # Module 07 (design in progress)
-│       └── 08_frontend.Rmd                  # Module 08 (design in progress)
+│       ├── 02_qc_eda.Rmd                    # Module 02: Pre-Normalization QC/EDA (rescoped 2026-03-27; design in progress)
+│       ├── 03_normalization.Rmd             # Module 03: Normalization (stub; split from 03_normalization_imputation.Rmd 2026-03-27)
+│       ├── 04_imputation.Rmd                # Module 04: Imputation + CV analysis (stub; split from 03_normalization_imputation.Rmd 2026-03-27)
+│       ├── 04b_qc_report_assembly.Rmd       # Module 04b: QC Report Assembly checkpoint (stub; created 2026-03-27)
+│       ├── 06_differential_abundance.Rmd    # Module 06: Differential Abundance (stub)
+│       ├── 07_enrichment.Rmd                # Module 07: Enrichment (stub)
+│       ├── 08_database_queries.Rmd          # Module 08: Database Queries (stub)
+│       ├── 09_results_assembly.Rmd          # Module 09: Results Assembly (stub)
+│       └── 10_frontend.Rmd                  # Module 10: Frontend (stub)
 │
 ├── CTX_synaptosome_project_data/
 │   └── Filtered Proteins-Table 1.csv        # Raw DIA-NN output (source data, not committed)

@@ -1,0 +1,100 @@
+---
+title: "ProSIFT Module 04: Imputation"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: default
+---
+
+**Last Updated:** 2026-03-27
+**Module Status:** Stub -- not yet designed
+**Pipeline Position:** [Module 03: Normalization] --> **Module 04: Imputation** --> [Module 04b: QC Report Assembly]
+
+---
+
+# 1. Purpose and Scope
+
+This module imputes missing values in the normalized abundance data, preparing it for differential abundance analysis. Missing values in proteomics are predominantly missing not at random (MNAR) -- low-abundance proteins drop below the detection limit -- so MNAR-aware imputation methods are preferred.
+
+CV analysis runs here (on normalized pre-imputation data) so that replicate variability reflects true biological variation rather than imputation artifacts. Imputation diagnostics are also produced here and forwarded to the QC Report Assembly (Module 04b).
+
+**[FOLLOW-UP NEEDED]** Full design of this module is pending. Imputation method selection, sensitivity analysis design, CV analysis spec, and process specifications need to be defined.
+
+---
+
+# 2. Inputs and Outputs
+
+## 2.1 Inputs
+
+- Normalized abundance matrix (Parquet, from Module 03)
+- Validated metadata (Parquet, from Module 01)
+- params.yml
+
+## 2.2 Outputs
+
+- Normalized, imputed abundance matrix (Parquet) -- primary input to Module 05 (Differential Abundance)
+- CV summary table (Parquet): per-protein CV within groups, computed on normalized pre-imputation values
+- Imputation report: which values were imputed, imputation method used, fraction imputed per sample/group
+- Sensitivity analysis results (if enabled): comparison of downstream statistics across imputation methods
+
+---
+
+# 3. Sub-Workflow Diagram
+
+*[To be designed.]*
+
+---
+
+# 4. Process Specifications
+
+*[To be designed. Will cover:]*
+
+- CV calculation on normalized pre-imputation data
+- Imputation method application (MinProb, KNN, left-censored)
+- Sensitivity analysis design (run multiple methods, compare effect on downstream DA results)
+- Imputation diagnostic plots
+
+---
+
+# 5. Design Decisions
+
+*[No module-specific decisions recorded yet.]*
+
+---
+
+# 6. Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `imputation.method` | string | "minprob" | minprob, knn, left_censored, or none |
+| `imputation.minprob_quantile` | float | 0.01 | For MinProb: quantile of observed distribution used as imputed value mean |
+| `imputation.knn_neighbors` | int | 5 | For KNN: number of nearest neighbors |
+| `imputation.sensitivity_analysis` | bool | true | Run all methods and compare downstream DA results |
+| `qc.cv_threshold` | float | 0.5 | Flag proteins with intra-group CV exceeding this value |
+
+---
+
+# 7. Known Limitations and Edge Cases
+
+- All imputation methods make assumptions about the missing data mechanism. MNAR-aware methods (MinProb, left-censored) assume that missing values correspond to low-abundance proteins, which is generally but not always true in MS proteomics.
+- Imputation method choice can materially affect differential abundance results, particularly for proteins with high missingness. The sensitivity analysis option is designed to quantify this effect.
+- CV is computed on normalized pre-imputation values; imputed zeros or near-zero values would artificially inflate CV estimates.
+
+---
+
+# 8. Testing Notes
+
+*[To be populated during implementation.]*
+
+---
+
+# 9. Change History
+
+### 2026-03-27 -- Split from 03_normalization_imputation.Rmd
+
+**Change:** Module file created by splitting the combined normalization/imputation stub into separate module files (03_normalization.Rmd and 04_imputation.Rmd) to match the revised pipeline architecture.
+**Reason:** Normalization and imputation are sequential but distinct steps. CV analysis was moved here (from Module 02) because it should run on normalized pre-imputation data; running CV on raw data would confound biological variability with technical normalization differences.
+**Affected processes:** N/A (stub only).
+**Downstream effects:** Module numbers 04-08 renumbered to 06-10.
