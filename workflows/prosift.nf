@@ -10,8 +10,11 @@ include { VALIDATE_INPUTS  } from '../modules/local/validate_inputs/main'
 include { FILTER_PROTEINS  } from '../modules/local/filter_proteins/main'
 include { UNIPROT_MAPPING  } from '../modules/local/uniprot_mapping/main'
 
+// Module 01: Missingness Report (Process 4.10, advisory)
+include { MISSINGNESS_REPORT } from '../modules/local/missingness_report/main'
+
 // Module 02: Pre-Normalization QC/EDA
-include { PRENORM_QC       } from '../modules/local/prenorm_qc/main'
+include { PRENORM_QC         } from '../modules/local/prenorm_qc/main'
 
 workflow PROSIFT {
 
@@ -50,25 +53,45 @@ workflow PROSIFT {
     // --- Module 01, Processes 4.1-4.3: Input validation ---
     VALIDATE_INPUTS(ch_input.validate)
 
-    // VALIDATE_INPUTS.out.metadata is consumed by two downstream joins:
-    // FILTER_PROTEINS and PRENORM_QC. multiMap creates two independent
-    // branch channels, each receiving all items.
+    // VALIDATE_INPUTS.out.metadata is consumed by three downstream joins:
+    // FILTER_PROTEINS, MISSINGNESS_REPORT, and PRENORM_QC. multiMap
+    // creates three independent branch channels, each receiving all items.
     VALIDATE_INPUTS.out.metadata
         .multiMap { meta, path ->
-            filter:  [ meta, path ]
-            prenorm: [ meta, path ]
+            filter:     [ meta, path ]
+            missingness: [ meta, path ]
+            prenorm:    [ meta, path ]
         }
         .set { ch_validated_metadata }
+
+    // VALIDATE_INPUTS.out.matrix is consumed by two downstream joins:
+    // FILTER_PROTEINS (post-filter matrix) and MISSINGNESS_REPORT (pre-filter matrix).
+    VALIDATE_INPUTS.out.matrix
+        .multiMap { meta, path ->
+            filter:     [ meta, path ]
+            missingness: [ meta, path ]
+        }
+        .set { ch_validated_matrix }
 
     // --- Module 01, Process 4.4: Detection filter ---
     // Join validated matrix + validated metadata + params_yml into one channel.
     // .join() matches on the first element (meta) across all three sources.
-    VALIDATE_INPUTS.out.matrix
+    ch_validated_matrix.filter
         .join(ch_validated_metadata.filter)
         .join(ch_input.filter_params)
         .set { ch_filter_input }
 
     FILTER_PROTEINS(ch_filter_input)
+
+    // --- Module 01, Process 4.10: Missingness report (advisory) ---
+    // Joins: filter_table (FILTER_PROTEINS) + validated_matrix (pre-filter, VALIDATE_INPUTS)
+    //        + validated_metadata (VALIDATE_INPUTS).
+    FILTER_PROTEINS.out.filter_table
+        .join(ch_validated_matrix.missingness)
+        .join(ch_validated_metadata.missingness)
+        .set { ch_missingness_input }
+
+    MISSINGNESS_REPORT(ch_missingness_input)
 
     // --- Module 01, Processes 4.5-4.9: UniProt ID mapping ---
     FILTER_PROTEINS.out.matrix

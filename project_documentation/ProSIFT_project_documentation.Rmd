@@ -10,7 +10,7 @@ output:
     theme: default
 ---
 
-**Last Updated:** 2026-03-23
+**Last Updated:** 2026-03-27
 
 **Working Project Name:** ProSIFT (PROtein Statistical Integration and Filtering Tool)
 
@@ -163,7 +163,7 @@ The pipeline has a clear main spine running down the right side of the diagram: 
 
 Two major branching points structure the rest of the pipeline:
 
-**First fork (after validation):** The QC/EDA module branches off to the left and runs on the validated but un-normalized data. This is intentional -- the QC module needs to assess raw distributional properties (skewness, dynamic range, missingness patterns) before any transformation is applied. QC outputs a report and a set of per-protein and per-sample flags. These flags take a long-range path through the pipeline (represented by the dashed arrow on the left) and are incorporated into protein profiles at the assembly stage. The main analytical path continues rightward through normalization and imputation.
+**First fork (after validation):** *Updated 2026-03-27 to reflect revised module architecture.* The pre-normalization QC/EDA module (Module 02) branches off to the left and runs on the validated but un-normalized data. This is intentional -- the pre-normalization QC module needs to assess raw distributional properties (skewness, dynamic range, missingness patterns) before any transformation is applied. The main analytical path continues rightward through normalization (Module 03) and imputation (Module 04), each of which produces its own diagnostic outputs. A QC Report Assembly process then collects diagnostic outputs from Modules 02, 03, and 04 into a consolidated QC report, creating a checkpoint before differential abundance. QC flags from across these modules take a long-range path through the pipeline and are incorporated into protein profiles at the Results Assembly stage.
 
 **Second fork (after differential abundance):** This is the pivot point of the entire pipeline. Everything above it is about producing statistically sound abundance estimates. Everything below it is about interpreting those results. The fork produces two parallel branches:
 
@@ -312,33 +312,123 @@ The mapping table is cached locally as a Parquet file after the initial API call
 
 Each subsection follows a consistent structure: purpose, inputs, outputs, tools/libraries, design decisions and rationale, known limitations, and current status.
 
-## 3.1 QC/EDA Module
+## 3.1 Pre-Normalization QC/EDA Module (Module 02)
 
-**Purpose:** Assess data quality, identify problematic samples or proteins, characterize distributional properties, and produce diagnostic visualizations that inform downstream analytical decisions.
+*Updated 2026-03-27 to rescope from monolithic QC/EDA to pre-normalization QC only. See Decision Register entry 2026-03-27 for rationale.*
 
-**Inputs:** Standardized abundance matrix (Parquet), metadata file.
+**Purpose:** Assess the quality of the validated, detection-filtered abundance data before any normalization or imputation is applied. Characterize missingness patterns, identify problematic samples, assess distributional properties, and produce diagnostic visualizations that inform downstream normalization and imputation decisions.
 
-**Outputs:** QC report (HTML with interactive plots), QC summary table (Parquet + CSV), flagged samples list, flagged proteins list, PCA coordinates, correlation matrix.
+**Inputs:** Filtered abundance matrix (Parquet, from Module 01 FILTER_PROTEINS), metadata file, ID mapping table (Parquet, from Module 01 UNIPROT_MAPPING).
+
+**Outputs:** Pre-normalization QC report (HTML with interactive plots), QC summary tables (Parquet + CSV), flagged samples list, flagged proteins list, PCA coordinates, sample correlation matrix. These outputs serve two purposes: (1) immediate user review, and (2) QC flags that travel long-range to the Results Assembly module for incorporation into protein profiles.
 
 **Planned analyses:**
 
 - **Missingness analysis:** Per-protein and per-sample missing value counts and percentages. Distinguish between structured missingness (patterned by condition, which may be biologically meaningful) and sporadic missingness (data quality issue). This distinction matters because proteomics missing data is overwhelmingly "missing not at random" (MNAR) -- low-abundance proteins drop below the detection limit. A protein absent in treatment but present in control is potentially interesting biology, not a QC failure.
-- **Replicate variability:** Coefficient of variation (CV) distributions within groups. Flag proteins with unusually high CVs.
-- **Sample-level QC:** Sample-to-sample correlation heatmap, PCA to check for clustering by condition, batch, or unexpected groupings. Flag samples that are clear outliers.
-- **Distributional assessment:** Distribution shapes of abundance values, assessment of whether transformation (log2, etc.) is needed, comparison across samples/conditions.
-- **Imputation diagnostics:** If imputation is applied, provide sensitivity analysis showing how results change with different imputation methods.
+- **Detection counts per sample:** Number of proteins detected in each sample. A sample with dramatically fewer detections than its replicates is suspect.
+- **Total intensity per sample:** Sum or median of all protein abundances per sample. Proxy for sample loading or injection amount. Large differences suggest technical artifacts that normalization should correct.
+- **Intensity distributions per sample:** Box plots and/or density plots of abundance values for each sample. Pre-normalization, these diagnose whether samples have shifted medians (loading differences) or different spreads. Identifies outlier samples with completely different distributional shapes.
+- **Distributional shape assessment:** Is the overall abundance distribution approximately normal after log2 transformation? Informs whether parametric statistical methods (limma, DEqMS) are appropriate downstream. If `abundance_type` is raw intensities, Module 02 applies log2 internally for this assessment (log2 transformation of raw intensities is a universally accepted preprocessing step in proteomics, not a contested analytical choice).
+- **PCA (pre-normalization):** Principal component analysis on the (log2-transformed if needed) abundance data. Shows the dominant sources of variation in the raw data. Ideally samples cluster by biological condition; if they cluster by batch or injection order, that signals normalization is critical.
+- **Sample-to-sample correlation heatmap (pre-normalization):** Pairwise Pearson or Spearman correlations between all samples. Replicates should correlate highly with each other. A replicate that correlates more with a different group than its own is a flag for possible sample swap, mislabel, or severe technical artifact.
+
+**Analyses explicitly NOT in this module (moved to their analytically appropriate locations):**
+
+- Missingness analysis and visualization: handled by Module 01 (new MISSINGNESS_REPORT process, added 2026-03-27). Module 01's detection filter removes proteins with the most informative missingness patterns; by the time Module 02 sees the data, residual per-protein missingness is limited to 0-2 values out of 6 (for default threshold with triplicate designs). See Module 01 documentation Section 4.10 for details.
+- CV within groups: moved to Module 04 (Imputation), computed post-normalization on observed values only.
+- Post-normalization PCA, correlation, distributions: produced as diagnostic outputs of Module 03 (Normalization).
+- Imputation diagnostics and sensitivity analysis: produced as diagnostic outputs of Module 04 (Imputation).
+
+**Handling of `abundance_type` parameter:** The module respects the `input.abundance_type` parameter from the run config. If `abundance_type` is `raw`, Module 02 applies log2(x+1) transformation internally for PCA, correlation, and distributional assessment (raw intensities span orders of magnitude and produce uninformative PCA plots without transformation). If `abundance_type` is `log2` or `normalized`, the data is used as-is for those analyses. This internal transformation is for visualization and diagnostic purposes only and is not passed downstream.
 
 **Tools/Libraries:** pandas, numpy, scipy, matplotlib, seaborn, plotly, scikit-learn (for PCA).
 
-**Design decisions:**
-
-- Imputation is performed with multiple method support (MinProb, KNN, left-censored/Perseus-style). The default method is configurable. Sensitivity of downstream results to imputation method choice is reported as a diagnostic, since imputation method can materially affect differential abundance results, especially for MNAR data.
-
-**Known limitations:** Automated outlier detection is advisory, not prescriptive -- the tool flags potential issues but does not automatically exclude samples or proteins without user confirmation.
+**Known limitations:** Automated outlier detection is advisory, not prescriptive -- the tool flags potential issues but does not automatically exclude samples or proteins without user confirmation. Pre-normalization PCA may show technical variation dominating biological variation; this is expected and is the reason normalization exists. Users should not be alarmed by imperfect clustering in the pre-normalization PCA.
 
 **Status:** Not yet implemented.
 
-## 3.2 Statistical Analysis Module
+## 3.2 Normalization Module (Module 03)
+
+*Added 2026-03-27. Previously combined with imputation; now a separate module per Decision Register entry 2026-03-27.*
+
+**Purpose:** Remove systematic technical variation (sample loading differences, instrument drift) while preserving biological signal. Produce post-normalization diagnostic plots to verify the correction.
+
+**Inputs:** Filtered abundance matrix (Parquet, from Module 01), metadata file, pre-normalization QC outputs (from Module 02, for comparison).
+
+**Outputs:** Normalized abundance matrix (Parquet), normalization diagnostic outputs (post-normalization distribution plots, post-normalization PCA, post-normalization sample correlation heatmap -- PNG + interactive HTML). If `abundance_type` is `raw`, log2 transformation is applied before normalization.
+
+**Planned methods:**
+
+- **Median normalization** (default): Shifts each sample's distribution so all samples have the same median. Simple, robust, widely used.
+- **Quantile normalization:** Forces all sample distributions to be identical. More aggressive; appropriate when you believe the overall distribution should be the same across all samples.
+- **VSN (variance stabilizing normalization):** Accounts for the mean-variance relationship in MS data. Available via R/Bioconductor.
+- **None:** Skip normalization (for data that arrives pre-normalized).
+
+Method is configurable via `normalization.method` in params.yml.
+
+**Diagnostic outputs:** Post-normalization versions of the same distributional plots produced by Module 02 (box/density plots, PCA, sample correlation heatmap). These allow direct visual comparison: did normalization align the distributions? Did the PCA structure improve? The Module 02 outputs and Module 03 diagnostic outputs are later compiled side-by-side by the QC Report Assembly process.
+
+**Status:** Not yet implemented.
+
+## 3.3 Imputation Module (Module 04)
+
+*Added 2026-03-27. Previously combined with normalization; now a separate module per Decision Register entry 2026-03-27.*
+
+**Purpose:** Fill in missing values in the normalized abundance matrix using a method appropriate to the missing data mechanism. Produce imputation diagnostics and compute per-protein replicate variability (CV) on observed values.
+
+**Inputs:** Normalized abundance matrix (Parquet, from Module 03), metadata file.
+
+**Outputs:** Imputed abundance matrix (Parquet), imputation diagnostics (observed vs. imputed value distributions, per-protein and per-sample imputation fraction, sensitivity analysis if enabled -- Parquet + CSV + PNG + interactive HTML), CV summary table (Parquet + CSV, computed on normalized pre-imputation data for observed values only).
+
+**Planned methods:**
+
+- **MinProb** (default for MNAR data): Draws imputed values from a distribution centered at the low end of the observed distribution. Appropriate when missing values are assumed to be below the detection limit.
+- **KNN (k-nearest neighbors):** Imputes based on similar proteins. More appropriate for MAR (missing at random) data.
+- **Left-censored / Perseus-style:** Similar to MinProb, draws from a down-shifted Gaussian. Widely used in the Perseus proteomics platform.
+- **None:** Skip imputation (carry missing values forward; downstream methods must handle NAs).
+
+Method is configurable via `imputation.method` in params.yml.
+
+**CV computation:** Coefficient of variation (SD/mean on linear scale, or SD on log2 scale) is computed within each group on observed (non-imputed) normalized values. This is placed in Module 04 because CV requires normalized data (Module 03 output) but must exclude imputed values (which would artificially reduce variability). The CV table is a QC diagnostic, not an analytical result, and feeds into the QC Report Assembly and ultimately into QC flags in the protein profiles.
+
+**Imputation sensitivity analysis (optional):** If enabled via `imputation.sensitivity_analysis: true`, runs imputation with multiple methods and compares the resulting abundance distributions and downstream effect on a simple fold-change calculation. Reported as a diagnostic, not used to select the method automatically.
+
+**Design decisions:**
+
+- Imputation method selection is the user's responsibility (configured in params.yml). The sensitivity analysis helps inform this choice but does not override it.
+- MNAR/MAR classification is handled at the imputation stage, not during QC. This follows the field consensus (Perseus, DEP, LFQ-Analyst, ProVision, msqrob2) that classification belongs at the point where it affects analytical decisions. The QC module (Module 02) reports missingness patterns; Module 04 acts on them.
+
+**Known limitations:** All imputation methods make assumptions about the missing data mechanism. MNAR-aware methods (MinProb, left-censored) assume missing values correspond to low-abundance proteins, which is generally but not always true in MS proteomics. Imputation can materially affect differential abundance results, especially for proteins with high missingness.
+
+**Status:** Not yet implemented.
+
+## 3.4 QC Report Assembly
+
+*Added 2026-03-27. See Decision Register entry 2026-03-27 for rationale.*
+
+**Purpose:** Collect diagnostic outputs from Modules 02, 03, and 04 and compile them into a single consolidated QC report. This creates a natural checkpoint in the pipeline: the researcher reviews data quality before differential abundance, enrichment, and database queries run.
+
+**Inputs:** Diagnostic outputs from Module 02 (pre-normalization QC), Module 03 (post-normalization diagnostics), Module 04 (imputation diagnostics and CV summary).
+
+**Outputs:** Consolidated QC report (HTML). This is a presentation/compilation step with no analytical logic.
+
+**Report structure (preliminary):**
+
+- Section 1: Missingness overview (from Module 02)
+- Section 2: Distributional assessment (from Module 02) with pre- vs. post-normalization comparison (from Module 03)
+- Section 3: PCA (pre-normalization from Module 02, post-normalization from Module 03)
+- Section 4: Sample correlation (pre- and post-normalization)
+- Section 5: Replicate variability / CV distributions (from Module 04)
+- Section 6: Imputation diagnostics (from Module 04)
+- Section 7: Sample and protein flags summary
+
+**Nextflow implementation:** A lightweight process that takes channels from Modules 02, 03, and 04, waits for all to complete, and runs a compilation script. No analytical computation.
+
+**Status:** Not yet implemented.
+
+## 3.5 Differential Abundance Module (Module 05)
+
+*Renumbered 2026-03-27 from Section 3.2 (was "Statistical Analysis Module"). Content unchanged except for module number references.*
 
 **Purpose:** Identify differentially abundant proteins between conditions and provide robust statistical measures of significance and effect size.
 
@@ -363,7 +453,9 @@ Each subsection follows a consistent structure: purpose, inputs, outputs, tools/
 
 **Status:** Not yet implemented.
 
-## 3.3 Enrichment Analysis Module
+## 3.6 Enrichment Analysis Module (Module 06)
+
+*Renumbered 2026-03-27 from Section 3.3. Content unchanged except for module number references.*
 
 **Purpose:** Identify biological pathways, processes, and functional categories that are overrepresented among differentially abundant proteins (ORA) or show coordinated changes across the ranked protein list (GSEA).
 
@@ -384,7 +476,9 @@ Each subsection follows a consistent structure: purpose, inputs, outputs, tools/
 
 **Status:** Not yet implemented.
 
-## 3.4 Interactive Frontend
+## 3.7 Interactive Frontend (Module 09)
+
+*Renumbered 2026-03-27 from Section 3.4. Content unchanged except for module number references. Targeted for Phase 4.*
 
 **Purpose:** Provide an interactive environment for exploring pipeline results, including a sortable/filterable protein database, individual protein profile pages, and a biological process view.
 
@@ -609,9 +703,11 @@ See the Handoff File (Section 7) for the current detailed file system map.
 
 # 6. Development Roadmap
 
-## 6.1 Phase 1 -- Core Pipeline Skeleton and QC Module
+## 6.1 Phase 1 -- Core Pipeline Skeleton and Pre-Normalization QC
 
-**Goal:** Establish the Nextflow workflow structure, input format specification, ID mapping layer, and QC/EDA module. Produce a working pipeline that takes an abundance matrix + metadata, runs QC diagnostics, and produces a QC report.
+*Updated 2026-03-27 to reflect rescoped QC/EDA module. Module 02 is now pre-normalization QC only; CV, imputation diagnostics, and post-normalization QC are Phase 2 deliverables in their respective modules.*
+
+**Goal:** Establish the Nextflow workflow structure, input format specification, ID mapping layer, and pre-normalization QC module. Produce a working pipeline that takes an abundance matrix + metadata, runs validation, maps IDs, and produces a pre-normalization QC report characterizing data quality before any analytical transformations.
 
 **Deliverables:**
 
@@ -620,8 +716,8 @@ See the Handoff File (Section 7) for the current detailed file system map.
 - params.yml for scientific parameters (contrasts, thresholds, database settings)
 - Input validation process (Nextflow process)
 - UniProt ID mapping module (bulk API call + local cache)
-- QC/EDA module with: missingness analysis, CV distributions, PCA, sample correlation heatmap, distributional assessment
-- QC report generation (HTML with interactive plots)
+- Pre-normalization QC/EDA module (Module 02) with: missingness analysis, detection count summaries, total intensity per sample, intensity distribution plots, distributional shape assessment, pre-normalization PCA, sample-to-sample correlation heatmap
+- Pre-normalization QC report generation (HTML with interactive plots)
 - Conda environment.yml
 - Singularity definition file (initial version)
 
@@ -630,23 +726,26 @@ See the Handoff File (Section 7) for the current detailed file system map.
 - Nextflow config and params schema
 - Directory structure conventions (aligning with nf-core standards)
 - Channel design for the main pipeline flow
+- QC flag schema (what triggers each flag, what values they take)
+- Outlier detection method for sample flagging
 
-**Status:** In progress. Module 01 (Input Validation & ID Mapping) complete as of 2026-03-26. All three Nextflow processes (VALIDATE_INPUTS, FILTER_PROTEINS, UNIPROT_MAPPING) implemented, wired, and tested end-to-end on CTX benchmark data. Deliverables completed: project directory structure, nextflow.config with PBS/local/conda/singularity profiles, per-run params.yml schema, input validation processes, UniProt ID mapping with bulk API and local cache, Conda environment.yml. Remaining: QC/EDA module, Singularity definition file.
+**Status:** In progress. Module 01 (Input Validation & ID Mapping) complete as of 2026-03-26. All three Nextflow processes (VALIDATE_INPUTS, FILTER_PROTEINS, UNIPROT_MAPPING) implemented, wired, and tested end-to-end on CTX benchmark data. Deliverables completed: project directory structure, nextflow.config with PBS/local/conda/singularity profiles, per-run params.yml schema, input validation processes, UniProt ID mapping with bulk API and local cache, Conda environment.yml. Remaining: Module 02 (pre-normalization QC/EDA), Singularity definition file.
 
-## 6.2 Phase 2 -- Statistical Analysis
+## 6.2 Phase 2 -- Normalization, Imputation, Statistical Analysis, and Enrichment
 
-**Goal:** Add differential abundance analysis, imputation, and ORA/GSEA.
+*Updated 2026-03-27 to reflect revised module architecture. Normalization and imputation are now separate modules (03 and 04), each with their own diagnostic outputs. QC Report Assembly process added as a checkpoint between imputation and differential abundance.*
+
+**Goal:** Build the full analytical workflow from normalization through enrichment. Each analytical module produces its own diagnostic outputs. A consolidated QC report is assembled after imputation as a checkpoint before statistical testing.
 
 **Deliverables:**
 
-- Imputation module (multiple methods: MinProb, KNN, left-censored)
-- Imputation sensitivity diagnostic
-- Differential abundance module (DEqMS via rpy2, with limma as alternative)
-- Volcano plots, MA plots
-- ORA and GSEA via gseapy
-- Enrichment result visualization
+- Normalization module (Module 03): median/quantile/VSN methods, log2 transformation handling, post-normalization diagnostic plots (distribution alignment, PCA, sample correlation)
+- Imputation module (Module 04): MinProb/KNN/left-censored methods, imputation diagnostics (observed vs. imputed distributions, imputation fraction), CV computation on normalized pre-imputation data, optional imputation sensitivity analysis
+- QC Report Assembly process: collects diagnostic outputs from Modules 02-04, compiles consolidated HTML QC report as pre-statistical-analysis checkpoint
+- Differential abundance module (Module 05): DEqMS via rpy2 (with limma as alternative), volcano plots, MA plots
+- Enrichment module (Module 06): ORA and GSEA via gseapy, enrichment dot plots, GSEA running score plots
 
-**At end of phase:** A pipeline that goes from abundance matrix to differentially abundant proteins with enrichment results. Useful as a standalone analytical tool.
+**At end of phase:** A pipeline that goes from abundance matrix to differentially abundant proteins with enrichment results, with a consolidated QC report at the midpoint. Useful as a standalone analytical tool.
 
 **Status:** Not yet started.
 
@@ -948,6 +1047,53 @@ SQLite's practical advantages for this use case: single portable file (no server
 
 **Impact:** Proteins with no human ortholog data will have null ortholog columns. This is expected and documented. The detection filter report and QC module do not use ortholog information. Phase 3 will populate these columns and implement the database query gating rule (DGIdb and DisGeNET query only proteins with non-null human_ortholog_symbol).
 
+### 2026-03-27 -- Module Architecture Revised: QC/EDA Rescoped, Normalization and Imputation Split, QC Report Checkpoint Added
+
+**Decision:** Restructure the pipeline modules so that (a) Module 02 (QC/EDA) is scoped narrowly to pre-normalization QC only, (b) normalization and imputation become separate modules (previously combined), each producing their own diagnostic outputs, and (c) a lightweight QC Report Assembly process sits after imputation as a checkpoint before differential abundance. The revised module structure is:
+
+- Module 01: Input Validation & ID Mapping [complete]
+- Module 02: Pre-normalization QC/EDA (missingness, raw distributions, raw PCA, raw correlation, distributional shape, detection summaries)
+- Module 03: Normalization (+ post-normalization verification diagnostics: aligned distributions, post-norm PCA, post-norm correlation)
+- Module 04: Imputation (+ imputation diagnostics: observed vs. imputed distributions, imputation fraction, sensitivity analysis; CV on normalized-not-imputed data)
+- QC Report Assembly process (lightweight: collects diagnostic outputs from Modules 02-04, compiles consolidated QC report)
+- Module 05: Differential Abundance (+ volcano plots, MA plots)
+- Module 06: Enrichment (+ dot plots, GSEA running score plots)
+- Module 07: Database Queries
+- Module 08: Results Assembly (SQLite database + comprehensive final report)
+- Module 09: Interactive Frontend
+
+This supersedes the original module plan where QC/EDA was a single monolithic block (containing pre-normalization QC, CV, imputation diagnostics, and outlier detection) and normalization/imputation were combined into one module.
+
+**Rationale:** A systematic inventory of QC/EDA analyses revealed that they naturally belong at different points in the pipeline, not in a single block:
+
+- *Pre-normalization* (Module 02): missingness patterns, detection counts, total intensity per sample, raw intensity distributions, distributional shape assessment. These assess the raw data state before any transformation alters it.
+- *Both pre- and post-normalization* (Modules 02 and 03): PCA, sample correlation heatmaps, box/density plots. Pre-normalization versions diagnose problems; post-normalization versions verify that normalization corrected them.
+- *Post-normalization, pre-imputation* (Module 04): CV within groups. Must be computed on normalized data (so systematic technical variation is removed) but on observed values only (imputed values would artificially reduce variability).
+- *Post-imputation* (Module 04): imputation diagnostics. By definition require imputation to have occurred.
+- *Post-differential abundance* (Module 05): volcano plots, MA plots. Require fold changes and p-values from the statistical model.
+
+Forcing all of these into a single pre-normalization QC module would either (a) require QC to include its own normalization/imputation step (duplicating work and potentially misleading users if the QC normalization differs from the real one) or (b) produce a non-contiguous module that wraps around other modules (complicating Nextflow wiring and conceptual clarity). The cleaner design is: each analytical module produces the diagnostic outputs that correspond to its analytical step, and a lightweight assembly process compiles them into one report.
+
+Splitting normalization and imputation into separate modules (previously combined) is justified because they are genuinely different analytical decisions with different method options, different parameters, and different diagnostics. Keeping them separate means either can be iterated independently.
+
+The QC Report Assembly process is placed after imputation but before differential abundance to create a natural checkpoint: the researcher can review all data quality diagnostics before committing to the more expensive downstream analysis (statistical testing, enrichment, database queries). This is a presentation/compilation step with no analytical logic.
+
+**Alternatives considered:** (1) QC as a single monolithic module containing all QC analyses (the original plan) -- rejected because it conflates analyses that need different input data states. (2) QC module that runs its own internal normalization for visualization purposes -- rejected because normalizing twice (once in QC, once in the real normalization module) could be misleading if the methods differ. (3) Two-part QC module (02a pre-normalization, 02b post-normalization) wrapping around normalization -- workable but creates awkward non-contiguous numbering. (4) One large "Data Preparation and QC" module combining normalization, imputation, and all QC -- rejected as too monolithic and crossing the Phase 1/Phase 2 boundary.
+
+**Phase boundary impact:** Module 02 (pre-normalization QC) remains a Phase 1 deliverable, completing the core pipeline skeleton. Modules 03-04 (normalization, imputation) and the QC Report Assembly process are Phase 2 deliverables, along with Module 05 (differential abundance) and Module 06 (enrichment). This is a clean split: Phase 1 produces a pipeline that validates input, maps IDs, and characterizes data quality. Phase 2 adds the full analytical workflow from normalization through enrichment.
+
+**Impact on module documentation:** The existing module doc files need renaming/additions. `03_normalization_imputation.Rmd` splits into `03_normalization.Rmd` and `04_imputation.Rmd`. Downstream docs renumber: `04_differential_abundance.Rmd` becomes `05_differential_abundance.Rmd`, etc. A new `04.5_qc_report_assembly.Rmd` or equivalent documents the compilation step. The `02_qc_eda.Rmd` scope narrows to pre-normalization analyses only.
+
+### 2026-03-27 -- Missingness Visualizations Assigned to Module 01 (Not Module 02)
+
+**Decision:** Missingness analysis and visualization is handled by a new MISSINGNESS_REPORT process in Module 01, not by Module 02 (QC/EDA). Four plots are produced: filter category bar chart, per-sample detection bar chart, missingness heatmap for filtered-out proteins, and per-protein missingness rate histogram. Module 02's scope is confirmed as excluding missingness.
+
+**Rationale:** Module 01's detection filter (Process 4.4) removes proteins with the most informative missingness patterns (SINGLE-GROUP, SPARSE, ABSENT categories). After filtering, per-protein missingness in the surviving data is limited to at most 1-2 missing values out of 6 (for default threshold with triplicate designs). A dedicated missingness analysis in Module 02 would be largely redundant with Module 01's existing text-based reporting and would operate on data where the interesting patterns have already been removed. Module 01 already computes all the data needed (detection_filter_table.csv, per-sample counts); the only gap was visual presentation. Adding the visualizations to Module 01 keeps the missingness story complete in one place.
+
+**Alternatives considered:** (1) Missingness analysis in Module 02 -- rejected because Module 02 operates on post-filter data where dramatic patterns have been removed. (2) Add plots directly to `filter_proteins.py` -- rejected to keep the filtering script lean (no matplotlib/plotly dependency). The separate MISSINGNESS_REPORT process maintains separation between data processing and reporting.
+
+**Impact:** New Process 4.10 added to Module 01. New Nextflow process (MISSINGNESS_REPORT) and script (`bin/missingness_report.py`). Module 02 scope confirmed as excluding missingness. See Module 01 documentation Section 4.10 for full plot specifications.
+
 ---
 
 # 10. Development Log
@@ -1114,6 +1260,21 @@ Refined the params.yml schema: dropped `input.protein_id_type` (hardcoded UniPro
 **Outputs:** `bin/validate_inputs.py`, `bin/filter_proteins.py`, `bin/uniprot_mapping.py`, functional `modules/local/*/main.nf` (3 files), wired `workflows/prosift.nf`, `prosift_inputs/samplesheet.csv`, `results/{run_id}/validation/` (6 files per run).
 
 **Next steps identified:** Design and implement Module 02 (QC/EDA).
+
+### 2026-03-27 -- Module Architecture Revised: QC/EDA Rescoped and Pipeline Modules Restructured
+
+**Work performed:** Conducted a systematic inventory of all QC/EDA analyses relevant to a discovery proteomics pipeline and evaluated where each belongs relative to normalization, imputation, and differential abundance. Used this inventory to evaluate four architectural options for Module 02: (A) thin pre-normalization QC module with diagnostics embedded in each downstream module, (B) two-part QC module wrapping around normalization/imputation, (C) merged "Data Preparation and QC" supermodule, (D) maximum granularity with separate modules for each analytical step. Selected a hybrid of Options A and D with an added QC Report Assembly checkpoint.
+
+**Key findings:**
+
+- QC/EDA analyses are not a single block; they naturally interleave with the analytical pipeline. Pre-normalization analyses (missingness, raw distributions, detection summaries) assess raw data state. Post-normalization analyses (PCA, correlation, CV) verify correction. Post-imputation analyses (imputation diagnostics) validate the fill-in strategy. Volcano and MA plots require differential abundance results.
+- Coefficient of variation (CV) is only meaningful on linear-scale, normalized, non-imputed data. It cannot live in a pre-normalization QC module.
+- PCA and sample correlation are useful both pre- and post-normalization: the pre-normalization version diagnoses technical variation sources, the post-normalization version verifies correction. Running both is standard practice.
+- A QC Report Assembly checkpoint after imputation but before differential abundance gives the researcher a natural stopping point to review data quality before committing to expensive downstream analysis.
+
+**Decisions made:** See Decision Register entries 2026-03-27 (module architecture revision, missingness visualizations in Module 01) for full rationale, alternatives considered, and impact.
+
+**Next steps identified:** Continue Module 02 (pre-normalization QC/EDA) design specification: per-sample intensity summaries, distributional assessment, PCA, sample correlation, outlier detection, QC flag schema. Renumber/split module documentation files to match new structure. Implement MISSINGNESS_REPORT process in Module 01.
 
 ---
 
