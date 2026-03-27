@@ -9,17 +9,38 @@ output:
 ---
 
 **Last Updated:** 2026-03-27
-**Module Status:** Design in progress
-**Pipeline Position:** [Module 01: Input validation & ID mapping] --> **Module 02: Pre-Normalization QC/EDA** --> [Module 03: Normalization]
-**Scope note:** Pre-normalization only. CV analysis, post-normalization QC, and imputation diagnostics are handled in Modules 03-04. QC Report Assembly (Module 04b) compiles outputs from Modules 02-04 into a consolidated HTML report.
+
+**Module Status:** Design complete; not yet implemented.
+
+**Pipeline Position:** [Module 01: Input Validation & ID Mapping] --> **Module 02: Pre-Normalization QC/EDA** --> [Module 03: Normalization]
+
+**Scope note:** Pre-normalization only. This module operates on the validated, detection-filtered abundance data before any normalization or imputation. Analyses that require normalized or imputed data are handled elsewhere: CV analysis in Module 04 (Imputation), post-normalization QC diagnostics in Module 03 (Normalization), imputation diagnostics in Module 04, volcano and MA plots in Module 05 (Differential Abundance). Missingness analysis and visualization are handled by Module 01 (MISSINGNESS_REPORT process, Process 4.10). The QC Report Assembly process (Phase 2) compiles diagnostic outputs from Modules 02-04 into a consolidated HTML report.
 
 ---
 
 # 1. Purpose and Scope
 
-This module assesses data quality, identifies problematic samples or proteins, characterizes distributional properties, and produces diagnostic visualizations. It runs on the validated but un-normalized data (intentionally -- raw distributional properties need to be assessed before transformation). Its outputs are a QC report and a set of per-protein and per-sample flags that are carried through the pipeline and incorporated into protein profiles at the assembly stage.
+This module characterizes the distributional properties of the post-filter abundance data and the relationships between samples before any analytical transformations are applied. Its outputs give the researcher a "before" picture of the data: how samples compare, whether there are outliers, whether the data looks well-behaved for downstream statistical analysis. Module 03 (Normalization) will produce the corresponding "after" picture using the same plot types, and the QC Report Assembly process will present them side-by-side.
 
-This module does not modify the data. It observes and flags. Decisions about excluding samples or proteins are left to the user.
+This module does not modify the data. It observes, summarizes, and flags. Decisions about excluding samples or proteins are left to the user.
+
+**What this module does:**
+
+- Compute per-sample summary statistics (detection count, median intensity, total intensity, spread, distributional shape)
+- Visualize intensity distributions across samples (box plots)
+- Assess distributional normality (Q-Q plot, skewness, kurtosis)
+- Run PCA to identify dominant sources of variation and detect sample grouping patterns
+- Compute sample-to-sample correlations to identify outlier or mislabeled samples
+- Synthesize the above into per-sample outlier flags using convergent evidence
+
+**What this module does NOT do:**
+
+- Missingness analysis (Module 01, Process 4.10)
+- Coefficient of variation within groups (Module 04, requires normalized data)
+- Post-normalization PCA, correlation, or distribution plots (Module 03 diagnostic outputs)
+- Imputation diagnostics (Module 04)
+- Volcano plots, MA plots (Module 05, requires differential abundance results)
+- Remove or exclude any data
 
 See master overview (Section 2.2, first fork) for how this module branches off the main analytical path.
 
@@ -29,82 +50,372 @@ See master overview (Section 2.2, first fork) for how this module branches off t
 
 ## 2.1 Inputs
 
-- Validated abundance matrix (Parquet, from Module 01)
-- Validated metadata (Parquet, from Module 01)
-- ID mapping table (Parquet, from Module 01)
+- **Filtered abundance matrix** (`{run_id}.filtered_matrix.parquet`, from Module 01 FILTER_PROTEINS): post-detection-filter abundance data. For a typical CTX run, ~8,400 proteins x 6 samples, plus peptide count columns. Missing values are NaN. Columns include `protein_id`, abundance columns (prefixed with `abundance_` or bare sample IDs depending on `input.abundance_prefix`), and optionally peptide count columns.
+- **Validated metadata** (`{run_id}.validated_metadata.parquet`, from Module 01 VALIDATE_INPUTS): sample-to-group assignments. One row per sample with `sample_id` and group column (name from `design.group_column` in params.yml).
+- **ID mapping table** (`{run_id}.id_mapping.parquet`, from Module 01 UNIPROT_MAPPING): protein ID mapping table (10 columns). Not used for QC computations directly, but included as input for potential annotation of flagged proteins in the report (e.g., showing gene symbols alongside protein IDs).
+
+**Join key:** `protein_id` (UniProt accession). NOTE: for accession-redirected proteins (~6 per run), `protein_id` in the filtered matrix is the input accession, which differs from `uniprot_accession` in the ID mapping table. Joins must use `protein_id`, not `uniprot_accession`. See Handoff Section 6.1 for details.
+
+**Nextflow channel note:** The validated metadata parquet is produced by VALIDATE_INPUTS but may not currently be wired through to downstream processes beyond FILTER_PROTEINS. Claude Code should verify the channel wiring and add metadata forwarding if needed when implementing this module.
 
 ## 2.2 Outputs
 
-- QC report (HTML with interactive plots)
-- QC summary table (Parquet + CSV): per-protein flags for missingness, CV, outlier status
-- Flagged samples list: samples identified as potential outliers
-- PCA coordinates (Parquet): for downstream use or re-plotting
-- Sample correlation matrix (Parquet)
+**Data files:**
+
+- **Per-sample summary table** (`{run_id}.sample_summary.parquet` + `.csv`): one row per sample. Columns: `sample_id`, `group`, `n_detected`, `median_intensity`, `total_intensity` (null if abundance_type is log2), `mad_intensity`, `skewness`, `kurtosis`. See Section 4.1 for definitions.
+- **Sample flag summary table** (`{run_id}.sample_flags.parquet` + `.csv`): one row per sample. Columns: `sample_id`, `group`, `flag_low_detection` (boolean), `flag_extreme_median` (boolean), `flag_pca_outlier` (boolean), `flag_low_correlation` (boolean), `n_flags` (integer count). See Section 4.6 for flag definitions.
+- **Correlation matrix** (`{run_id}.correlation_matrix.parquet`): sample-by-sample Pearson correlation matrix on log2-transformed data.
+- **PCA results** (`{run_id}.pca_results.parquet`): PCA coordinates for all samples (PC1-PC3 at minimum) plus variance explained per component.
+
+**Plots** (all produced as both static PNG and interactive Plotly HTML):
+
+- Per-sample intensity summary multipanel (`{run_id}.sample_intensity_summary`)
+- Intensity distribution box plots (`{run_id}.intensity_boxplots`)
+- Overlaid Q-Q plot (`{run_id}.qq_plot`)
+- PCA scatter plot, PC1 vs. PC2 (`{run_id}.pca_scatter`)
+- Sample correlation heatmap (`{run_id}.correlation_heatmap`)
+
+**Report:**
+
+- **Pre-normalization QC report** (`{run_id}.prenorm_qc_report.html`): standalone HTML consolidating all plots and summary tables, with a narrative section highlighting any flagged samples. This is the primary output the researcher reviews.
 
 ---
 
-# 3. Sub-Workflow Diagram
+# 3. Workflow Diagram
 
-**[FOLLOW-UP NEEDED]** Design sub-workflow diagram for QC/EDA module.
+**[FOLLOW-UP NEEDED]** Create workflow diagram for Module 02. The module is a single Nextflow process (PRENORM_QC) calling one Python script, so the diagram would show internal script logic rather than process-level dependencies.
 
 ---
 
 # 4. Process Specifications
 
-## 4.1 Missingness Analysis
+Module 02 is implemented as a single Nextflow process (PRENORM_QC) calling a single Python script (`bin/prenorm_qc.py`). All analyses run sequentially within the script. The process is not split because all analyses share the same inputs, are computationally trivial (~8,400 proteins x 6 samples), and produce outputs for the same QC report.
 
-Per-protein and per-sample missing value counts and percentages. Distinguish between structured missingness (patterned by condition, which may be biologically meaningful) and sporadic missingness (data quality issue). This distinction matters because proteomics missing data is overwhelmingly "missing not at random" (MNAR) -- low-abundance proteins drop below the detection limit. A protein absent in treatment but present in control is potentially interesting biology, not a QC failure.
+## 4.0 Data Preparation (Internal)
 
-**[FOLLOW-UP NEEDED]** Define specific criteria for classifying structured vs. sporadic missingness.
+Before running any analysis, the script prepares the data:
 
-## 4.2 Replicate Variability
+1. **Load inputs:** Read the filtered matrix, validated metadata, and ID mapping table from Parquet.
+2. **Extract abundance columns:** Identify abundance columns from the filtered matrix (using the abundance prefix from params, or by excluding `protein_id` and any `peptide_count_` columns). Parse sample IDs from column names.
+3. **Merge group assignments:** Join metadata to get group labels for each sample.
+4. **Determine abundance scale:** Read `input.abundance_type` from params.yml. If `raw`, apply log2(x+1) transformation to create a log2 working copy for analyses that need it (PCA, correlation, box plots, Q-Q plots, skewness, kurtosis). The original raw data is retained for total intensity computation. If `log2` or `normalized`, the data is used as-is. The log2 transformation is internal to Module 02 and is not passed downstream.
 
-Coefficient of variation (CV) distributions within groups. Flag proteins with unusually high CVs. Output includes per-protein CV values and a distribution plot.
+The log2(x+1) transformation (rather than log2(x)) handles any zero values without producing -Inf. In practice, the filtered matrix should not contain zeros (a zero would have been counted as a detection by the filter), but the +1 provides a safety margin.
 
-## 4.3 Sample-Level QC
+## 4.1 Per-Sample Intensity Summaries
 
-Sample-to-sample correlation heatmap, PCA to check for clustering by condition, batch, or unexpected groupings. Flag samples that are clear outliers.
+**What it computes:** For each sample, calculate summary statistics on the post-filter abundance values. These provide a quick fingerprint of each sample's quality.
 
-**[FOLLOW-UP NEEDED]** Define the outlier detection method (PCA distance-based, correlation-based, or both).
+**Metrics (one value per sample):**
 
-## 4.4 Distributional Assessment
+- **`n_detected`:** Number of non-missing (non-NaN) abundance values. The post-filter detection count. With ~8,400 proteins and at most 1-2 missing values per protein, expect values in the range 8,200-8,400 for typical CTX runs.
+- **`median_intensity`:** Median of all non-missing abundance values (on log2 scale if log2 working copy is used; on raw scale if `abundance_type` is `raw` and reporting raw metrics alongside). Reports the center of each sample's distribution.
+- **`total_intensity`:** Sum of all non-missing abundance values on the raw (linear) scale. Proxy for sample loading or injection amount. Computed only when `abundance_type` is `raw`; set to null when `abundance_type` is `log2` or `normalized` (summing log values is not interpretable). Large differences between samples suggest unequal loading that normalization should correct.
+- **`mad_intensity`:** Median absolute deviation of non-missing abundance values (on log2 scale). A robust measure of distributional spread. Identifies samples with unusually narrow or wide distributions compared to their peers.
+- **`skewness`:** Skewness of the non-missing abundance values (on log2 scale). Measures asymmetry. A perfectly symmetric distribution has skewness = 0. For log2-transformed proteomics data, expect values near zero. Skewness beyond +/-1 is noteworthy. Computed using `scipy.stats.skew`.
+- **`kurtosis`:** Excess kurtosis of the non-missing abundance values (on log2 scale). Measures tail heaviness relative to a normal distribution. Excess kurtosis = 0 for a normal distribution. Positive values mean heavier tails. Computed using `scipy.stats.kurtosis` (which returns excess kurtosis by default).
 
-Distribution shapes of abundance values, assessment of whether transformation (log2, etc.) is needed, comparison across samples/conditions.
+**Output:**
 
-## 4.5 QC Report Assembly
+- `{run_id}.sample_summary.parquet` and `.csv`: one row per sample with columns `sample_id`, `group`, `n_detected`, `median_intensity`, `total_intensity`, `mad_intensity`, `skewness`, `kurtosis`.
+- Per-sample intensity summary multipanel plot: a figure with subpanels for each metric, showing one dot or bar per sample colored by group. Allows visual comparison across all samples and metrics in one view.
 
-Compile all analyses into a single HTML report with interactive Plotly plots.
+## 4.2 Intensity Distribution Box Plots
+
+**What it shows:** The shape and position of each sample's abundance distribution, allowing the researcher to assess whether samples are comparable before normalization.
+
+**What the researcher looks for:**
+
+- **Horizontal shifts** between samples (different medians): indicates loading differences. Normal; normalization corrects this.
+- **Different spreads** between samples: one sample much wider or narrower. May indicate a technical issue.
+- **A sample with a completely different shape:** potential failed sample or sample swap.
+
+**Implementation:**
+
+- One box per sample, arranged side by side on the x-axis.
+- Y-axis: log2 intensity (log2 working copy).
+- Boxes colored by group.
+- Samples within each group ordered consistently (by replicate number or alphabetically by sample ID).
+- Standard box plot elements: median line, IQR box, whiskers at 1.5x IQR, outlier points beyond whiskers.
+
+**Output:** `{run_id}.intensity_boxplots` (PNG + interactive HTML).
+
+**Missing values:** NaN values are excluded from the box plot statistics. With at most 1-2 missing values per protein per sample, this has negligible effect.
+
+## 4.3 Distributional Shape Assessment (Q-Q Plot)
+
+**What it shows:** Whether each sample's abundance distribution is approximately normal after log2 transformation. This matters because downstream statistical methods (limma, DEqMS) assume approximately normal residuals.
+
+**Implementation:**
+
+- Overlaid Q-Q plot: all samples on one plot, each sample's quantiles plotted against the corresponding quantiles of a theoretical normal distribution.
+- One set of points per sample, colored by group.
+- A diagonal reference line (y = x after standardization) shows where perfect normality would fall.
+- Points falling on the line indicate normality. Systematic deviations (S-curves in the tails, bowing away from the line) indicate departures from normality.
+- Data: log2 working copy, non-missing values per sample.
+
+**Output:** `{run_id}.qq_plot` (PNG + interactive HTML).
+
+**Why Q-Q over a formal test:** A Shapiro-Wilk test was considered but rejected. With ~8,400 values per sample, the test has excessive power: it will reject normality for trivial deviations that are statistically significant but practically irrelevant. The Q-Q plot is more informative because it shows *where* the distribution departs from normality (tails? center? a single extreme value?), not just whether it departs. The skewness and kurtosis values from Section 4.1 provide complementary scalar summaries.
+
+## 4.4 Principal Component Analysis (PCA)
+
+**What it shows:** The dominant sources of variation in the raw data and how samples relate to each other in a reduced-dimensional space. The most widely reviewed QC plot in -omics experiments.
+
+**What the researcher looks for:**
+
+- **Do replicates cluster together?** Samples from the same group should be near each other.
+- **Do groups separate?** WT and KO clusters should be distinguishable if there's a real biological effect.
+- **Are there outliers?** A sample far from its group centroid may be mislabeled, contaminated, or technically failed.
+- **What drives the variation?** If PC1 separates by condition, biological signal dominates. If PC1 correlates with a technical variable (loading, injection order), technical variation dominates and normalization is critical.
+
+**Implementation:**
+
+1. **Start with the log2 working copy** of the filtered matrix.
+2. **Drop proteins with any missing values** across all samples (complete cases only). PCA cannot handle NaN. With post-filter missingness of at most 1-2 values per protein, this drops a modest number of proteins. Record how many proteins were dropped and how many remain for PCA. (Alternative considered: impute with row means before PCA. Rejected as less transparent. Dropping is simpler and more honest for a QC diagnostic.)
+3. **Center and scale** (subtract each protein's mean, divide by its standard deviation). This computes PCA on the correlation matrix rather than the covariance matrix, so all proteins contribute equally regardless of their absolute abundance level. This is the standard approach for QC PCA.
+4. **Fit PCA** using scikit-learn's `PCA` class. Compute all components (min(n_samples, n_proteins) components, so at most 5 non-trivial components for a 6-sample run).
+5. **Extract PC1-PC3** coordinates and the variance explained by each component.
+
+**Output:**
+
+- PCA scatter plot (`{run_id}.pca_scatter`): PC1 on x-axis, PC2 on y-axis. Points colored by group, labeled with sample IDs. Axis labels include variance explained percentages (e.g., "PC1 (42.3%)"). PNG + interactive HTML.
+- PCA results table (`{run_id}.pca_results.parquet`): one row per sample, columns for `sample_id`, `group`, `PC1`, `PC2`, `PC3`, plus a metadata section recording `variance_explained_PC1`, `variance_explained_PC2`, `variance_explained_PC3`, and `n_proteins_used` (number of complete-case proteins used for PCA).
+
+**Design notes:**
+
+- **Scree plot skipped.** With at most 5 non-trivial components, a scree plot adds little information. Variance explained percentages are reported in the plot axis labels and the PCA results table.
+- **PC1 vs. PC3 skipped.** With 6 samples, the first two components typically capture most of the variance. The post-normalization PCA in Module 03 will show whether group separation improves. If a researcher needs additional component views, the PCA coordinates are available in the output Parquet for custom plotting.
+- **Pre-normalization context:** The pre-normalization PCA may show technical variation dominating biological variation. This is expected and is the reason normalization exists. The QC report should include a note contextualizing this so the researcher is not alarmed by imperfect group separation.
+
+## 4.5 Sample-to-Sample Correlation Heatmap
+
+**What it shows:** Pairwise similarity between all samples' protein abundance profiles. A complementary view to PCA: while PCA shows sample relationships in a reduced space, the correlation heatmap shows all pairwise relationships directly.
+
+**What the researcher looks for:**
+
+- **Replicates should correlate highly.** The within-group blocks (WT-WT, KO-KO) should show higher correlations than the between-group blocks.
+- **A replicate correlating poorly with its own group** but well with the other group: potential sample swap or mislabel.
+- **A replicate correlating poorly with everything:** potential failed sample.
+- **Uniformly high correlations everywhere** (no visible block structure): the biological effect is small relative to overall proteome similarity. Common and not necessarily a problem.
+
+**Implementation:**
+
+- **Correlation method:** Pearson correlation on the log2 working copy. Standard choice for proteomics QC.
+- **Missing value handling:** Pairwise-complete (pandas `DataFrame.corr()` default). Each pair of samples uses all proteins where both have non-missing values. With at most 1-2 missing values per protein, different pairs use nearly identical protein sets. This is preferable to complete-cases-only because it wastes no data.
+- **Color scale:** Anchored to the observed range, from the minimum pairwise correlation to 1.0. Do NOT use a 0-to-1 scale: proteomics replicates typically correlate at 0.95+, and the subtle within-group vs. between-group differences are invisible on a 0-to-1 color range.
+- **Sample ordering:** Grouped by condition (all WT samples together, all KO samples together), not hierarchically clustered. With 6 samples, the block structure is visible by eye without clustering.
+- **Cell annotations:** Each cell annotated with the correlation value (2 decimal places).
+
+**Output:**
+
+- Correlation heatmap (`{run_id}.correlation_heatmap`): 6x6 matrix (for a typical CTX run), sample labels on both axes, group indicated by color annotation or sidebar. PNG + interactive HTML.
+- Correlation matrix stored as `{run_id}.correlation_matrix.parquet`: square matrix, one row and one column per sample.
+
+## 4.6 Outlier Detection and Sample Flagging
+
+**What it does:** Synthesizes the results of all preceding analyses into per-sample outlier flags. Uses convergent evidence across multiple metrics rather than a single statistical test, because with only 3 replicates per group, any individual test for outlier status is underpowered.
+
+**Rationale for convergent evidence:** With triplicate designs, hard statistical thresholds (e.g., "flag if more than 3 MADs from the median") are unreliable because the MAD itself is noisy with n=6. PCA distance alone can miss problems visible in other metrics. The convergent evidence approach acknowledges the small sample size: instead of claiming "this sample IS an outlier," it says "this sample is unusual on multiple metrics; here is the evidence."
+
+**Flag definitions (one boolean per sample per criterion):**
+
+- **`flag_low_detection`:** True if this sample's `n_detected` is the lowest in its group AND the difference from the group median is more than 2% of the total protein count. Example: if the group median is 8,350 and total proteins is 8,400, the 2% threshold is 168 proteins. A sample with 8,150 detections (200 below median, > 168 threshold) is flagged. A sample with 8,300 (50 below, < 168) is not. The 2% threshold avoids flagging normal replicate variation.
+- **`flag_extreme_median`:** True if this sample's `median_intensity` (on log2 scale) is the most extreme in its group (highest or lowest) AND the difference from the group median-of-medians exceeds 2 MADs of the within-group median intensities. With only 3 values per group this is a rough heuristic, not a precise statistical test.
+- **`flag_pca_outlier`:** True if this sample's Euclidean distance from its group centroid in PC1-PC2 space is the largest in its group AND exceeds 1.5x the median distance-to-centroid of all samples in that group. Captures multivariate patterns that single metrics miss.
+- **`flag_low_correlation`:** True if this sample's mean Pearson correlation with its own-group replicates is the lowest in the entire dataset (across all groups). A sample that correlates worse with its own replicates than any other sample correlates with its replicates is the most likely candidate for a quality issue.
+
+**`n_flags`:** Integer count of how many of the four flags are True.
+
+**Interpretation guidance (reported in the QC report):**
+
+- **0-1 flags:** No concern. Normal replicate variation.
+- **2 flags:** Worth noting. The report lists which metrics flagged this sample.
+- **3-4 flags:** Strong concern. The report highlights this sample prominently with a recommendation that the researcher investigate and consider re-running the pipeline without this sample.
+
+**Output:**
+
+- `{run_id}.sample_flags.parquet` and `.csv`: one row per sample. Columns: `sample_id`, `group`, `flag_low_detection`, `flag_extreme_median`, `flag_pca_outlier`, `flag_low_correlation`, `n_flags`.
+- The QC report includes a dedicated section summarizing flagged samples. If no samples have 2+ flags, the section reports "no samples flagged."
+
+**Critical design principle:** Module 02 does not remove samples. It does not exclude data. It reports flags. The researcher reviews the evidence and makes the decision. If a sample is truly problematic, the researcher can remove it from the metadata file and re-run the pipeline.
 
 ---
 
 # 5. Design Decisions
 
-*[No module-specific decisions recorded yet.]*
+### 2026-03-27 -- Single Nextflow Process for Module 02
+
+**Decision:** Module 02 is implemented as a single Nextflow process (PRENORM_QC) calling one Python script (`bin/prenorm_qc.py`). All QC analyses run within this single script.
+
+**Rationale:** All analyses share the same three input files, are computationally trivial (~8,400 proteins x 6 samples, all in-memory operations completing in seconds), and produce outputs for the same QC report. Splitting into multiple processes would mean either redundant file I/O (multiple processes each loading the same parquet) or complex channel wiring to pass intermediate results between sub-processes. Neither is justified for a module whose total runtime is under a minute.
+
+**Alternatives considered:** (1) Separate processes for each analysis (MISSINGNESS, PCA, CORRELATION, etc.) -- rejected as unnecessary overhead with no parallelism benefit (everything is fast). (2) Two processes: compute + report -- workable but adds wiring for no real gain.
+
+**Impact:** One script, one process, one set of outputs. Internal code organization uses functions for each analysis, but Nextflow sees one atomic step.
+
+### 2026-03-27 -- Missingness Excluded from Module 02
+
+**Decision:** Missingness analysis and visualization is handled by Module 01 (MISSINGNESS_REPORT process, Process 4.10), not Module 02.
+
+**Rationale:** Module 01's detection filter (Process 4.4) removes proteins with the most informative missingness patterns. After filtering, per-protein missingness in Module 02's input is limited to at most 1-2 missing values out of 6 (for default threshold with triplicate designs). A dedicated missingness analysis in Module 02 would be largely redundant and would operate on data where the interesting patterns (structured absence, sparse detection) have been removed. Module 01 has access to the full pre-filter dataset and already computes the relevant data; it only needed the visual presentation, which the new MISSINGNESS_REPORT process provides.
+
+**Alternatives considered:** Missingness analysis in Module 02 -- rejected because post-filter missingness is too mild to warrant a dedicated analysis.
+
+**Impact:** Module 02 does not produce any missingness-related outputs. The QC Report Assembly (Phase 2) will incorporate Module 01's missingness report alongside Module 02's outputs.
+
+### 2026-03-27 -- CV Excluded from Module 02
+
+**Decision:** Coefficient of variation (CV) within groups is computed in Module 04 (Imputation), not Module 02.
+
+**Rationale:** CV (SD/mean on linear scale, or SD on log2 scale) measures replicate variability for each protein within a condition. It should be computed on normalized data because pre-normalization CV conflates normalization-correctable technical variation (loading differences) with genuine replicate variability. It should also use observed values only (imputed values from methods like MinProb cluster tightly, artificially reducing CV). This places CV after normalization (Module 03) but before imputation's values are mixed in, which is Module 04's territory.
+
+**Alternatives considered:** CV in Module 02 on raw data -- rejected because it would measure technical + biological variability conflated, which is not useful for flagging genuinely variable proteins.
+
+**Impact:** Module 02 does not compute or report CV. The CV summary feeds into the QC Report Assembly and into protein-level QC flags in the Results Assembly module.
+
+### 2026-03-27 -- Box Plots Only (No Density Plots) for Intensity Distributions
+
+**Decision:** Produce box plots of per-sample intensity distributions. Density plots (kernel density estimates) are not produced.
+
+**Rationale:** Box plots and density plots are complementary: box plots show summary statistics (median, IQR, outliers) compactly, while density plots show full distributional shape (bimodality, skewness). However, with only 6 samples the box plots are clear and sufficient. The Q-Q plot (Section 4.3) provides distributional shape information that density plots would also provide, making density plots partially redundant.
+
+**Alternatives considered:** (1) Both box and density plots -- reasonable but adds visual bulk to the report for marginal information gain. (2) Density only -- rejected because box plots are the more standard/expected QC visualization.
+
+**Impact:** One fewer plot type in the report. Distributional shape information comes from the Q-Q plot and the skewness/kurtosis metrics instead.
+
+### 2026-03-27 -- PCA: Drop Missing Values Rather Than Impute
+
+**Decision:** For PCA computation, proteins with any missing values across all samples are dropped (complete cases only). Row-mean imputation before PCA is not used.
+
+**Rationale:** PCA cannot handle NaN values, so some strategy is needed. With post-filter missingness of at most 1-2 values per protein, dropping complete cases removes a modest number of proteins. Row-mean imputation would retain more proteins but introduces artificial values into the PCA space, which could subtly affect the component structure. For a QC diagnostic, transparency is more important than retaining every protein. The number of proteins dropped and retained is recorded in the PCA output.
+
+**Alternatives considered:** (1) Row-mean imputation before PCA -- simpler and retains all proteins, but introduces artificial values. (2) Iterative PCA methods that handle missing data natively (e.g., PPCA) -- over-engineered for a QC diagnostic with mild missingness.
+
+**Impact:** PCA may use slightly fewer proteins than the full filtered matrix. The difference is small and recorded in the output.
+
+### 2026-03-27 -- PCA: Center and Scale
+
+**Decision:** PCA is computed on centered and scaled data (correlation matrix), not just centered data (covariance matrix).
+
+**Rationale:** Scaling divides each protein's values by its standard deviation, so all proteins contribute equally to the PCA regardless of their absolute abundance. Without scaling, high-abundance proteins dominate the principal components simply because they have larger absolute values. For QC purposes, where the goal is to detect sample-level patterns (outliers, group separation, batch effects), equal-weight treatment of all proteins is more appropriate.
+
+**Alternatives considered:** Center-only (covariance PCA) -- appropriate for some analytical contexts but for QC diagnostics, scaled PCA is the standard convention.
+
+**Impact:** PCA results reflect patterns across all proteins equally, not dominated by the highest-abundance proteins.
+
+### 2026-03-27 -- Outlier Detection: Convergent Evidence Rather Than Hard Thresholds
+
+**Decision:** Sample outlier detection uses a convergent evidence approach (counting how many independent metrics flag each sample) rather than a single statistical test with a hard threshold.
+
+**Rationale:** With only 3 replicates per group and 6 total samples, any single statistical outlier test (Grubbs' test, Dixon's Q, MAD-based thresholds) is underpowered. The MAD itself is noisy with n=6: a single outlier can heavily influence the MAD, making the test either too liberal or too conservative. The convergent evidence approach acknowledges the small sample size honestly by presenting multiple independent pieces of evidence rather than a single binary call. A sample flagged on 3-4 criteria is much more likely to be a genuine quality problem than a sample flagged on just one.
+
+**Alternatives considered:** (1) Hard MAD-based thresholds per metric -- rejected due to unreliable statistics with n=6. (2) PCA distance only -- captures multivariate patterns but misses problems visible in marginal metrics. (3) Formal multivariate outlier tests (Mahalanobis distance) -- requires more samples than variables for a stable covariance matrix estimate, which is not available with 6 samples and ~8,400 proteins.
+
+**Impact:** The flag table has 4 boolean columns plus a count. The QC report uses the count to determine warning level. No samples are automatically excluded.
+
+### 2026-03-27 -- Correlation Heatmap: Observed Range Color Scale
+
+**Decision:** The correlation heatmap color scale spans from the minimum observed pairwise correlation to 1.0, not from 0 to 1.
+
+**Rationale:** Proteomics replicates typically have Pearson correlations of 0.95+. On a 0-to-1 color scale, every cell looks the same (dark blue or dark red, depending on the palette). The subtle but important differences between within-group correlations (e.g., 0.98) and between-group correlations (e.g., 0.95) are invisible. Anchoring to the observed range makes these differences visually apparent.
+
+**Alternatives considered:** Fixed 0-to-1 scale -- rejected because it wastes most of the color range on values that don't exist in the data.
+
+**Impact:** The color scale adapts to each dataset. The minimum value is labeled on the color bar for context.
+
+### 2026-03-27 -- No Module 02-Specific Parameters
+
+**Decision:** Module 02 introduces no new user-configurable parameters in params.yml. All analytical choices (log2 transformation, PCA scaling, Pearson correlation, outlier flag criteria) are hardcoded.
+
+**Rationale:** Module 02 is a diagnostic module. Its purpose is to show the researcher what the data looks like, not to implement analytical choices that would change the data or the results. The specific method choices (Pearson vs. Spearman, centering vs. scaling, which metrics feed outlier flags) are sensible defaults that would work well for any proteomics dataset. Adding parameters for these choices would create configuration burden without meaningful benefit. If a researcher has a strong preference for Spearman correlation or unscaled PCA, they can modify the script; this does not need to be a pipeline parameter.
+
+The module does read `input.abundance_type` and `design.group_column` from params.yml, but these are existing parameters defined by Module 01.
+
+**Alternatives considered:** (1) Parameters for correlation method, PCA scaling, outlier thresholds -- rejected as unnecessary configuration burden for a diagnostic module. (2) A `qc.enable_outlier_detection` toggle -- considered but the outlier detection is lightweight (no compute cost) and advisory (no data is excluded), so there's no reason to disable it.
+
+**Impact:** Zero new entries in the params.yml schema. The module is fully self-contained once it receives its inputs and the existing params.
 
 ---
 
 # 6. Parameters
 
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `qc.missingness_threshold` | float | 0.5 | Flag proteins missing in > fraction (per group) |
-| `qc.cv_threshold` | float | 0.5 | Flag proteins with CV > this (per group) |
-| `qc.min_samples_per_group` | int | 2 | Min non-missing samples per group to retain |
-| `qc.pca_components` | int | 5 | Number of PCA components to compute |
-| `qc.detect_outlier_samples` | bool | true | Run sample-level outlier detection |
+Module 02 introduces no new parameters. It reads the following existing parameters from params.yml:
+
+| Parameter | Defined By | Used For |
+|---|---|---|
+| `input.abundance_type` | Module 01 | Determines whether log2(x+1) transformation is applied internally for visualizations and PCA. If `raw`, transformation is applied. If `log2` or `normalized`, data is used as-is. Also determines whether `total_intensity` is computed (raw only). |
+| `design.group_column` | Module 01 | Column name in the metadata file that defines groups. Used for coloring plots, organizing box plots and heatmaps by group, and computing within-group statistics for outlier flags. |
 
 ---
 
 # 7. Known Limitations and Edge Cases
 
-- Automated outlier detection is advisory, not prescriptive -- the tool flags potential issues but does not automatically exclude samples or proteins without user confirmation.
-- Missingness classification (structured vs. sporadic) is heuristic; edge cases exist where the distinction is ambiguous.
+- **Small sample sizes:** All outlier detection is advisory due to the fundamental limitation of n=3 per group. The convergent evidence approach mitigates this but cannot fully compensate. With more replicates (n=5+), more formal outlier detection methods could be applied.
+- **Pre-normalization PCA interpretation:** The PCA plot may show technical variation (loading differences, batch effects) dominating over biological signal. This is expected before normalization and is not a sign that the experiment failed. The QC report should include a note contextualizing this. The post-normalization PCA from Module 03 will provide the "after" comparison.
+- **Log2 transformation edge cases:** The log2(x+1) transformation is applied when `abundance_type` is `raw`. If the data contains negative values (which should not happen with raw intensities but could occur with pre-processed data incorrectly labeled as "raw"), the log2 transformation would fail. The script should validate that all abundance values are >= 0 when `abundance_type` is `raw` and raise a clear error if not.
+- **Correlation heatmap with missing values:** Pairwise-complete correlation means different pairs may use slightly different protein subsets. With post-filter missingness of at most 1-2 values per protein, this difference is negligible. If a future dataset has higher missingness, this assumption should be revisited.
+- **PCA on complete cases only:** Dropping proteins with any missing value means PCA uses fewer proteins than the full dataset. The number dropped is recorded. If a dataset has unusually high residual missingness (many proteins with 1-2 missing values), this could exclude a meaningful fraction of proteins from PCA. The alternative (row-mean imputation) trades transparency for coverage.
+- **Outlier flags with unbalanced groups:** The current flag definitions assume roughly equal group sizes (they compare "within group" metrics). If groups have very different sizes (e.g., 2 vs. 4), the flags may behave differently than intended. The current design targets the common case of equal replicates.
+- **Module does not produce protein-level QC flags.** The `qc_flag_missingness`, `qc_flag_cv`, and `qc_flag_outlier` columns in the SQLite proteins table (Section 4.7 of the master overview) are populated by Module 04 (CV) and the Results Assembly module, not Module 02. Module 02's flags are sample-level only.
 
 ---
 
 # 8. Testing Notes
 
-*[To be populated during implementation.]*
+**Tests to run on CTX benchmark data (CTXcyto run):**
+
+**Per-sample summary:**
+
+- Verify 6 rows in sample_summary table (one per sample)
+- Verify n_detected values are in expected range (~8,200-8,400)
+- Verify total_intensity is computed (abundance_type is raw for CTX data)
+- Verify skewness values are near 0 (log2-transformed proteomics data should be roughly symmetric)
+- Verify kurtosis values are modest (|excess kurtosis| < 3 for well-behaved data)
+
+**Box plots:**
+
+- Verify 6 boxes appear, 3 per group, colored distinctly
+- Verify medians are on log2 scale (values in the range 15-25 for typical DIA-NN intensities)
+- Visually inspect for systematic shifts between groups vs. within groups
+
+**Q-Q plot:**
+
+- Verify 6 sets of points, colored by group
+- Verify reference line present
+- Points should approximately follow the reference line if data is well-behaved
+
+**PCA:**
+
+- Verify number of proteins used for PCA (should be reported in output; expect ~8,000+ after dropping missing-value proteins)
+- Verify variance explained percentages sum to <= 100%
+- Verify WT and KO samples show some separation (or document if they don't)
+- Check for any sample far from its group centroid
+
+**Correlation heatmap:**
+
+- Verify 6x6 matrix
+- Verify within-group correlations are higher than between-group correlations (in a well-designed experiment)
+- Verify color scale uses observed range, not 0-to-1
+- Verify correlation values are annotated in cells
+
+**Outlier detection:**
+
+- Verify 6 rows in sample_flags table
+- Verify flag columns are boolean
+- Verify n_flags is the sum of the four flag columns
+- Manually cross-check: if a sample has a notably low detection count and is distant in PCA, it should have 2+ flags
+
+**Report:**
+
+- Verify HTML report renders with all 5 plots
+- Verify flagged sample section appears (even if "no samples flagged")
+- Verify interactive Plotly plots are functional (hover, zoom)
+
+**Edge case tests:**
+
+- Test with `abundance_type: log2` -- verify log2 transformation is NOT applied, total_intensity is null
+- Test with a dataset where one sample has notably lower quality -- verify it accumulates 2+ flags
 
 ---
 
@@ -116,3 +427,26 @@ Compile all analyses into a single HTML report with interactive Plotly plots.
 **Reason:** Documentation restructured into master overview + module files.
 **Affected processes:** All (initial design capture).
 **Downstream effects:** None.
+
+### 2026-03-27 -- Complete Redesign Based on QC Analysis Inventory
+
+**Change:** Full rewrite of module specification. Major changes:
+
+1. **Scope narrowed to pre-normalization QC only.** Missingness analysis moved to Module 01 (MISSINGNESS_REPORT process). CV moved to Module 04 (requires normalized data). Post-normalization QC diagnostics assigned to Module 03. Imputation diagnostics assigned to Module 04.
+
+2. **Single Nextflow process.** Module implemented as one process (PRENORM_QC) calling one script (`bin/prenorm_qc.py`), replacing the original multi-process design.
+
+3. **Six analyses specified in detail:** per-sample intensity summaries (with skewness and kurtosis), intensity distribution box plots, Q-Q plot (overlaid, all samples), PCA (complete cases, centered and scaled), sample-to-sample correlation heatmap (Pearson, pairwise-complete, observed-range color scale), outlier detection via convergent evidence.
+
+4. **Output schema defined:** four data files (sample summary, sample flags, correlation matrix, PCA results), five plot types (each PNG + interactive HTML), and one consolidated QC report (HTML).
+
+5. **Outlier detection method selected:** convergent evidence across four criteria (detection count, median intensity, PCA distance, within-group correlation), with a flag count for severity. Advisory only; no samples excluded.
+
+6. **All old parameters removed.** Module 02 introduces no new params.yml parameters. Reads `input.abundance_type` and `design.group_column` from existing params.
+
+7. **Nine design decisions documented** covering process structure, scope boundaries, analytical method choices, and rationale.
+
+**Reason:** Systematic inventory of QC/EDA analyses during Module 02 design session revealed that the original monolithic QC/EDA concept conflated analyses belonging at different pipeline stages. The redesign assigns each analysis to its analytically appropriate location and defines Module 02's scope precisely.
+
+**Affected processes:** Entire module rewritten. Old processes 4.1-4.5 (missingness, CV, sample QC, distributional assessment, report assembly) replaced with new processes 4.0-4.6.
+**Downstream effects:** Module 02 no longer produces missingness or CV outputs. These are produced by Module 01 and Module 04 respectively. The QC Report Assembly process (Phase 2) collects outputs from all three modules. The Module 02 output schema (sample_summary, sample_flags, correlation_matrix, pca_results) constitutes the data contract with downstream consumers.

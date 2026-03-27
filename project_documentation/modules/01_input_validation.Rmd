@@ -8,11 +8,11 @@ output:
     theme: default
 ---
 
-**Last Updated:** 2026-03-23
+**Last Updated:** 2026-03-27
 
-**Module Status:** Design in progress (input spec refined based on CTX dataset inspection)
+**Module Status:** Design complete; implementation complete for Processes 4.1-4.9; Process 4.10 (MISSINGNESS_REPORT) design complete, not yet implemented.
 
-**Pipeline Position:** [Input files] --> **Input validation & ID mapping** --> [QC/EDA module, Normalization]
+**Pipeline Position:** [Input files] --> **Input validation & ID mapping** --> [Pre-normalization QC/EDA (Module 02), Normalization (Module 03)]
 
 ---
 
@@ -49,10 +49,13 @@ See master overview (Section 2.1-2.2) for architectural context.
 
 ## 2.2 Outputs
 
+*Updated 2026-03-27 to add missingness report visualizations (Process 4.10).*
+
 - **Validated abundance matrix** (Parquet): the input matrix with confirmed structure and types, proteins passing detection filter, ready for downstream processing. Includes peptide count columns if provided.
 - **Validated metadata** (Parquet): the input metadata with confirmed structure, matched to the matrix
 - **ID mapping table** (Parquet): one row per input protein ID with columns for all target ID types (see Section 4.8 for schema)
 - **Validation report**: summary of validation results, any warnings, unmapped ID counts, detection filter summary (proteins removed and why)
+- **Missingness report** (HTML with interactive plots): visual characterization of missingness patterns across the full pre-filter dataset. Includes filter category bar chart, per-sample detection bar chart, missingness heatmap for filtered-out proteins, and per-protein missingness rate histogram. See Section 4.10 for details.
 
 ---
 
@@ -276,6 +279,39 @@ Every downstream module reads this table and joins it with its input data to get
 
 **Cache lifetime:** Configurable via `databases.cache_days` (default 30 days).
 
+## 4.10 Missingness Report
+
+*Added 2026-03-27. See Decision Register entry 2026-03-27 "Missingness Visualizations in Module 01" for rationale.*
+
+**What it does:** Produces visual characterizations of missingness patterns across the full pre-filter dataset. This is a separate Nextflow process (MISSINGNESS_REPORT) that runs after FILTER_PROTEINS. It is a reporting-only step with no analytical logic and no effect on downstream data flow.
+
+**Why a separate process:** The filtering script (`filter_proteins.py`) handles data transformation and the text-based validation report. Keeping the visualization in a separate script (`missingness_report.py`) preserves the filtering script's lean dependency profile (pandas/numpy only) and maintains separation between data processing and reporting. The visualization script depends on matplotlib, seaborn, and plotly, which are heavier libraries not needed by the filtering logic.
+
+**Inputs:**
+
+- `{run_id}.detection_filter_table.csv` (from FILTER_PROTEINS): one row per protein in the full pre-filter dataset, with per-group detection counts and filter status (PASSED, SINGLE-GROUP, SPARSE, ABSENT)
+- `{run_id}.validated_matrix.parquet` (from VALIDATE_INPUTS): the full pre-filter abundance matrix, needed for per-sample detection counts and the missingness heatmap
+- `{run_id}.validated_metadata.parquet` (from VALIDATE_INPUTS): sample-to-group assignments, needed for coloring plots by group
+
+**Outputs:**
+
+- `{run_id}.missingness_report.html`: standalone HTML file containing all four interactive plots (Plotly-based)
+- `{run_id}.missingness_plots/`: directory containing static PNG versions of each plot for archival and documentation use
+
+**Plots produced:**
+
+**Plot 1: Filter category bar chart.** Four bars showing the number of proteins in each detection filter category (PASSED, SINGLE-GROUP, SPARSE, ABSENT). Bars annotated with counts and percentages. Provides an immediate visual summary of data completeness. Data source: `detection_filter_table.csv`, counting rows per `filter_status` value.
+
+**Plot 2: Per-sample detection bar chart.** One bar per sample, height = number of proteins detected (non-missing) in that sample across the full pre-filter dataset. Bars colored by group. Samples within each group ordered consistently (e.g., replicate number). Allows quick identification of outlier samples with unusually low detection counts relative to their group. Data source: `validated_matrix.parquet`, counting non-NaN abundance values per sample column. Group assignments from `validated_metadata.parquet`.
+
+**Plot 3: Missingness heatmap (filtered-out proteins).** Rows = proteins that did NOT pass the detection filter (SINGLE-GROUP, SPARSE, and ABSENT categories). Columns = samples, grouped by condition. Cells colored binary: detected (colored) vs. missing (white/light). Proteins sorted by filter category, then by total detection count within each category. This shows the structure of the removed proteins: SINGLE-GROUP proteins appear as blocks of presence in one group and absence in the other, SPARSE proteins show scattered detections, and ABSENT proteins are entirely empty. Data source: join `detection_filter_table.csv` (to identify filtered-out proteins and their categories) with `validated_matrix.parquet` (to get per-sample presence/absence). Note: with ~400-500 filtered-out proteins for a typical CTX run, this heatmap is a manageable size. The plot includes category labels or dividers on the y-axis to visually separate the three filtered categories.
+
+**Plot 4: Per-protein missingness rate histogram.** X-axis = fraction of samples missing (0/6, 1/6, 2/6, ..., 6/6 for a 6-sample run). Y-axis = number of proteins. Covers the full pre-filter dataset (all proteins, not just filtered-out ones). Shows the distribution of missingness across all proteins. A well-behaved dataset shows a strong peak at 0/6 (fully detected) with a smaller peak near 6/6 (absent). An unusual distribution (flat, multimodal, or heavy-tailed) may indicate systematic data quality issues. Data source: `validated_matrix.parquet`, computing the fraction of missing values per protein across all samples.
+
+**Dependencies:** matplotlib, seaborn, plotly (all in the conda environment, not needed by other Module 01 scripts).
+
+**Error behavior:** This process is advisory. If it fails (e.g., plotting library error), the pipeline should continue -- the downstream data flow does not depend on missingness report outputs. Implemented via Nextflow's `errorStrategy 'ignore'` or similar.
+
 ---
 
 # 5. Design Decisions
@@ -417,6 +453,20 @@ Including peptide counts in the same file as abundances (rather than a separate 
 **Alternatives considered:** (1) Lower the float threshold to 0.666 or 0.6 to avoid the edge case -- would work for n=3 but creates different edge cases for other n values (e.g., n=4: `2/4 = 0.5 >= 0.6` is false, but `3/4 = 0.75 >= 0.6` is true, which may not be the intended behavior). (2) Keep the fraction but document the edge case -- defers the problem to users and is hard to notice without inspecting data closely. The integer parameterization is unambiguous regardless of group size.
 
 **Impact:** Parameter renamed and type changed. All existing `params.yml` files regenerated. Module 01 documentation updated throughout (filter logic description, parameter table, validation report format block, category definitions, testing notes).
+
+### 2026-03-27 -- Missingness Visualizations in Module 01 (New MISSINGNESS_REPORT Process)
+
+**Decision:** Add a new Nextflow process (MISSINGNESS_REPORT) to Module 01 that produces visual characterizations of missingness patterns. This is a separate process from FILTER_PROTEINS, implemented as `bin/missingness_report.py`. Four plots are produced: (1) filter category bar chart, (2) per-sample detection bar chart colored by group, (3) missingness heatmap for filtered-out proteins (Option A: SINGLE-GROUP, SPARSE, and ABSENT proteins only), (4) per-protein missingness rate histogram across the full dataset.
+
+**Rationale:** During Module 02 (QC/EDA) design, a systematic inventory of QC analyses revealed that missingness characterization belongs in Module 01 rather than Module 02, for two reasons. First, Module 01's detection filter (Process 4.4) already removes the proteins with the most dramatic missingness patterns (SINGLE-GROUP, SPARSE, ABSENT). By the time Module 02 sees the data, per-protein missingness is limited to at most 1-2 missing values out of 6 (for the default threshold of 2 detections per group with triplicate designs). The substantive missingness story is in the pre-filter data, which only Module 01 has access to. Second, Module 01 already computes all the data needed for these visualizations (detection_filter_table.csv, per-sample counts in the text report); the only missing piece is the visual presentation.
+
+The MISSINGNESS_REPORT is a separate process rather than additions to `filter_proteins.py` to keep the filtering script lean (no matplotlib/seaborn/plotly dependency) and maintain separation between data processing and reporting.
+
+The missingness heatmap uses Option A (filtered-out proteins only, ~400-500 proteins per CTX run) rather than the full dataset (~8,900 proteins) because the full heatmap would be visually unreadable at that scale and the interesting missingness patterns (structured absence, sparse detection) are concentrated in the filtered-out proteins.
+
+**Alternatives considered:** (1) Add missingness visualizations to Module 02 (QC/EDA) -- rejected because Module 02 operates on post-filter data where the dramatic missingness patterns have already been removed, making the analysis largely redundant. (2) Add plots directly to `filter_proteins.py` -- rejected because it would add matplotlib/seaborn/plotly as dependencies to a script that currently needs only pandas/numpy, and would mix data transformation with reporting. (3) Full-dataset missingness heatmap -- rejected because ~8,900 rows is unreadable; the filtered-out proteins are where the structure is. (4) Group-specific detection scatter/bubble chart (per-protein detections in group A vs. group B) -- considered but deferred as lower priority; the heatmap conveys the same structural information more directly.
+
+**Impact:** New process added to Module 01 workflow (MISSINGNESS_REPORT). New script: `bin/missingness_report.py`. New outputs: `{run_id}.missingness_report.html` and `{run_id}.missingness_plots/` directory with static PNGs. No new parameters (all visualization choices are hardcoded; the plots use data already produced by FILTER_PROTEINS). Module 02 (QC/EDA) scope confirmed as excluding missingness analysis.
 
 ---
 
@@ -842,3 +892,12 @@ databases:
 **Reason:** Parameters, run strategy, and data preparation design needed to be finalized before coding the extraction scripts.
 **Affected sections:** 2.1 (input spec), 5 (design decisions -- 6 new entries), 6 (parameters table), 9 (new: data preparation scripts), 10 (renumbered from 9).
 **Downstream effects:** The two data preparation scripts are ready to be coded. The module 01 input spec is now concrete enough to begin implementation.
+
+### 2026-03-27 -- Missingness Visualizations Added (New Process 4.10)
+
+**Change:** Added Process 4.10 (MISSINGNESS_REPORT) to Module 01. New Nextflow process and script (`bin/missingness_report.py`) producing four missingness visualizations: filter category bar chart, per-sample detection bar chart, missingness heatmap for filtered-out proteins, and per-protein missingness rate histogram. Outputs are `{run_id}.missingness_report.html` (interactive Plotly) and `{run_id}.missingness_plots/` (static PNGs).
+
+**Reason:** Module 02 (QC/EDA) design review revealed that missingness characterization belongs in Module 01 rather than Module 02. Module 01's detection filter removes the proteins with the most informative missingness patterns; by the time Module 02 sees the data, residual missingness is too mild to warrant a dedicated analysis. Module 01 already has all the data needed; the only gap was visual presentation.
+
+**Affected sections:** 2.2 (Outputs), 4.10 (new process), 5 (new decision register entry), 10 (this entry).
+**Downstream effects:** Module 02 (QC/EDA) scope confirmed as excluding missingness analysis. MISSINGNESS_REPORT needs to be wired as a new Nextflow process in `workflows/prosift.nf`. The process receives outputs from both VALIDATE_INPUTS (validated_matrix.parquet, validated_metadata.parquet) and FILTER_PROTEINS (detection_filter_table.csv).

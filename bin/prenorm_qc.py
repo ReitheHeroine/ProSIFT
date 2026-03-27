@@ -1,0 +1,1103 @@
+#!/usr/bin/env python3
+"""
+Title:         prenorm_qc.py
+Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
+Author:        Reina Hastings (reinahastings13@gmail.com)
+Created:       2026-03-27
+Last Modified: 2026-03-27
+Purpose:       Module 02 pre-normalization QC/EDA. Computes per-sample intensity summaries,
+               intensity distribution box plots, Q-Q plots, PCA, and sample-to-sample
+               correlations on the post-filter, pre-normalization abundance data. Synthesizes
+               results into per-sample outlier flags and a consolidated HTML QC report.
+               This module does not modify any data.
+Inputs:
+  --matrix    {run_id}.filtered_matrix.parquet  (Module 01 FILTER_PROTEINS)
+  --metadata  {run_id}.validated_metadata.parquet  (Module 01 VALIDATE_INPUTS)
+  --mapping   {run_id}.id_mapping.parquet  (Module 01 UNIPROT_MAPPING)
+  --params    {run_id}_params.yml
+Outputs:
+  {run_id}.sample_summary.parquet/.csv
+  {run_id}.sample_flags.parquet/.csv
+  {run_id}.correlation_matrix.parquet
+  {run_id}.pca_results.parquet
+  {run_id}.sample_intensity_summary.png/.html
+  {run_id}.intensity_boxplots.png/.html
+  {run_id}.qq_plot.png/.html
+  {run_id}.pca_scatter.png/.html
+  {run_id}.correlation_heatmap.png/.html
+  {run_id}.prenorm_qc_report.html
+Usage:
+  prenorm_qc.py --matrix CTXcyto_WT_vs_CTXcyto_KO.filtered_matrix.parquet \
+                --metadata CTXcyto_WT_vs_CTXcyto_KO.validated_metadata.parquet \
+                --mapping CTXcyto_WT_vs_CTXcyto_KO.id_mapping.parquet \
+                --params CTXcyto_WT_vs_CTXcyto_KO_params.yml \
+                --run-id CTXcyto_WT_vs_CTXcyto_KO \
+                --outdir .
+"""
+
+import argparse
+import datetime
+import logging
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import scipy.stats
+import yaml
+from plotly.subplots import make_subplots
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+
+# ============================================================
+# CONSTANTS: Outlier flag thresholds (see Module 02 spec, Section 4.6)
+# ============================================================
+
+# flag_low_detection: gap from group median must exceed this fraction of total proteins
+DETECTION_FLAG_PCT = 0.02
+
+# flag_extreme_median: most extreme sample's deviation must exceed this many group MADs
+MEDIAN_FLAG_MAD_MULT = 2.0
+
+# flag_pca_outlier: max within-group PCA distance must exceed this multiplier of median distance
+PCA_OUTLIER_DIST_MULT = 1.5
+
+# Color palette (D3, colorblind-friendly, 10 colors)
+_PALETTE = px.colors.qualitative.D3
+
+
+# ============================================================
+# ARGUMENT PARSING
+# ============================================================
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="prenorm_qc.py",
+        description="ProSIFT Module 02: Pre-normalization QC/EDA",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Example:\n"
+            "  prenorm_qc.py \\\n"
+            "    --matrix run.filtered_matrix.parquet \\\n"
+            "    --metadata run.validated_metadata.parquet \\\n"
+            "    --mapping run.id_mapping.parquet \\\n"
+            "    --params run_params.yml \\\n"
+            "    --run-id run \\\n"
+            "    --outdir ."
+        ),
+    )
+    parser.add_argument("--matrix",   required=True, help="Filtered abundance matrix (Parquet)")
+    parser.add_argument("--metadata", required=True, help="Validated metadata (Parquet)")
+    parser.add_argument("--mapping",  required=True, help="ID mapping table (Parquet)")
+    parser.add_argument("--params",   required=True, help="Run params.yml")
+    parser.add_argument("--run-id",   required=True, dest="run_id",
+                        help="Run identifier (used as output file prefix)")
+    parser.add_argument("--outdir",   required=True, help="Output directory")
+    return parser.parse_args()
+
+
+def setup_logging() -> None:
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+
+# ============================================================
+# DATA LOADING AND PREPARATION (Section 4.0)
+# ============================================================
+
+def load_params(params_path: Path) -> dict:
+    with open(params_path) as f:
+        return yaml.safe_load(f)
+
+
+def prepare_abundance(
+    matrix_df: pd.DataFrame,
+    params: dict,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """
+    Identify abundance columns, parse sample IDs, and build raw and log2 DataFrames.
+
+    The log2 working copy uses log2(x+1) when abundance_type is 'raw', and the
+    data as-is when it is already 'log2' or 'normalized'. The log2(x+1) shift
+    handles any zero values without producing -Inf, though the filtered matrix
+    should not contain true zeros.
+
+    Returns:
+        raw_df   -- raw abundance values; index=protein_id, columns=sample_ids
+        log2_df  -- log2 working copy; same index and columns
+        sample_ids -- ordered list of sample IDs
+    """
+    abundance_prefix = params["input"].get("abundance_prefix", "")
+    abundance_type = params["input"]["abundance_type"]
+
+    # Identify abundance columns: exclude protein_id and peptide_count_* columns
+    all_cols = matrix_df.columns.tolist()
+    exclude = {"protein_id"} | {c for c in all_cols if c.startswith("peptide_count_")}
+    abund_cols = [c for c in all_cols if c not in exclude]
+
+    if not abund_cols:
+        raise ValueError("No abundance columns found in filtered matrix.")
+
+    # Parse sample IDs by stripping the abundance prefix
+    if abundance_prefix:
+        sample_ids = [c[len(abundance_prefix):] for c in abund_cols]
+    else:
+        sample_ids = list(abund_cols)
+
+    # Build raw_df indexed by protein_id, with bare sample IDs as column names
+    raw_df = matrix_df.set_index("protein_id")[abund_cols].copy()
+    raw_df.columns = sample_ids
+
+    # Validate non-negative values before log2 transformation
+    if abundance_type == "raw":
+        min_val = float(raw_df.min(skipna=True).min())
+        if min_val < 0:
+            raise ValueError(
+                f"Negative abundance values found (min={min_val:.4f}) with "
+                "abundance_type='raw'. Cannot apply log2 transformation."
+            )
+        log2_df = np.log2(raw_df + 1)
+    else:
+        log2_df = raw_df.copy()
+
+    return raw_df, log2_df, sample_ids
+
+
+def build_group_map(metadata_df: pd.DataFrame, params: dict) -> dict[str, str]:
+    """Return {sample_id: group_label} from validated metadata."""
+    group_column = params["design"]["group_column"]
+    if group_column not in metadata_df.columns:
+        raise ValueError(f"Group column '{group_column}' not found in metadata.")
+    return dict(zip(metadata_df["sample_id"].astype(str),
+                    metadata_df[group_column].astype(str)))
+
+
+def make_color_map(groups: list[str]) -> dict[str, str]:
+    """Assign a consistent color from the D3 palette to each unique group."""
+    unique_groups = sorted(set(groups))
+    return {g: _PALETTE[i % len(_PALETTE)] for i, g in enumerate(unique_groups)}
+
+
+# ============================================================
+# SECTION 4.1: PER-SAMPLE INTENSITY SUMMARIES
+# ============================================================
+
+def compute_sample_summaries(
+    raw_df: pd.DataFrame,
+    log2_df: pd.DataFrame,
+    group_map: dict[str, str],
+    sample_ids: list[str],
+    abundance_type: str,
+) -> pd.DataFrame:
+    """
+    Compute per-sample descriptive statistics on the log2 working copy.
+    total_intensity is computed on the raw linear scale only for 'raw' input.
+    """
+    rows = []
+    for sid in sample_ids:
+        log2_vals = log2_df[sid].dropna().values
+        raw_vals = raw_df[sid].dropna().values
+
+        n_detected = int(log2_df[sid].notna().sum())
+        median_int = float(np.median(log2_vals)) if len(log2_vals) > 0 else np.nan
+        total_int  = float(np.sum(raw_vals)) if abundance_type == "raw" else None
+        mad_int    = (float(np.median(np.abs(log2_vals - np.median(log2_vals))))
+                      if len(log2_vals) > 0 else np.nan)
+        skew = float(scipy.stats.skew(log2_vals, bias=True))    if len(log2_vals) > 1 else np.nan
+        kurt = float(scipy.stats.kurtosis(log2_vals, bias=True)) if len(log2_vals) > 1 else np.nan
+
+        rows.append({
+            "sample_id":        sid,
+            "group":            group_map.get(sid, "unknown"),
+            "n_detected":       n_detected,
+            "median_intensity": median_int,
+            "total_intensity":  total_int,
+            "mad_intensity":    mad_int,
+            "skewness":         skew,
+            "kurtosis":         kurt,
+        })
+
+    return pd.DataFrame(rows)
+
+
+def plot_sample_intensity_summary(
+    summary_df: pd.DataFrame,
+    color_map: dict[str, str],
+    run_id: str,
+    abundance_type: str,
+) -> go.Figure:
+    """
+    Multipanel scatter plot: one panel per summary metric, samples on x-axis,
+    colored by group. total_intensity panel included only for 'raw' input.
+    """
+    metrics = [
+        ("n_detected",       "Proteins detected",       False),
+        ("median_intensity",  "Median intensity (log2)", False),
+        ("total_intensity",   "Total intensity (raw)",   True),   # raw-only panel
+        ("mad_intensity",     "MAD intensity (log2)",    False),
+        ("skewness",          "Skewness (log2)",         False),
+        ("kurtosis",          "Excess kurtosis (log2)",  False),
+    ]
+    # Drop raw-only panel when input is not raw
+    if abundance_type != "raw":
+        metrics = [(m, lbl, raw_only) for m, lbl, raw_only in metrics if not raw_only]
+
+    n_metrics = len(metrics)
+    n_cols = 2
+    n_rows = (n_metrics + 1) // n_cols
+
+    fig = make_subplots(
+        rows=n_rows, cols=n_cols,
+        subplot_titles=[lbl for _, lbl, _ in metrics],
+        vertical_spacing=0.15,
+        horizontal_spacing=0.12,
+    )
+
+    shown_groups: set[str] = set()
+    for i, (metric, _, _) in enumerate(metrics):
+        row = i // n_cols + 1
+        col = i % n_cols + 1
+        for grp, grp_df in summary_df.groupby("group"):
+            show_legend = str(grp) not in shown_groups
+            shown_groups.add(str(grp))
+            fig.add_trace(
+                go.Scatter(
+                    x=grp_df["sample_id"],
+                    y=grp_df[metric],
+                    mode="markers",
+                    marker=dict(color=color_map[str(grp)], size=12, line=dict(width=1, color="white")),
+                    name=str(grp),
+                    legendgroup=str(grp),
+                    showlegend=show_legend,
+                    hovertemplate=f"<b>%{{x}}</b><br>{metric}: %{{y:.4f}}<extra></extra>",
+                ),
+                row=row, col=col,
+            )
+
+    fig.update_layout(
+        title=f"Per-Sample Intensity Summary: {run_id}",
+        height=280 * n_rows + 80,
+        width=950,
+        legend_title_text="Group",
+    )
+    return fig
+
+
+# ============================================================
+# SECTION 4.2: INTENSITY DISTRIBUTION BOX PLOTS
+# ============================================================
+
+def plot_intensity_boxplots(
+    log2_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    color_map: dict[str, str],
+    run_id: str,
+) -> go.Figure:
+    """
+    Box plot of log2 intensity distributions. One box per sample, grouped by
+    condition. Each box shows median, IQR, 1.5xIQR whiskers, and outlier points.
+    """
+    sample_order = (
+        summary_df.sort_values(["group", "sample_id"])["sample_id"].tolist()
+    )
+
+    fig = go.Figure()
+    shown_groups: set[str] = set()
+    for sid in sample_order:
+        grp = str(summary_df.loc[summary_df["sample_id"] == sid, "group"].iloc[0])
+        show_legend = grp not in shown_groups
+        shown_groups.add(grp)
+        values = log2_df[sid].dropna().values
+        fig.add_trace(
+            go.Box(
+                y=values,
+                name=sid,
+                marker_color=color_map[grp],
+                legendgroup=grp,
+                legendgrouptitle_text=grp if show_legend else None,
+                showlegend=show_legend,
+                boxpoints="outliers",
+                hoverinfo="y+name",
+            )
+        )
+
+    fig.update_layout(
+        title=f"Intensity Distributions (Pre-Normalization): {run_id}",
+        xaxis_title="Sample",
+        yaxis_title="log2 Intensity",
+        height=520,
+        width=800,
+        showlegend=True,
+    )
+    return fig
+
+
+# ============================================================
+# SECTION 4.3: Q-Q PLOT
+# ============================================================
+
+def plot_qq(
+    log2_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    color_map: dict[str, str],
+    run_id: str,
+) -> go.Figure:
+    """
+    Overlaid Q-Q plot: each sample's quantiles vs. theoretical standard normal.
+    Values are standardized (subtract mean, divide by SD) before plotting.
+    Points on the y=x reference line indicate perfect normality.
+    """
+    fig = go.Figure()
+    shown_groups: set[str] = set()
+    all_theoretical: list[float] = []
+
+    for sid in log2_df.columns:
+        grp = str(summary_df.loc[summary_df["sample_id"] == sid, "group"].iloc[0])
+        show_legend = grp not in shown_groups
+        shown_groups.add(grp)
+
+        values = log2_df[sid].dropna().values
+        n = len(values)
+        if n < 2:
+            continue
+
+        # Standardize and sort observed values
+        std_vals = (values - values.mean()) / values.std(ddof=1)
+        observed = np.sort(std_vals)
+
+        # Theoretical quantiles of N(0,1) for n observations (Blom plotting positions)
+        probs = np.linspace(1 / (n + 1), n / (n + 1), n)
+        theoretical = scipy.stats.norm.ppf(probs)
+        all_theoretical.extend(theoretical.tolist())
+
+        fig.add_trace(
+            go.Scatter(
+                x=theoretical,
+                y=observed,
+                mode="markers",
+                marker=dict(color=color_map[grp], size=3, opacity=0.5),
+                name=grp,
+                legendgroup=grp,
+                legendgrouptitle_text=grp if show_legend else None,
+                showlegend=show_legend,
+                hovertemplate=(
+                    f"<b>{sid}</b><br>"
+                    "Theoretical: %{x:.3f}<br>"
+                    "Observed: %{y:.3f}<extra></extra>"
+                ),
+            )
+        )
+
+    # Reference line y = x across the range of theoretical quantiles
+    if all_theoretical:
+        t_min, t_max = min(all_theoretical), max(all_theoretical)
+        fig.add_trace(
+            go.Scatter(
+                x=[t_min, t_max],
+                y=[t_min, t_max],
+                mode="lines",
+                line=dict(color="black", dash="dash", width=1.5),
+                name="Normal reference (y = x)",
+                showlegend=True,
+            )
+        )
+
+    fig.update_layout(
+        title=f"Q-Q Plot (Normal Reference): {run_id}",
+        xaxis_title="Theoretical quantiles",
+        yaxis_title="Observed quantiles (standardized)",
+        height=520,
+        width=700,
+        legend_title_text="Group",
+    )
+    return fig
+
+
+# ============================================================
+# SECTION 4.4: PRINCIPAL COMPONENT ANALYSIS
+# ============================================================
+
+def compute_and_plot_pca(
+    log2_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    color_map: dict[str, str],
+    run_id: str,
+) -> tuple[pd.DataFrame, go.Figure]:
+    """
+    PCA on complete-case log2 data (proteins with any NaN dropped).
+    Centers and scales each protein (correlation-matrix PCA) so all proteins
+    contribute equally regardless of absolute abundance.
+
+    Returns:
+        pca_df  -- per-sample PCA coordinates (PC1-PC3) plus metadata columns
+        fig     -- PC1 vs PC2 scatter plot
+    """
+    sample_ids = log2_df.columns.tolist()
+    group_of = {
+        row["sample_id"]: str(row["group"])
+        for _, row in summary_df.iterrows()
+    }
+
+    # --- Drop proteins with any missing value (complete cases only) ---
+    complete_df = log2_df.dropna(axis=0, how="any")
+    n_proteins_used = len(complete_df)
+    n_proteins_total = len(log2_df)
+    n_dropped = n_proteins_total - n_proteins_used
+    logging.info(
+        f"  PCA: using {n_proteins_used} complete-case proteins "
+        f"({n_dropped} dropped due to missing values)"
+    )
+
+    if n_proteins_used < 2:
+        raise ValueError(
+            f"Only {n_proteins_used} complete-case proteins available for PCA. "
+            "Too many missing values to compute PCA."
+        )
+
+    # --- Center and scale: rows=samples, columns=proteins ---
+    X = complete_df.T.values  # shape: (n_samples, n_proteins)
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    # --- Fit PCA ---
+    n_components = min(len(sample_ids), n_proteins_used)
+    pca = PCA(n_components=n_components)
+    coords = pca.fit_transform(X_scaled)  # shape: (n_samples, n_components)
+
+    var_exp = pca.explained_variance_ratio_
+    pc1_var = float(var_exp[0]) if len(var_exp) > 0 else np.nan
+    pc2_var = float(var_exp[1]) if len(var_exp) > 1 else np.nan
+    pc3_var = float(var_exp[2]) if len(var_exp) > 2 else np.nan
+
+    groups = [group_of[s] for s in sample_ids]
+
+    pca_df = pd.DataFrame({
+        "sample_id":              sample_ids,
+        "group":                  groups,
+        "PC1":                    coords[:, 0],
+        "PC2":                    coords[:, 1] if coords.shape[1] > 1 else np.nan,
+        "PC3":                    coords[:, 2] if coords.shape[1] > 2 else np.nan,
+        "variance_explained_PC1": pc1_var,
+        "variance_explained_PC2": pc2_var,
+        "variance_explained_PC3": pc3_var,
+        "n_proteins_used":        n_proteins_used,
+    })
+
+    # --- PC1 vs PC2 scatter plot ---
+    pc1_label = f"PC1 ({pc1_var * 100:.1f}%)"
+    pc2_label = f"PC2 ({pc2_var * 100:.1f}%)"
+
+    fig = go.Figure()
+    shown_groups: set[str] = set()
+    for grp, grp_df in pca_df.groupby("group"):
+        grp = str(grp)
+        show_legend = grp not in shown_groups
+        shown_groups.add(grp)
+        fig.add_trace(
+            go.Scatter(
+                x=grp_df["PC1"],
+                y=grp_df["PC2"],
+                mode="markers+text",
+                text=grp_df["sample_id"],
+                textposition="top center",
+                textfont=dict(size=11),
+                marker=dict(color=color_map[grp], size=14,
+                            line=dict(width=1, color="white")),
+                name=grp,
+                legendgroup=grp,
+                showlegend=show_legend,
+                hovertemplate=(
+                    "<b>%{text}</b><br>"
+                    f"PC1: %{{x:.3f}}<br>"
+                    f"PC2: %{{y:.3f}}<extra></extra>"
+                ),
+            )
+        )
+
+    fig.update_layout(
+        title=f"PCA (Pre-Normalization): {run_id}",
+        xaxis_title=pc1_label,
+        yaxis_title=pc2_label,
+        height=580,
+        width=700,
+        legend_title_text="Group",
+        annotations=[
+            dict(
+                text=(
+                    "<i>Pre-normalization PCA may show technical variation "
+                    "(loading differences) dominating biological signal. Expected before normalization.</i>"
+                ),
+                xref="paper", yref="paper",
+                x=0.0, y=-0.18,
+                showarrow=False,
+                font=dict(size=11, color="gray"),
+                align="left",
+            )
+        ],
+    )
+    return pca_df, fig
+
+
+# ============================================================
+# SECTION 4.5: SAMPLE-TO-SAMPLE CORRELATION HEATMAP
+# ============================================================
+
+def compute_and_plot_correlation(
+    log2_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    color_map: dict[str, str],
+    run_id: str,
+) -> tuple[pd.DataFrame, go.Figure]:
+    """
+    Pearson correlation matrix using pairwise-complete observations.
+    Color scale anchored to [min_off_diagonal_corr, 1.0] to show subtle
+    within-group vs between-group differences. Samples ordered by group.
+
+    Returns:
+        corr_df -- square Pearson correlation matrix (sample_id index and columns)
+        fig     -- annotated heatmap
+    """
+    # Order samples: group together for clear block structure
+    sample_order = (
+        summary_df.sort_values(["group", "sample_id"])["sample_id"].tolist()
+    )
+    log2_ordered = log2_df[sample_order]
+
+    # Pairwise-complete Pearson correlation (pandas default)
+    corr_df = log2_ordered.corr(method="pearson")
+
+    # Anchor color scale to the range of off-diagonal values
+    mask = ~np.eye(len(sample_order), dtype=bool)
+    min_corr = float(corr_df.values[mask].min())
+
+    # Axis labels: "Group: SampleID"
+    group_of = dict(zip(summary_df["sample_id"], summary_df["group"].astype(str)))
+    axis_labels = [f"{group_of[s]}: {s}" for s in sample_order]
+
+    # Cell annotations with 2dp correlation values
+    annotations = []
+    for i, row_sid in enumerate(sample_order):
+        for j, col_sid in enumerate(sample_order):
+            val = corr_df.loc[row_sid, col_sid]
+            annotations.append(
+                dict(
+                    x=j, y=i,
+                    text=f"{val:.2f}",
+                    showarrow=False,
+                    font=dict(size=10, color="black"),
+                )
+            )
+
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=corr_df.values,
+            x=axis_labels,
+            y=axis_labels,
+            colorscale="RdBu",
+            zmin=min_corr,
+            zmax=1.0,
+            colorbar=dict(title="Pearson r"),
+            hovertemplate="%{y}<br>%{x}<br>r = %{z:.4f}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title=f"Sample Correlation Heatmap (Pre-Normalization): {run_id}",
+        annotations=annotations,
+        height=520,
+        width=640,
+        xaxis=dict(tickangle=40),
+    )
+    return corr_df, fig
+
+
+# ============================================================
+# SECTION 4.6: OUTLIER DETECTION AND SAMPLE FLAGGING
+# ============================================================
+
+def compute_sample_flags(
+    summary_df: pd.DataFrame,
+    pca_df: pd.DataFrame,
+    corr_df: pd.DataFrame,
+    n_total_proteins: int,
+) -> pd.DataFrame:
+    """
+    Compute four per-sample outlier flags using convergent evidence across
+    independent metrics. With only ~3 replicates per group, no single metric
+    is reliable alone; agreement across multiple metrics indicates real problems.
+
+    Flags:
+      flag_low_detection   -- lowest n_detected in group AND gap > 2% of total proteins
+      flag_extreme_median  -- most extreme median in group AND gap > 2 group MADs
+      flag_pca_outlier     -- max PCA distance from centroid AND > 1.5x median distance
+      flag_low_correlation -- lowest mean within-group correlation across all samples
+
+    n_flags: integer count of True flags per sample (0-4).
+    """
+    flags = summary_df[["sample_id", "group"]].copy().reset_index(drop=True)
+
+    # --- flag_low_detection ---
+    detection_threshold = DETECTION_FLAG_PCT * n_total_proteins
+    low_det: dict[str, bool] = {}
+    for grp in summary_df["group"].unique():
+        grp_df = summary_df[summary_df["group"] == grp]
+        group_median = grp_df["n_detected"].median()
+        min_val = grp_df["n_detected"].min()
+        gap = group_median - min_val
+        for _, row in grp_df.iterrows():
+            sid = row["sample_id"]
+            is_minimum = row["n_detected"] == min_val
+            low_det[sid] = bool(is_minimum and gap > detection_threshold)
+
+    flags["flag_low_detection"] = flags["sample_id"].map(low_det)
+
+    # --- flag_extreme_median ---
+    extreme_med: dict[str, bool] = {}
+    for grp in summary_df["group"].unique():
+        grp_df = summary_df[summary_df["group"] == grp]
+        grp_medians = grp_df["median_intensity"].values
+        med_of_meds = float(np.median(grp_medians))
+        deviations = np.abs(grp_medians - med_of_meds)
+        group_mad = float(np.median(deviations))
+        max_dev = float(deviations.max())
+        max_dev_pos = int(deviations.argmax())
+        for i, (_, row) in enumerate(grp_df.iterrows()):
+            sid = row["sample_id"]
+            is_most_extreme = i == max_dev_pos
+            flagged = bool(
+                is_most_extreme
+                and group_mad > 0
+                and max_dev > MEDIAN_FLAG_MAD_MULT * group_mad
+            )
+            extreme_med[sid] = flagged
+
+    flags["flag_extreme_median"] = flags["sample_id"].map(extreme_med)
+
+    # --- flag_pca_outlier ---
+    pca_flag: dict[str, bool] = {}
+    for grp in pca_df["group"].unique():
+        grp_pca = pca_df[pca_df["group"] == grp].copy()
+        centroid_pc1 = grp_pca["PC1"].mean()
+        centroid_pc2 = grp_pca["PC2"].mean()
+        distances = np.sqrt(
+            (grp_pca["PC1"] - centroid_pc1) ** 2
+            + (grp_pca["PC2"] - centroid_pc2) ** 2
+        )
+        median_dist = float(distances.median())
+        max_dist = float(distances.max())
+        max_dist_idx = distances.idxmax()
+        for idx in grp_pca.index:
+            sid = grp_pca.loc[idx, "sample_id"]
+            is_max = idx == max_dist_idx
+            flagged = bool(
+                is_max
+                and median_dist > 0
+                and max_dist > PCA_OUTLIER_DIST_MULT * median_dist
+            )
+            pca_flag[sid] = flagged
+
+    flags["flag_pca_outlier"] = flags["sample_id"].map(pca_flag)
+
+    # --- flag_low_correlation ---
+    # Mean Pearson correlation with own-group replicates (excluding self)
+    within_group_corr: dict[str, float] = {}
+    for _, row in summary_df.iterrows():
+        sid = row["sample_id"]
+        grp = row["group"]
+        same_group = summary_df[summary_df["group"] == grp]["sample_id"].tolist()
+        others = [s for s in same_group if s != sid and s in corr_df.columns]
+        if others and sid in corr_df.index:
+            mean_corr = float(corr_df.loc[sid, others].mean())
+        else:
+            mean_corr = 1.0  # no peers (single sample in group)
+        within_group_corr[sid] = mean_corr
+
+    if within_group_corr:
+        min_corr_sample = min(within_group_corr, key=within_group_corr.get)
+        corr_flag: dict[str, bool] = {
+            sid: sid == min_corr_sample for sid in flags["sample_id"]
+        }
+    else:
+        corr_flag = {sid: False for sid in flags["sample_id"]}
+
+    flags["flag_low_correlation"] = flags["sample_id"].map(corr_flag)
+
+    # --- n_flags: count of True flags ---
+    flag_cols = [
+        "flag_low_detection", "flag_extreme_median",
+        "flag_pca_outlier", "flag_low_correlation",
+    ]
+    flags["n_flags"] = flags[flag_cols].sum(axis=1).astype(int)
+
+    return flags
+
+
+# ============================================================
+# OUTPUT: SAVE INDIVIDUAL PLOTS
+# ============================================================
+
+def save_plot(fig: go.Figure, base_path: Path) -> None:
+    """
+    Save a Plotly figure as:
+      - Static PNG via kaleido (requires: pip install kaleido or conda install python-kaleido)
+      - Standalone interactive HTML with embedded plotly.js
+
+    base_path must NOT have an extension -- the extension is appended as a string
+    rather than using Path.with_suffix, because Path.with_suffix replaces the last
+    dot-separated token in the stem (e.g., "run.sample_intensity_summary" would lose
+    the "sample_intensity_summary" part).
+    """
+    png_path  = Path(str(base_path) + ".png")
+    html_path = Path(str(base_path) + ".html")
+
+    fig.write_image(str(png_path))
+    fig.write_html(str(html_path), full_html=True, include_plotlyjs=True)
+    logging.info(f"  Saved: {png_path.name}, {html_path.name}")
+
+
+# ============================================================
+# OUTPUT: CONSOLIDATED HTML REPORT
+# ============================================================
+
+def generate_html_report(
+    run_id: str,
+    summary_df: pd.DataFrame,
+    flags_df: pd.DataFrame,
+    plots: dict[str, go.Figure],
+    outdir: Path,
+) -> Path:
+    """
+    Build a self-contained HTML QC report with embedded plots (plotly.js embedded
+    inline for offline viewing), summary tables, and a flagged-sample alert section.
+    """
+    report_path = outdir / f"{run_id}.prenorm_qc_report.html"
+    report_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # --- Summary table HTML ---
+    display_summary = summary_df.copy()
+    for col in ["median_intensity", "mad_intensity", "skewness", "kurtosis"]:
+        if col in display_summary.columns:
+            display_summary[col] = display_summary[col].apply(
+                lambda x: f"{x:.4f}" if pd.notna(x) else "N/A"
+            )
+    if "total_intensity" in display_summary.columns:
+        display_summary["total_intensity"] = display_summary["total_intensity"].apply(
+            lambda x: f"{x:.2e}" if pd.notna(x) else "N/A"
+        )
+    summary_table_html = display_summary.to_html(index=False, border=0, classes="data-table")
+
+    # --- Flags table HTML (YES/no for readability) ---
+    display_flags = flags_df.copy()
+    for col in ["flag_low_detection", "flag_extreme_median",
+                "flag_pca_outlier", "flag_low_correlation"]:
+        display_flags[col] = display_flags[col].apply(lambda x: "YES" if x else "no")
+    flags_table_html = display_flags.to_html(index=False, border=0, classes="data-table")
+
+    # --- Flag alert section ---
+    max_flags = int(flags_df["n_flags"].max()) if len(flags_df) > 0 else 0
+    n_flagged_2plus = int((flags_df["n_flags"] >= 2).sum())
+
+    if max_flags == 0:
+        alert_class = "alert-ok"
+        alert_text = (
+            "No samples flagged (n_flags = 0 for all samples). "
+            "Data quality appears consistent across samples."
+        )
+    elif max_flags == 1:
+        alert_class = "alert-ok"
+        alert_text = (
+            "All samples have at most 1 flag. No sample flagged on multiple "
+            "independent criteria. This is consistent with normal replicate variation."
+        )
+    elif max_flags == 2:
+        flagged = flags_df.loc[flags_df["n_flags"] >= 2, "sample_id"].tolist()
+        alert_class = "alert-warn"
+        alert_text = (
+            f"Note: {', '.join(flagged)} flagged on 2 independent criteria. "
+            "Worth reviewing, but 2 flags alone is not conclusive evidence of a quality problem."
+        )
+    else:
+        flagged = flags_df.loc[flags_df["n_flags"] >= 3, "sample_id"].tolist()
+        alert_class = "alert-concern"
+        alert_text = (
+            f"Strong concern: {', '.join(flagged)} flagged on {max_flags} independent criteria. "
+            "Recommend investigating this sample. Consider re-running the pipeline "
+            "without it to assess impact on downstream results."
+        )
+
+    # --- Plot HTML divs (embed plotly.js once in the first plot) ---
+    plot_order = [
+        ("sample_intensity_summary", "Per-Sample Intensity Summary"),
+        ("intensity_boxplots",       "Intensity Distributions (Box Plots)"),
+        ("qq_plot",                  "Distributional Shape (Q-Q Plot)"),
+        ("pca_scatter",              "Principal Component Analysis"),
+        ("correlation_heatmap",      "Sample-to-Sample Correlation"),
+    ]
+
+    plot_sections_html = ""
+    first_plot = True
+    for plot_key, section_title in plot_order:
+        if plot_key not in plots:
+            continue
+        div_html = plots[plot_key].to_html(
+            full_html=False,
+            include_plotlyjs=first_plot,  # True on first call, embeds ~3.5MB plotly.js
+            div_id=f"plot_{plot_key}",
+        )
+        first_plot = False
+        plot_sections_html += f"""
+        <div class="plot-section">
+            <h2>{section_title}</h2>
+            {div_html}
+        </div>
+"""
+
+    # --- Overview stats ---
+    n_samples = len(summary_df)
+    max_detected = int(summary_df["n_detected"].max()) if len(summary_df) > 0 else 0
+
+    # --- Assemble full HTML document ---
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>ProSIFT Pre-Normalization QC: {run_id}</title>
+    <style>
+        body {{
+            font-family: Arial, Helvetica, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 24px 44px 60px 44px;
+            color: #333;
+            background: #fafafa;
+            line-height: 1.5;
+        }}
+        h1 {{
+            color: #2c3e50;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 10px;
+            margin-bottom: 6px;
+        }}
+        h2 {{
+            color: #34495e;
+            border-bottom: 1px solid #e0e0e0;
+            padding-bottom: 5px;
+            margin-top: 44px;
+        }}
+        .meta {{ color: #7f8c8d; font-size: 0.9em; margin-bottom: 20px; }}
+        .scope-note {{
+            background: #eaf2ff;
+            border-left: 4px solid #3498db;
+            padding: 10px 18px;
+            border-radius: 4px;
+            font-size: 0.91em;
+            margin-bottom: 28px;
+        }}
+        .overview-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+            margin-bottom: 30px;
+        }}
+        .stat-box {{
+            background: #ecf0f1;
+            padding: 16px;
+            border-radius: 6px;
+            text-align: center;
+        }}
+        .stat-box .value {{ font-size: 2em; font-weight: bold; color: #2c3e50; }}
+        .stat-box .label {{ font-size: 0.82em; color: #7f8c8d; margin-top: 4px; }}
+        .alert-ok      {{ background: #d5f5e3; border-left: 4px solid #27ae60; padding: 12px 18px; border-radius: 4px; margin: 14px 0; }}
+        .alert-warn    {{ background: #fef9e7; border-left: 4px solid #f39c12; padding: 12px 18px; border-radius: 4px; margin: 14px 0; }}
+        .alert-concern {{ background: #fdedec; border-left: 4px solid #e74c3c; padding: 12px 18px; border-radius: 4px; margin: 14px 0; }}
+        table.data-table {{
+            border-collapse: collapse;
+            width: 100%;
+            margin: 14px 0;
+            font-size: 0.91em;
+        }}
+        table.data-table th, table.data-table td {{
+            border: 1px solid #d5d8dc;
+            padding: 7px 13px;
+            text-align: left;
+        }}
+        table.data-table th {{ background: #eaecee; font-weight: bold; }}
+        table.data-table tr:nth-child(even) {{ background: #f8f9fa; }}
+        .note {{ color: #7f8c8d; font-style: italic; font-size: 0.88em; margin: 8px 0 0 0; }}
+        .plot-section {{ margin: 28px 0 50px 0; }}
+    </style>
+</head>
+<body>
+
+<h1>ProSIFT Pre-Normalization QC Report</h1>
+<div class="meta">
+    <strong>Run:</strong> {run_id} &nbsp;|&nbsp; <strong>Generated:</strong> {report_date}
+</div>
+
+<div class="scope-note">
+    <strong>Scope:</strong> Pre-normalization diagnostics only. This report characterizes the
+    post-detection-filter data before any normalization or imputation. Post-normalization
+    diagnostics are produced by Module 03. Missingness analysis is in the Module 01 validation
+    report. CV analysis is in Module 04. A consolidated QC Report (Phase 2) will compile all
+    diagnostic outputs side-by-side.
+</div>
+
+<h2>Overview</h2>
+<div class="overview-grid">
+    <div class="stat-box">
+        <div class="value">{n_samples}</div>
+        <div class="label">Samples</div>
+    </div>
+    <div class="stat-box">
+        <div class="value">{max_detected:,}</div>
+        <div class="label">Max proteins detected</div>
+    </div>
+    <div class="stat-box">
+        <div class="value">{n_flagged_2plus}</div>
+        <div class="label">Samples with 2+ flags</div>
+    </div>
+</div>
+
+<h2>Per-Sample Summary Statistics</h2>
+{summary_table_html}
+<p class="note">
+    All intensity metrics computed on log2 working copy (log2(x+1) for raw input; as-is for
+    log2/normalized input). total_intensity is summed on raw linear scale and reported only for
+    raw input; N/A otherwise.
+</p>
+
+<h2>Sample Outlier Flags</h2>
+<div class="{alert_class}">{alert_text}</div>
+{flags_table_html}
+<p class="note">
+    Flags are advisory -- no data is excluded by this module. Interpretation:
+    0-1 flags: normal variation; 2 flags: worth reviewing; 3-4 flags: strong concern.
+    See Module 02 spec Section 4.6 for flag definitions and threshold rationale.
+</p>
+
+{plot_sections_html}
+
+</body>
+</html>
+"""
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+    logging.info(f"  Report: {report_path.name}")
+    return report_path
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main() -> None:
+    args = parse_args()
+    setup_logging()
+
+    outdir = Path(args.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    run_id = args.run_id
+
+    logging.info(f"Module 02: Pre-normalization QC/EDA -- {run_id}")
+
+    # --- Load params ---
+    params = load_params(Path(args.params))
+    abundance_type = params["input"]["abundance_type"]
+
+    # --- Load input files ---
+    logging.info("Loading input files...")
+    matrix_df  = pd.read_parquet(args.matrix)
+    metadata_df = pd.read_parquet(args.metadata)
+    mapping_df  = pd.read_parquet(args.mapping)  # available for protein annotation if needed
+
+    # --- Prepare abundance data ---
+    logging.info("Preparing abundance data...")
+    raw_df, log2_df, sample_ids = prepare_abundance(matrix_df, params)
+    n_total_proteins = len(raw_df)
+    logging.info(f"  {n_total_proteins} proteins, {len(sample_ids)} samples")
+
+    # --- Build group and color maps ---
+    group_map = build_group_map(metadata_df, params)
+    missing_samples = [s for s in sample_ids if s not in group_map]
+    if missing_samples:
+        raise ValueError(
+            f"Samples in abundance matrix not found in metadata: {missing_samples}"
+        )
+    groups = [group_map[s] for s in sample_ids]
+    color_map = make_color_map(groups)
+
+    # --- Section 4.1: Per-sample intensity summaries ---
+    logging.info("Computing per-sample summaries...")
+    summary_df = compute_sample_summaries(raw_df, log2_df, group_map, sample_ids, abundance_type)
+    summary_df.to_parquet(outdir / f"{run_id}.sample_summary.parquet", index=False)
+    summary_df.to_csv(outdir / f"{run_id}.sample_summary.csv", index=False)
+    logging.info(f"  Saved: {run_id}.sample_summary.parquet/.csv")
+
+    summary_fig = plot_sample_intensity_summary(summary_df, color_map, run_id, abundance_type)
+    save_plot(summary_fig, outdir / f"{run_id}.sample_intensity_summary")
+
+    # --- Section 4.2: Intensity distribution box plots ---
+    logging.info("Generating intensity box plots...")
+    box_fig = plot_intensity_boxplots(log2_df, summary_df, color_map, run_id)
+    save_plot(box_fig, outdir / f"{run_id}.intensity_boxplots")
+
+    # --- Section 4.3: Q-Q plot ---
+    logging.info("Generating Q-Q plot...")
+    qq_fig = plot_qq(log2_df, summary_df, color_map, run_id)
+    save_plot(qq_fig, outdir / f"{run_id}.qq_plot")
+
+    # --- Section 4.4: PCA ---
+    logging.info("Computing PCA...")
+    pca_df, pca_fig = compute_and_plot_pca(log2_df, summary_df, color_map, run_id)
+    pca_df.to_parquet(outdir / f"{run_id}.pca_results.parquet", index=False)
+    logging.info(f"  Saved: {run_id}.pca_results.parquet")
+    save_plot(pca_fig, outdir / f"{run_id}.pca_scatter")
+
+    # --- Section 4.5: Sample-to-sample correlation ---
+    logging.info("Computing sample correlation matrix...")
+    corr_df, corr_fig = compute_and_plot_correlation(log2_df, summary_df, color_map, run_id)
+    corr_df.to_parquet(outdir / f"{run_id}.correlation_matrix.parquet")
+    logging.info(f"  Saved: {run_id}.correlation_matrix.parquet")
+    save_plot(corr_fig, outdir / f"{run_id}.correlation_heatmap")
+
+    # --- Section 4.6: Outlier detection and sample flagging ---
+    logging.info("Computing sample outlier flags...")
+    flags_df = compute_sample_flags(summary_df, pca_df, corr_df, n_total_proteins)
+    flags_df.to_parquet(outdir / f"{run_id}.sample_flags.parquet", index=False)
+    flags_df.to_csv(outdir / f"{run_id}.sample_flags.csv", index=False)
+    logging.info(f"  Saved: {run_id}.sample_flags.parquet/.csv")
+
+    n_flagged = int((flags_df["n_flags"] >= 2).sum())
+    if n_flagged > 0:
+        flagged_names = flags_df.loc[flags_df["n_flags"] >= 2, "sample_id"].tolist()
+        logging.warning(f"  {n_flagged} sample(s) with 2+ flags: {flagged_names}")
+    else:
+        logging.info("  No samples flagged on 2+ criteria.")
+
+    # --- Consolidated HTML report ---
+    logging.info("Generating QC report...")
+    plots = {
+        "sample_intensity_summary": summary_fig,
+        "intensity_boxplots":       box_fig,
+        "qq_plot":                  qq_fig,
+        "pca_scatter":              pca_fig,
+        "correlation_heatmap":      corr_fig,
+    }
+    generate_html_report(run_id, summary_df, flags_df, plots, outdir)
+
+    logging.info(
+        f"Module 02 complete. "
+        f"{n_total_proteins} proteins, {len(sample_ids)} samples, "
+        f"{n_flagged} sample(s) with 2+ flags."
+    )
+
+
+if __name__ == "__main__":
+    main()

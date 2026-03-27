@@ -37,6 +37,7 @@ dependencies:
   - matplotlib
   - seaborn
   - plotly
+  - python-kaleido                     # Static PNG export from Plotly figures (Module 02+)
 
   # --- Testing ---
   - pytest
