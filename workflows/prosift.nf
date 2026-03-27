@@ -22,8 +22,12 @@ workflow PROSIFT {
     // Each emission: [meta, abundance_matrix, metadata, params_yml]
     // meta is a Map; run_id is the only key used by Module 01.
     //
-    // Four multiMap branches are needed because each downstream join
-    // consumes a channel exactly once:
+    // ch_input is a queue channel (from Channel.fromPath) and can only be
+    // consumed once per branch. multiMap is required here. Process output
+    // channels (VALIDATE_INPUTS.out.*, FILTER_PROTEINS.out.*) are broadcast
+    // in DSL2 and do not need multiMap even with multiple downstream subscribers.
+    //
+    // Branches:
     //   validate       -> VALIDATE_INPUTS
     //   filter_params  -> FILTER_PROTEINS (joined after validation)
     //   map_params     -> UNIPROT_MAPPING (joined after detection filter)
@@ -53,31 +57,11 @@ workflow PROSIFT {
     // --- Module 01, Processes 4.1-4.3: Input validation ---
     VALIDATE_INPUTS(ch_input.validate)
 
-    // VALIDATE_INPUTS.out.metadata is consumed by three downstream joins:
-    // FILTER_PROTEINS, MISSINGNESS_REPORT, and PRENORM_QC. multiMap
-    // creates three independent branch channels, each receiving all items.
-    VALIDATE_INPUTS.out.metadata
-        .multiMap { meta, path ->
-            filter:     [ meta, path ]
-            missingness: [ meta, path ]
-            prenorm:    [ meta, path ]
-        }
-        .set { ch_validated_metadata }
-
-    // VALIDATE_INPUTS.out.matrix is consumed by two downstream joins:
-    // FILTER_PROTEINS (post-filter matrix) and MISSINGNESS_REPORT (pre-filter matrix).
-    VALIDATE_INPUTS.out.matrix
-        .multiMap { meta, path ->
-            filter:     [ meta, path ]
-            missingness: [ meta, path ]
-        }
-        .set { ch_validated_matrix }
-
     // --- Module 01, Process 4.4: Detection filter ---
-    // Join validated matrix + validated metadata + params_yml into one channel.
-    // .join() matches on the first element (meta) across all three sources.
-    ch_validated_matrix.filter
-        .join(ch_validated_metadata.filter)
+    // Process output channels (VALIDATE_INPUTS.out.*) are broadcast in DSL2 --
+    // multiple downstream joins can subscribe without multiMap.
+    VALIDATE_INPUTS.out.matrix
+        .join(VALIDATE_INPUTS.out.metadata)
         .join(ch_input.filter_params)
         .set { ch_filter_input }
 
@@ -87,8 +71,8 @@ workflow PROSIFT {
     // Joins: filter_table (FILTER_PROTEINS) + validated_matrix (pre-filter, VALIDATE_INPUTS)
     //        + validated_metadata (VALIDATE_INPUTS).
     FILTER_PROTEINS.out.filter_table
-        .join(ch_validated_matrix.missingness)
-        .join(ch_validated_metadata.missingness)
+        .join(VALIDATE_INPUTS.out.matrix)
+        .join(VALIDATE_INPUTS.out.metadata)
         .set { ch_missingness_input }
 
     MISSINGNESS_REPORT(ch_missingness_input)
@@ -103,7 +87,7 @@ workflow PROSIFT {
     // --- Module 02: Pre-normalization QC/EDA ---
     // Joins: filtered_matrix (post-filter) + validated_metadata + id_mapping + params_yml
     FILTER_PROTEINS.out.matrix
-        .join(ch_validated_metadata.prenorm)
+        .join(VALIDATE_INPUTS.out.metadata)
         .join(UNIPROT_MAPPING.out.mapping_table)
         .join(ch_input.prenorm_params)
         .set { ch_prenorm_input }

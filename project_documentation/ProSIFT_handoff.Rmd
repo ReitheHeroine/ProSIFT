@@ -12,7 +12,7 @@ output:
 
 # ProSIFT -- Handoff File
 
-**Last Updated:** 2026-03-27
+**Last Updated:** 2026-03-27 (evening)
 
 **Purpose:** Operational coordination across Claude sessions. Tracks current development state, active tasks, blockers, and environment details. Updated every session.
 
@@ -150,9 +150,9 @@ Step [X] complete.
 | Phase 3 | Database integration layer | Not started | [See Project Documentation Section 6.3] |
 | Phase 4 | Interactive frontend | Not started | [See Project Documentation Section 6.4] |
 
-**Current phase:** Phase 1 (Modules 01 and 02 complete; MISSINGNESS_REPORT process 4.10 remaining before Phase 2)
+**Current phase:** Phase 1 complete. Beginning Phase 2 (Module 03: Normalization & Imputation).
 
-**Current focus:** Module 01 MISSINGNESS_REPORT process (Process 4.10, next up)
+**Current focus:** Module 03 NORMALIZE process (bin/normalize.py + modules/local/normalize/main.nf, next up)
 
 ## 2.2 Module Status
 
@@ -167,16 +167,15 @@ Tracks implementation status of individual modules within and across phases. A m
 | Module 01: Input validation (Processes 4.1-4.3) | 1 | Complete | 2026-03-26 | -- | bin/validate_inputs.py implemented and tested standalone and through Nextflow |
 | Module 01: Detection filter (Process 4.4) | 1 | Complete | 2026-03-26 | -- | bin/filter_proteins.py implemented and tested standalone and through Nextflow |
 | Module 01: UniProt ID mapping (Processes 4.5-4.9) | 1 | Complete | 2026-03-26 | -- | bin/uniprot_mapping.py implemented; paginated JSON API; MD5 cache; 5 mapping statuses; ortholog columns null (Phase 3); tested end-to-end |
-| Module 01: Missingness report (Process 4.10) | 1 | Not started | 2026-03-27 | -- | Added 2026-03-27. Separate MISSINGNESS_REPORT Nextflow process; bin/missingness_report.py (not yet written). 4 plots: filter category bar chart, per-sample detection bar chart, missingness heatmap (filtered-out proteins), missingness rate histogram. Depends on matplotlib/seaborn/plotly. |
+| Module 01: Missingness report (Process 4.10) | 1 | Complete | 2026-03-27 | -- | bin/missingness_report.py implemented; modules/local/missingness_report/main.nf wired; errorStrategy 'ignore'; stub run verified all 12 runs; standalone tested on CTXcyto. 4 plots: filter categories, per-sample detection (colored by group), missingness heatmap (filtered proteins only), per-protein missingness histogram. |
 | Module 02: Pre-normalization QC/EDA | 1 | Complete | 2026-03-27 | -- | bin/prenorm_qc.py implemented and tested standalone; PRENORM_QC process wired; stub run verified all 12 runs. CTXcyto benchmark: 8,403 proteins, 6 samples, CTXcyto_KO-2 flagged on 2 criteria (extreme_median + pca_outlier). |
-| Module 03: Normalization | 2 | Not started | -- | -- | New module (split from combined normalization/imputation). Includes post-normalization diagnostic plots. |
-| Module 04: Imputation | 2 | Not started | -- | -- | New module (split from combined normalization/imputation). Includes imputation diagnostics, CV on normalized pre-imputation data. |
-| QC Report Assembly | 2 | Not started | -- | -- | New process (added 2026-03-27). Lightweight compilation of Module 02-04 diagnostics into consolidated HTML report. Checkpoint before differential abundance. |
-| Module 05: Differential abundance (DEqMS) | 2 | Not started | -- | -- | Renumbered from Module 04. Includes volcano and MA plots. |
-| Module 06: ORA / GSEA enrichment | 2 | Not started | -- | -- | Renumbered from Module 05. Includes dot plots, GSEA running score plots. |
-| Module 07: Database queries (all 5 databases) | 3 | Not started | -- | -- | Renumbered from Module 06. Caching/rate-limiting framework, UniProt, PubMed, DisGeNET, DGIdb, CTD. |
-| Module 08: Results assembly (SQLite) | 3 | Not started | -- | -- | Renumbered from Module 07. Replaces JSON profiles. |
-| Module 09: Interactive frontend | 4 | Not started | -- | Tech selection deferred | Renumbered from Module 08. |
+| Module 03: Normalization & Imputation | 2 | Not started | 2026-03-27 | -- | Design complete 2026-03-27 (03_normalization_imputation.Rmd, 572 lines). Two processes: NORMALIZE (log2, norm, diagnostics, CV) and IMPUTE (MNAR/MAR classification, MinProb/KNN, diagnostics). VSN via rpy2. DEP-style mixed imputation default. 10 params. Replaces separate Module 03 (Normalization) and Module 04 (Imputation). |
+| QC Report Assembly | 2 | Not started | -- | -- | Collects diagnostic outputs from Modules 02 and 03 into consolidated HTML report. Checkpoint before differential abundance. |
+| Module 04: Differential abundance (DEqMS) | 2 | Not started | -- | -- | Renumbered from Module 05. Includes volcano and MA plots. |
+| Module 05: ORA / GSEA enrichment | 2 | Not started | -- | -- | Renumbered from Module 06. Includes dot plots, GSEA running score plots. |
+| Module 06: Database queries (all 5 databases) | 3 | Not started | -- | -- | Renumbered from Module 07. Caching/rate-limiting framework, UniProt, PubMed, DisGeNET, DGIdb, CTD. |
+| Module 07: Results assembly (SQLite) | 3 | Not started | -- | -- | Renumbered from Module 08. Replaces JSON profiles. |
+| Module 08: Interactive frontend | 4 | Not started | -- | Tech selection deferred | Renumbered from Module 09. |
 | Singularity definition | 1 | Not started | -- | -- | Dependency list now established (environment.yml); ready to write .def file |
 
 ## 2.3 Nextflow Process Status
@@ -189,7 +188,9 @@ Tracks which Nextflow processes exist and whether they are functional. Populated
 | FILTER_PROTEINS | 01 Input Validation | Functional | modules/local/filter_proteins/main.nf wired; calls bin/filter_proteins.py; tested end-to-end on all 12 runs |
 | UNIPROT_MAPPING | 01 Input Validation | Functional | modules/local/uniprot_mapping/main.nf wired; calls bin/uniprot_mapping.py; cache dir passed as params.outdir/cache/id_mapping; tested end-to-end on CTXcyto run |
 | PRENORM_QC | 02 Pre-norm QC/EDA | Functional | modules/local/prenorm_qc/main.nf wired; calls bin/prenorm_qc.py; 17 outputs (4 data files, 5 plot pairs, 1 report); publishes to {run_id}/qc/; stub verified all 12 runs; standalone tested on CTXcyto |
-| MISSINGNESS_REPORT | 01 Input Validation | Not started | Added 2026-03-27. Needs: modules/local/missingness_report/main.nf, bin/missingness_report.py. Inputs: validated_matrix.parquet (from VALIDATE_INPUTS), validated_metadata.parquet (from VALIDATE_INPUTS), detection_filter_table.csv (from FILTER_PROTEINS). Advisory process (errorStrategy 'ignore'). |
+| MISSINGNESS_REPORT | 01 Input Validation | Functional | modules/local/missingness_report/main.nf wired; calls bin/missingness_report.py; errorStrategy 'ignore'; optional outputs; publishDir to {run_id}/validation/; stub verified all 12 runs; standalone tested on CTXcyto. Abundance prefix bug fixed (strips abundance_ when matching columns to metadata). |
+| NORMALIZE | 03 Normalization & Imputation | Not started | Needs: modules/local/normalize/main.nf, bin/normalize.py. bin/prosift_plot_utils.py is already implemented (2026-03-27). Inputs: filtered_matrix.parquet (from FILTER_PROTEINS), validated_metadata.parquet (from VALIDATE_INPUTS), params.yml. Outputs: normalized_matrix.parquet, cv_summary, 3 diagnostic plot pairs (PNG + HTML), PCA/correlation parquets, normalization summary text. VSN path requires rpy2 + Bioconductor vsn (installed: 3.78.1). |
+| IMPUTE | 03 Normalization & Imputation | Not started | Added 2026-03-27. Needs: modules/local/impute/main.nf, bin/impute.py. Inputs: normalized_matrix.parquet (from NORMALIZE), validated_metadata.parquet, detection_filter_table.csv (from FILTER_PROTEINS, for MNAR/MAR classification), params.yml. Outputs: imputed_matrix.parquet (no NaNs), imputation_summary, 2 diagnostic plot types (PNG + HTML). |
 
 ---
 
@@ -205,6 +206,65 @@ Maintained by Claude Code. Claude.ai reads these entries to understand what work
 > - [Tests run and outcomes]
 > - [Decisions made -- flag for promotion to Project Documentation Decision Register if significant]
 > - [Issues encountered or flagged]
+
+### 2026-03-27 (Claude Code) -- Phase 1 Complete: MISSINGNESS_REPORT, Workflow Cleanup, Shared Plot Utilities
+
+- **MISSINGNESS_REPORT (Module 01, Process 4.10) implemented and tested:**
+  - `bin/missingness_report.py`: 4 interactive Plotly plots -- filter category bar chart, per-sample detection bar chart (colored by group), missingness heatmap (filtered-out proteins only, sorted by category then detection count), per-protein missingness histogram (severity-colored bars). Outputs: `{run_id}.missingness_report.html` (embedded Plotly) + `{run_id}.missingness_plots/` (4 static PNGs via kaleido).
+  - Key implementation note: abundance columns carry `abundance_` prefix in the matrix but metadata `sample_id` values are bare. Fixed in both `plot_per_sample_detection` and `plot_missingness_heatmap` using `str.removeprefix("abundance_")`.
+  - `modules/local/missingness_report/main.nf`: `errorStrategy 'ignore'`; both outputs `optional: true`; publishDir to `{run_id}/validation/`.
+  - `workflows/prosift.nf` updated: added MISSINGNESS_REPORT include and channel wiring (joins FILTER_PROTEINS.out.filter_table + VALIDATE_INPUTS.out.matrix + VALIDATE_INPUTS.out.metadata).
+  - Stub run verified all 12 runs. Standalone tested on CTXcyto.
+
+- **Module 02 validation / spot-checks:**
+  - Verified CTXcyto benchmark values against raw data: 8,403 proteins (correct), medians 23.0-23.2 log2 (consistent, appropriate for raw DIA-NN data), skewness -0.06 to -0.11 (near-zero, well-behaved), PC1 51.7% / PC2 29.6% (WT and KO separate on PC1 as expected), within-group Pearson r 0.99+, between-group 0.977-0.980.
+  - Confirmed `flag_extreme_median: 2 flagged` is correct (one per group, not global); `flag_low_detection: 0` is correct (44-protein detection gap < 168-protein 2% threshold); CTXcyto_KO-2 with 2 flags (extreme_median + pca_outlier) matches expected benchmark.
+
+- **workflows/prosift.nf multiMap cleanup:**
+  - Removed unnecessary multiMap blocks for `VALIDATE_INPUTS.out.matrix` and `VALIDATE_INPUTS.out.metadata`. Confirmed via real-data test that Nextflow DSL2 process output channels are broadcast -- multiple downstream joins each receive the full stream without multiMap. `ch_input` multiMap retained (it IS a queue channel).
+  - Updated ch_input comment to document the broadcast vs. queue channel distinction for future reference.
+
+- **bin/prosift_plot_utils.py created; bin/prenorm_qc.py refactored:**
+  - Extracted `plot_intensity_boxplots`, `compute_and_plot_pca`, `compute_and_plot_correlation`, `make_color_map`, `save_plot`, `_PALETTE` into shared module.
+  - Added `label` parameter (default `"Pre-Normalization"`) to all three plot functions so Module 03 can call them with `label="Post-Normalization"` without any changes to the shared code.
+  - Added `note` parameter to `compute_and_plot_pca` (default `None`) for the phase-specific annotation text that appeared in Module 02's PCA plot.
+  - `prenorm_qc.py` updated: removed extracted functions and unused imports (`plotly.express`, `sklearn.*`); added import from `prosift_plot_utils`; updated PCA call site to pass `note=` explicitly.
+  - Full Module 02 re-run post-refactor verified: identical output (8,403 proteins, CTXcyto_KO-2 flagged, all 17 files produced).
+
+- **Design feedback documented (Module 03 pre-implementation):**
+  - VSN + NA issue: `justvsn()` behavior with NA values unresolved; likely needs `vsn2()` fit/apply split. Flagged in Section 5.2.
+  - MinProb reproducibility: random draws without seed break Nextflow -resume caching. Recommend adding `imputation.random_seed` param. Flagged in Section 5.2.
+  - `ch_input` multiMap will need 2 new branches (normalize_params, impute_params) for Module 03 wiring.
+
+### 2026-03-27 (Claude.ai) -- Module 03 Recombined: Normalization & Imputation; Imputation Fully Designed
+
+- Revisited the normalization/imputation split from earlier in the session. Concluded that separate modules added wiring complexity without meaningful benefit since they always run sequentially and CV (the only analysis between them) is a few lines of code.
+- **Decision: Recombine into Module 03 (Normalization & Imputation)** with two Nextflow processes (NORMALIZE, IMPUTE). This preserves the process-level boundary for re-run caching while simplifying module structure. Downstream modules renumber (Diff Abundance -> 04, Enrichment -> 05, etc.).
+- Designed imputation in full detail:
+  - **DEP-style mixed imputation** as default: MNAR values (SINGLE-GROUP proteins) get MinProb, MAR values (sporadic in PASSED proteins) get KNN. Classification uses Module 01's detection_filter_table.csv directly. Works fine with low n (triplicates) because classification is rule-based, not statistical.
+  - **MinProb** for MNAR: draws from low-end Gaussian parameterized by sample quantile (default 1st percentile) and scaled SD (default 0.3x)
+  - **KNN** for MAR: protein-wise nearest neighbors (k=10 default), imputes from similar proteins' values
+  - **Left-censored (Perseus-style)** available as single-method override
+  - User override: `imputation.mode: single` forces one method for all missing values
+  - Sensitivity analysis deferred to later phase
+- **CV on back-transformed linear scale:** 2^log2_value, then SD/mean per protein per group. Back-transform needed because normalization produces log2 output and CV is defined for linear data. The back-transformation is exact for median/quantile, approximate for VSN.
+- VSN simplified: refuses non-raw data with a clear error (removed the back-transform path from earlier design)
+- Wrote combined spec: 03_normalization_imputation.Rmd (572 lines), 9 design decisions, 10 parameters
+- Updated all documentation: project doc Section 3.2-3.6 restructured and renumbered, new decision register entries, dev log updated, handoff module status/process table/tasks/contracts/file system map all updated for combined module and downstream renumbering
+
+### 2026-03-27 (Claude.ai) -- Module 03 Normalization Design Complete
+
+- Designed Module 03 (Normalization) in full, building on the module architecture decisions from earlier in the session
+- Key design decision: include VSN via rpy2, accepting that Module 03 becomes a mixed Python/R module. Rationale: VSN is the community standard (DEP default, Wistar core analysis), rpy2 is already a dependency for Module 05
+- **Decision: Method-aware log2 handling (Option B).** Median/quantile receive log2 data; VSN receives raw data. Eliminates the `normalization.log_transform` parameter from the stub.
+- **Decision: log2(x) not log2(x+1)** for the permanent transformation. The +1 bias matters for statistical testing at the low-abundance end.
+- Four methods fully specified: median (additive shift on log2 scale, pure Python), quantile (force identical distributions, pure Python), VSN (variance-stabilizing arcsinh transformation via R's justvsn(), mixed Python/R), none (log2-only or pass-through)
+- Post-normalization diagnostics: box plots, PCA, correlation heatmap mirroring Module 02 formats. Shared plotting utility module (`bin/prosift_plot_utils.py`) to ensure visual consistency.
+- Edge case handling specified: VSN with log2 input (back-transform + warning), method=none still produces diagnostic plots, zero values caught and converted to NaN
+- Single Nextflow process (NORMALIZE), one new param (`normalization.method`, default "median")
+- Wrote complete Module 03 spec (03_normalization.Rmd): Sections 1-9, 6 design decisions documented
+- Updated Project Documentation: Section 3.2 expanded, new decision register entry, new dev log entry
+- Updated Handoff: Module 03 status, NORMALIZE in Nextflow process table, session log, pending task, completed task, data contracts, file system map
 
 ### 2026-03-27 (Claude Code) -- Module 02 Implementation: bin/prenorm_qc.py, PRENORM_QC Process, Workflow Wiring
 
@@ -386,15 +446,16 @@ Maintained by Claude Code. Claude.ai reads these entries to understand what work
 > - **Acceptance criteria:** [How to know when it's done]
 > - **Dependencies:** [Other tasks or modules that must be complete first]
 
-### Implement MISSINGNESS_REPORT Process (Module 01, Process 4.10)
+### Implement Module 03: NORMALIZE and IMPUTE Processes
 - **Assigned to:** Claude Code
 - **Priority:** High
-- **Phase:** 1
-- **Module:** Module 01
-- **Description:** Implement the MISSINGNESS_REPORT Nextflow process and its script (`bin/missingness_report.py`). The process produces four missingness visualizations from Module 01 outputs: (1) filter category bar chart, (2) per-sample detection bar chart colored by group, (3) missingness heatmap for filtered-out proteins, (4) per-protein missingness rate histogram. Outputs: `{run_id}.missingness_report.html` (interactive Plotly) and `{run_id}.missingness_plots/` (static PNGs). Process is advisory (errorStrategy 'ignore').
-- **Context/References:** Module 01 spec Section 4.10 (full plot specifications, inputs, outputs, data sources for each plot); Decision Register entry 2026-03-27 in 01_input_validation.Rmd
-- **Acceptance criteria:** (1) Script runs standalone on CTXcyto detection_filter_table.csv + validated_matrix.parquet + validated_metadata.parquet and produces all 4 plots. (2) HTML report renders correctly with interactive Plotly plots. (3) Static PNGs are publication-quality. (4) Nextflow process wired in workflows/prosift.nf, receiving outputs from VALIDATE_INPUTS and FILTER_PROTEINS. (5) End-to-end pipeline test passes with MISSINGNESS_REPORT producing outputs alongside existing Module 01 outputs. (6) Pipeline does not fail if MISSINGNESS_REPORT errors.
-- **Dependencies:** None (all input data already produced by existing Module 01 processes)
+- **Phase:** 2
+- **Module:** Module 03
+- **Description:** Implement both Nextflow processes for Module 03 (Normalization & Imputation). (1) NORMALIZE process (`bin/normalize.py`): method-aware log2 + normalization (median/quantile/VSN/none), post-normalization diagnostic plots via `bin/prosift_plot_utils.py` (already implemented 2026-03-27), CV computation on back-transformed linear scale. (2) IMPUTE process (`bin/impute.py`): MNAR/MAR classification from detection_filter_table.csv, MinProb for MNAR, KNN for MAR, imputation diagnostics. `bin/prenorm_qc.py` already refactored to import from prosift_plot_utils.
+- **Context/References:** Module 03 spec (`project_documentation/modules/03_normalization_imputation.Rmd`, 572 lines); Process 1 (NORMALIZE): Sections 4.0-4.6; Process 2 (IMPUTE): Sections 4.7-4.11; Design decisions: Section 5 (9 entries); Parameters: Section 6 (10 params)
+- **Pre-implementation notes:** (1) VSN + missing values: justvsn() behavior with NA not addressed in spec -- likely needs vsn2() fit/apply split rather than justvsn(); resolve before VSN path. (2) MinProb random seed: add `imputation.random_seed` param (default 42) for Nextflow -resume cache stability. (3) ch_input multiMap needs 2 new branches (normalize_params, impute_params), growing to 6 total.
+- **Acceptance criteria:** (1) NORMALIZE: median normalization aligns all sample medians; quantile forces identical distributions; VSN calls R via rpy2 successfully and produces approx-log2 output; "none" applies log2-only; all 3 diagnostic plots produced for all methods; CV values on linear scale (5-50% range typical). (2) IMPUTE: SINGLE-GROUP proteins classified MNAR, PASSED-with-missing classified MAR; MinProb values cluster at low end; KNN values overlap main distribution; no NaN in output; imputation diagnostics show 3 curves (observed, MNAR, MAR). (3) Both processes wired in Nextflow, stub-tested on all 12 runs, end-to-end tested on CTXcyto. (4) Edge cases: VSN with non-raw data produces clear error; zero values caught and converted to NaN.
+- **Dependencies:** All Phase 1 complete (done). vsn package: installed (3.78.1). prosift_plot_utils.py: implemented.
 
 ## 4.2 Decisions and Designs for Review
 
@@ -428,6 +489,11 @@ None currently.
 - Module documentation renamed/split to match revised pipeline architecture -- 2026-03-27 -- split 03_normalization_imputation.Rmd -> 03_normalization.Rmd + 04_imputation.Rmd; created 04b_qc_report_assembly.Rmd; renumbered 04-08 -> 06-10 (git mv); updated 02_qc_eda.Rmd header
 - Module 02 design spec finalized (02_qc_eda.Rmd -- 9 design decisions, full output schema, test criteria) -- 2026-03-27 -- Claude.ai session
 - Module 02 (bin/prenorm_qc.py + PRENORM_QC process) implemented and tested -- 2026-03-27 -- 17 outputs; CTXcyto_KO-2 flagged (extreme_median + pca_outlier); standalone and stub runs verified
+- Module 03 (Normalization & Imputation) design spec completed -- 2026-03-27 -- project_documentation/modules/03_normalization_imputation.Rmd (572 lines). Recombined normalization + imputation into one module with two processes (NORMALIZE, IMPUTE). Method-aware log2, 4 norm methods (median/quantile/VSN/none), DEP-style mixed imputation (MinProb MNAR + KNN MAR), CV on back-transformed linear scale, 9 design decisions, 10 parameters. Replaces earlier separate 03_normalization.Rmd. Ready for Claude Code implementation.
+- Module 01 MISSINGNESS_REPORT implemented and tested -- 2026-03-27 -- bin/missingness_report.py, modules/local/missingness_report/main.nf. 4 Plotly plots (filter categories, per-sample detection colored by group, missingness heatmap for filtered-out proteins, per-protein histogram). errorStrategy 'ignore'. HTML report + static PNGs. Stub run verified all 12 runs. Standalone tested on CTXcyto.
+- Module 02 validation/spot-checks -- 2026-03-27 -- Verified CTXcyto benchmark against raw data: 8,403 proteins, 6 samples, medians ~23 log2 (consistent across samples before normalization), within-group Pearson r 0.99+, CTXcyto_KO-2 flagged on 2 criteria (extreme_median + pca_outlier). All 17 output files correct.
+- workflows/prosift.nf multiMap cleanup -- 2026-03-27 -- Removed unnecessary multiMap blocks for VALIDATE_INPUTS.out.matrix and VALIDATE_INPUTS.out.metadata (process output channels are broadcast in DSL2; only queue channels need multiMap). Both channels now referenced directly. Confirmed safe via real-data double-consumption test. Comment updated to document the broadcast vs. queue channel distinction.
+- bin/prosift_plot_utils.py created; bin/prenorm_qc.py refactored -- 2026-03-27 -- Extracted plot_intensity_boxplots, compute_and_plot_pca, compute_and_plot_correlation, make_color_map, save_plot into shared module. Added label parameter (default "Pre-Normalization") and note parameter on PCA for phase-specific annotations. prenorm_qc.py import updated; full Module 02 run re-verified post-refactor (identical output).
 
 ---
 
@@ -455,6 +521,9 @@ None currently.
 - 2026-03-26 -- UniProt cache dir on cluster must be on persistent storage. Currently `{params.outdir}/cache/id_mapping`. Confirm `params.outdir` resolves to a persistent mount (home2 or scratch, not a temp FS) before first cluster run. If outdir is on scratch, the cache may be deleted between submissions, defeating the point.
 - 2026-03-26 -- Input usability: current workflow requires 3 preprocessing scripts + samplesheet + per-run params/metadata before pipeline runs. Acceptable for development; not suitable for bench scientists. The usability layer sits entirely outside the pipeline and can be rewritten at any point without architectural changes. Deferred to post-Phase 1. [See also Project Documentation Section 6.5]
 - 2026-03-27 -- Module documentation files need renaming/splitting to match revised module architecture. Not blocking (existing files are placeholders for Modules 03-08 anyway), but should be done before writing detailed specs. See Pending Tasks.
+- ~~2026-03-27 -- Bioconductor `vsn` package availability in conda env.~~ Resolved 2026-03-27: `vsn` 3.78.1 installed via `BiocManager::install("vsn")` in the prosift conda env. `library(vsn)` confirmed working. [FOLLOW-UP NEEDED]: When creating the prosift env on the cluster, `vsn` will require the same BiocManager install step -- it is not installable via bioconda. Add this to cluster setup notes.
+- 2026-03-27 -- VSN normalization + missing values: the spec calls `justvsn()` but this function may not handle NA values in a plain R matrix. For the CTXcyto dataset, ~585 proteins have at least one missing value. If justvsn() errors on NA, the fix is to use `vsn2()` (fits the model on the data) and then apply the fitted parameters -- which works on complete-case proteins and applies the same transformation to all. Resolve before implementing the VSN code path.
+- 2026-03-27 -- MinProb imputation reproducibility: MinProb uses numpy random draws. Without a fixed seed, IMPUTE will produce different output every run, breaking Nextflow's -resume caching (output checksums won't match). Add `imputation.random_seed` (int, default 42) to the Module 03 params table and use it in impute.py.
 
 ## 5.3 Resolved Questions
 
@@ -493,7 +562,56 @@ No data contracts defined yet. Populate as modules are implemented.
   - `{run_id}.filtered_matrix.parquet` -- post-detection-filter abundance data (~8,500-8,800 proteins x 6 samples per run, plus peptide count columns). Parquet format. Produced by FILTER_PROTEINS.
   - `{run_id}.id_mapping.parquet` -- protein ID mapping table (10 columns: protein_id, uniprot_accession, gene_symbol_mouse, entrez_id_mouse, ensembl_gene_mouse, human_ortholog_symbol [null], human_ortholog_entrez [null], ortholog_mapping_status [null], mapping_status, mapping_notes). One row per protein. Produced by UNIPROT_MAPPING.
 - **Join key:** `protein_id` (UniProt accession, first from semicolon-delimited protein group). NOTE: for 6 accession-redirected proteins per run, `protein_id` (input accession) differs from `uniprot_accession` (canonical). Downstream joins must use `protein_id`, not `uniprot_accession`.
-- **Also available (diagnostic, not primary):** validation_report_part1.txt, validation_report_part2.txt, validation_report_part3.txt, detection_filter_table.csv -- published to `results/{run_id}/validation/` but not consumed by downstream processes.
+- **Also available (diagnostic, not primary):** validation_report_part1.txt, validation_report_part2.txt, validation_report_part3.txt -- published to `results/{run_id}/validation/` but not consumed by downstream processes.
+- **NOTE:** `detection_filter_table.csv` was previously diagnostic-only but is now also a primary analytical input for the IMPUTE process (MNAR/MAR classification). See Module 01 -> Module 03 IMPUTE contract below.
+
+### Module 01 (Input Validation & ID Mapping) --> Module 03 NORMALIZE
+- **Producer:** FILTER_PROTEINS, VALIDATE_INPUTS
+- **Consumer:** NORMALIZE (not yet implemented, Phase 2)
+- **Primary data artifacts:**
+  - `{run_id}.filtered_matrix.parquet` -- same as Module 02 input. The main analytical spine passes through Module 03, not Module 02 (Module 02 branches off for QC without modifying data).
+  - `{run_id}.validated_metadata.parquet` -- sample-to-group assignments.
+- **Note:** Module 02's outputs (sample_flags, QC report) are diagnostic and do not feed into Module 03. The data flowing to Module 03 is the same filtered matrix from Module 01.
+
+### Module 01 (Input Validation & ID Mapping) --> Module 03 IMPUTE
+- **Producer:** FILTER_PROTEINS
+- **Consumer:** IMPUTE (not yet implemented, Phase 2)
+- **Primary data artifact:**
+  - `{run_id}.detection_filter_table.csv` -- per-protein filter status (PASSED, SINGLE-GROUP, SPARSE, ABSENT) and per-group detection counts. Used for MNAR/MAR classification: SINGLE-GROUP = MNAR, PASSED with missing values = MAR.
+- **Note:** This file was previously diagnostic-only. It is now a primary analytical input because the DEP-style mixed imputation classification maps directly to Module 01's filter categories.
+
+### Module 03 NORMALIZE --> Module 03 IMPUTE
+- **Producer:** NORMALIZE (not yet implemented)
+- **Consumer:** IMPUTE (not yet implemented)
+- **Primary data artifacts:**
+  - `{run_id}.normalized_matrix.parquet` -- approximately log2-scale, normalized abundance data. Same shape as filtered matrix. Peptide count columns passed through unchanged. Missing values remain NaN.
+- **Data scale:** Always approximately log2, regardless of normalization method.
+- **Join key:** `protein_id`.
+
+### Module 03 IMPUTE --> Module 04 (Differential Abundance)
+- **Producer:** IMPUTE (not yet implemented)
+- **Consumer:** Module 04 Differential Abundance (not yet implemented, Phase 2)
+- **Primary data artifacts:**
+  - `{run_id}.imputed_matrix.parquet` -- fully imputed, approximately log2-scale, normalized. No NaN values. Peptide count columns passed through. This is the analysis-ready matrix.
+- **Join key:** `protein_id`.
+
+### Module 03 --> QC Report Assembly
+- **Producer:** NORMALIZE and IMPUTE (not yet implemented)
+- **Consumer:** QC Report Assembly process (not yet implemented, Phase 2)
+- **Diagnostic artifacts from NORMALIZE:**
+  - `{run_id}.postnorm_boxplots` (PNG + HTML)
+  - `{run_id}.postnorm_pca_scatter` (PNG + HTML)
+  - `{run_id}.postnorm_correlation_heatmap` (PNG + HTML)
+  - `{run_id}.postnorm_pca_results.parquet`
+  - `{run_id}.postnorm_correlation_matrix.parquet`
+  - `{run_id}.cv_summary.parquet` + `.csv`
+  - `{run_id}.normalization_summary.txt`
+- **Diagnostic artifacts from IMPUTE:**
+  - `{run_id}.imputation_distributions` (PNG + HTML)
+  - `{run_id}.imputation_fractions` (PNG + HTML)
+  - `{run_id}.imputation_summary.parquet` + `.csv`
+  - `{run_id}.imputation_summary.txt`
+- **Note:** Post-normalization plots mirror Module 02's pre-normalization plots for before/after comparison.
 
 ---
 
@@ -516,20 +634,27 @@ ProSIFT/
 │   └── base.config                          # Default resource allocations per process
 │
 ├── workflows/
-│   └── prosift.nf                           # Top-level PROSIFT workflow (VALIDATE_INPUTS -> FILTER_PROTEINS wired)
+│   └── prosift.nf                           # Top-level PROSIFT workflow (all Phase 1 processes wired; multiMap cleanup 2026-03-27)
 │
 ├── modules/
 │   └── local/
 │       ├── validate_inputs/main.nf          # Process: VALIDATE_INPUTS (functional)
 │       ├── filter_proteins/main.nf          # Process: FILTER_PROTEINS (functional)
 │       ├── uniprot_mapping/main.nf          # Process: UNIPROT_MAPPING (functional)
-│       └── missingness_report/main.nf       # Process: MISSINGNESS_REPORT (not yet created)
+│       ├── prenorm_qc/main.nf              # Process: PRENORM_QC (functional)
+│       ├── missingness_report/main.nf       # Process: MISSINGNESS_REPORT (functional)
+│       ├── normalize/main.nf               # Process: NORMALIZE (not yet created)
+│       └── impute/main.nf                  # Process: IMPUTE (not yet created)
 │
 ├── bin/                                     # Python scripts called from Nextflow processes (executable, shebangs set)
 │   ├── validate_inputs.py                   # Processes 4.1-4.3: matrix/metadata/cross-validation
 │   ├── filter_proteins.py                   # Process 4.4: detection filter + missingness overview
 │   ├── uniprot_mapping.py                   # Processes 4.5-4.9: UniProt bulk ID mapping + cache
-│   └── missingness_report.py               # Process 4.10: missingness visualizations (not yet created)
+│   ├── prenorm_qc.py                       # Module 02: pre-normalization QC/EDA (functional)
+│   ├── missingness_report.py               # Process 4.10: missingness visualizations (functional, 2026-03-27)
+│   ├── prosift_plot_utils.py               # Shared plotting utilities for Modules 02-03 (functional, 2026-03-27)
+│   ├── normalize.py                         # Module 03 NORMALIZE: log2 + normalization + diagnostics + CV (not yet created)
+│   └── impute.py                            # Module 03 IMPUTE: MNAR/MAR classification + imputation + diagnostics (not yet created)
 │
 ├── project_documentation/
 │   ├── ProSIFT_project_documentation.Rmd    # Architectural reference (Project Documentation)
@@ -539,16 +664,15 @@ ProSIFT/
 │   │   ├── prosift_pipeline_dag.svg         # Pipeline DAG diagram
 │   │   └── prosift_input_validation_workflow.svg
 │   └── modules/
-│       ├── 01_input_validation.Rmd          # Module 01: Input Validation & ID Mapping (design complete)
-│       ├── 02_qc_eda.Rmd                    # Module 02: Pre-Normalization QC/EDA (rescoped 2026-03-27; design in progress)
-│       ├── 03_normalization.Rmd             # Module 03: Normalization (stub; split from 03_normalization_imputation.Rmd 2026-03-27)
-│       ├── 04_imputation.Rmd                # Module 04: Imputation + CV analysis (stub; split from 03_normalization_imputation.Rmd 2026-03-27)
-│       ├── 04b_qc_report_assembly.Rmd       # Module 04b: QC Report Assembly checkpoint (stub; created 2026-03-27)
-│       ├── 06_differential_abundance.Rmd    # Module 06: Differential Abundance (stub)
-│       ├── 07_enrichment.Rmd                # Module 07: Enrichment (stub)
-│       ├── 08_database_queries.Rmd          # Module 08: Database Queries (stub)
-│       ├── 09_results_assembly.Rmd          # Module 09: Results Assembly (stub)
-│       └── 10_frontend.Rmd                  # Module 10: Frontend (stub)
+│       ├── 01_input_validation.Rmd          # Module 01: Input Validation & ID Mapping (design complete, implemented)
+│       ├── 02_qc_eda.Rmd                    # Module 02: Pre-Normalization QC/EDA (design complete, implemented)
+│       ├── 03_normalization_imputation.Rmd  # Module 03: Normalization & Imputation (design complete 2026-03-27)
+│       ├── 04b_qc_report_assembly.Rmd       # QC Report Assembly checkpoint (stub)
+│       ├── 04_differential_abundance.Rmd    # Module 04: Differential Abundance (stub; renumbered from 05/06)
+│       ├── 05_enrichment.Rmd                # Module 05: Enrichment (stub; renumbered from 06/07)
+│       ├── 06_database_queries.Rmd          # Module 06: Database Queries (stub; renumbered from 07/08)
+│       ├── 07_results_assembly.Rmd          # Module 07: Results Assembly (stub; renumbered from 08/09)
+│       └── 08_frontend.Rmd                  # Module 08: Frontend (stub; renumbered from 09/10)
 │
 ├── CTX_synaptosome_project_data/
 │   └── Filtered Proteins-Table 1.csv        # Raw DIA-NN output (source data, not committed)
@@ -576,15 +700,44 @@ ProSIFT/
     │   └── id_mapping/                      # UniProt API response cache (persists across runs; key = MD5 hash)
     ├── pipeline_info/                       # Nextflow execution trace, timeline, report
     └── {run_id}/
-        └── validation/                      # Module 01 outputs per run (6 files + missingness report when implemented)
-            ├── {run_id}.filtered_matrix.parquet        # Proteins passing detection filter (input to Module 02)
-            ├── {run_id}.detection_filter_table.csv     # Per-protein filter status and detection counts
-            ├── {run_id}.id_mapping.parquet             # UniProt mapping table (10 cols; input to all downstream modules)
-            ├── {run_id}.validation_report_part1.txt    # Processes 4.1-4.3 report
-            ├── {run_id}.validation_report_part2.txt    # Process 4.4 report (filter summary + missingness)
-            ├── {run_id}.validation_report_part3.txt    # Processes 4.5-4.9 report (mapping summary + coverage)
-            ├── {run_id}.missingness_report.html        # Process 4.10: interactive missingness plots (not yet created)
-            └── {run_id}.missingness_plots/             # Process 4.10: static PNG versions (not yet created)
+        ├── validation/                      # Module 01 outputs per run
+        │   ├── {run_id}.filtered_matrix.parquet        # Proteins passing detection filter (input to Modules 02, 03)
+        │   ├── {run_id}.detection_filter_table.csv     # Per-protein filter status and detection counts
+        │   ├── {run_id}.id_mapping.parquet             # UniProt mapping table (10 cols; input to all downstream modules)
+        │   ├── {run_id}.validation_report_part1.txt    # Processes 4.1-4.3 report
+        │   ├── {run_id}.validation_report_part2.txt    # Process 4.4 report (filter summary + missingness)
+        │   ├── {run_id}.validation_report_part3.txt    # Processes 4.5-4.9 report (mapping summary + coverage)
+        │   ├── {run_id}.missingness_report.html        # Process 4.10: interactive missingness report (HTML with 4 Plotly plots)
+        │   └── {run_id}.missingness_plots/             # Process 4.10: static PNGs (4 files: filter_categories, per_sample_detection, missingness_heatmap, missingness_histogram)
+        ├── qc/                              # Module 02 outputs per run (functional)
+        │   ├── {run_id}.sample_summary.parquet          # Per-sample metrics
+        │   ├── {run_id}.sample_summary.csv
+        │   ├── {run_id}.sample_flags.parquet             # Per-sample outlier flags
+        │   ├── {run_id}.sample_flags.csv
+        │   ├── {run_id}.correlation_matrix.parquet       # Sample-by-sample Pearson correlation
+        │   ├── {run_id}.pca_results.parquet              # PCA coordinates + variance explained
+        │   ├── {run_id}.prenorm_qc_report.html           # Consolidated QC report with all plots
+        │   ├── {run_id}.sample_intensity_summary.png/.html
+        │   ├── {run_id}.intensity_boxplots.png/.html
+        │   ├── {run_id}.qq_plot.png/.html
+        │   ├── {run_id}.pca_scatter.png/.html
+        │   └── {run_id}.correlation_heatmap.png/.html
+        └── normalization_imputation/          # Module 03 outputs per run (not yet created)
+            ├── {run_id}.normalized_matrix.parquet        # Normalized data (approx log2; input to IMPUTE)
+            ├── {run_id}.normalization_summary.txt        # Method used, log2 applied, warnings
+            ├── {run_id}.cv_summary.parquet               # Per-protein per-group CV (linear scale)
+            ├── {run_id}.cv_summary.csv
+            ├── {run_id}.postnorm_pca_results.parquet
+            ├── {run_id}.postnorm_correlation_matrix.parquet
+            ├── {run_id}.postnorm_boxplots.png/.html
+            ├── {run_id}.postnorm_pca_scatter.png/.html
+            ├── {run_id}.postnorm_correlation_heatmap.png/.html
+            ├── {run_id}.imputed_matrix.parquet           # Fully imputed data (no NaN; input to Module 04)
+            ├── {run_id}.imputation_summary.parquet       # Per-protein imputation class and counts
+            ├── {run_id}.imputation_summary.csv
+            ├── {run_id}.imputation_summary.txt
+            ├── {run_id}.imputation_distributions.png/.html
+            └── {run_id}.imputation_fractions.png/.html
 ```
 
 ## 7.2 Scripts Reference
@@ -597,7 +750,11 @@ ProSIFT/
 | bin/validate_inputs.py | Module 01 | Processes 4.1-4.3: validates abundance matrix, metadata, cross-validates samples; outputs validated Parquets + report part 1 | 2026-03-26 |
 | bin/filter_proteins.py | Module 01 | Process 4.4: detection filter; classifies proteins PASSED/SINGLE-GROUP/SPARSE/ABSENT; outputs filtered Parquet, filter table, report part 2 | 2026-03-26 |
 | bin/uniprot_mapping.py | Module 01 | Processes 4.5-4.9: UniProt bulk ID mapping via paginated JSON results endpoint; MD5-keyed file cache; ortholog columns null (Phase 3); outputs id_mapping.parquet + report part 3 | 2026-03-26 |
-| bin/missingness_report.py | Module 01 | Process 4.10: missingness visualizations (4 plots: filter category bar chart, per-sample detection bar chart, missingness heatmap for filtered-out proteins, missingness rate histogram); outputs HTML + PNGs | Not yet created |
+| bin/missingness_report.py | Module 01 | Process 4.10: 4 missingness plots (filter categories, per-sample detection, heatmap, histogram); HTML report + static PNGs via kaleido | 2026-03-27 |
+| bin/prenorm_qc.py | Module 02 | Pre-normalization QC/EDA: per-sample summaries, box plots, Q-Q plot, PCA, correlation heatmap, outlier flagging; outputs 4 data files + 5 plot types + HTML report. Imports shared plot functions from prosift_plot_utils.py. | 2026-03-27 |
+| bin/prosift_plot_utils.py | Shared | Shared plotting utilities for Modules 02 and 03: plot_intensity_boxplots, compute_and_plot_pca, compute_and_plot_correlation, make_color_map, save_plot. label and note parameters allow phase-specific titles and annotations. | 2026-03-27 |
+| bin/normalize.py | Module 03 | NORMALIZE process: method-aware log2 + median/quantile/VSN/none + post-norm diagnostics + CV computation. VSN calls R via rpy2. | Not yet created |
+| bin/impute.py | Module 03 | IMPUTE process: MNAR/MAR classification from detection_filter_table.csv, MinProb for MNAR, KNN for MAR, imputation diagnostics. | Not yet created |
 
 ## 7.3 File System Update Instructions
 

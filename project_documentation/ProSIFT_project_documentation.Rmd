@@ -347,92 +347,67 @@ Each subsection follows a consistent structure: purpose, inputs, outputs, tools/
 
 **Status:** Not yet implemented.
 
-## 3.2 Normalization Module (Module 03)
+## 3.2 Normalization & Imputation Module (Module 03)
 
-*Added 2026-03-27. Previously combined with imputation; now a separate module per Decision Register entry 2026-03-27.*
+*Updated 2026-03-27. Originally split into separate normalization (Module 03) and imputation (Module 04) modules, then recombined after evaluating that the split added wiring complexity without meaningful benefit. See Decision Register entry 2026-03-27 "Combined Normalization and Imputation Module."*
 
-**Purpose:** Remove systematic technical variation (sample loading differences, instrument drift) while preserving biological signal. Produce post-normalization diagnostic plots to verify the correction.
+**Purpose:** Transform the filtered abundance data into a fully analysis-ready matrix: log2-transformed, normalized, and imputed. Also compute per-protein CV on normalized pre-imputation data.
 
-**Inputs:** Filtered abundance matrix (Parquet, from Module 01), metadata file, pre-normalization QC outputs (from Module 02, for comparison).
+**Two Nextflow processes within this module:**
 
-**Outputs:** Normalized abundance matrix (Parquet), normalization diagnostic outputs (post-normalization distribution plots, post-normalization PCA, post-normalization sample correlation heatmap -- PNG + interactive HTML). If `abundance_type` is `raw`, log2 transformation is applied before normalization.
+- **NORMALIZE** (`bin/normalize.py`): log2 transformation (method-aware), normalization, post-normalization diagnostic plots, CV computation.
+- **IMPUTE** (`bin/impute.py`): MNAR/MAR classification, imputation, imputation diagnostic plots.
 
-**Planned methods:**
+**Normalization methods:**
 
-- **Median normalization** (default): Shifts each sample's distribution so all samples have the same median. Simple, robust, widely used.
-- **Quantile normalization:** Forces all sample distributions to be identical. More aggressive; appropriate when you believe the overall distribution should be the same across all samples.
-- **VSN (variance stabilizing normalization):** Accounts for the mean-variance relationship in MS data. Available via R/Bioconductor.
-- **None:** Skip normalization (for data that arrives pre-normalized).
+- **Median normalization** (default): shifts sample log2 distributions to a common median. Simple, robust, pure Python.
+- **Quantile normalization:** forces all distributions identical. More aggressive. Pure Python.
+- **VSN (variance stabilizing normalization):** operates on raw intensities (not log2), applies arcsinh-based transformation. Accessed via R/Bioconductor through rpy2. Refuses non-raw data with a clear error. Most statistically rigorous; used by DEP and the CTX Wistar core analysis.
+- **None:** log2-only (if raw) or pass-through.
 
-Method is configurable via `normalization.method` in params.yml.
+**Log2 handling:** Method-aware (Option B). Median/quantile receive log2(x)-transformed data. VSN receives raw data. Transformation uses log2(x), not log2(x+1).
 
-**Diagnostic outputs:** Post-normalization versions of the same distributional plots produced by Module 02 (box/density plots, PCA, sample correlation heatmap). These allow direct visual comparison: did normalization align the distributions? Did the PCA structure improve? The Module 02 outputs and Module 03 diagnostic outputs are later compiled side-by-side by the QC Report Assembly process.
+**Imputation (DEP-style mixed, default):** MNAR values (SINGLE-GROUP proteins from Module 01's filter) get MinProb imputation (low-end draw). MAR values (sporadic missingness in PASSED proteins) get KNN imputation (similar-protein average). Classification uses Module 01's detection_filter_table.csv directly. User can override with single-method mode (uniform MinProb, KNN, or left-censored/Perseus-style).
 
-**Status:** Not yet implemented.
+**CV computation:** True CV (SD/mean) on back-transformed linear scale (2^log2_value), per protein per group, on observed values only. Sits between normalization and imputation.
 
-## 3.3 Imputation Module (Module 04)
+**Diagnostic outputs:** Post-normalization box plots, PCA, correlation heatmap (mirroring Module 02's formats via shared `bin/prosift_plot_utils.py`). Post-imputation observed vs. imputed distribution plot, per-sample imputation fraction bar chart, imputation summary.
 
-*Added 2026-03-27. Previously combined with normalization; now a separate module per Decision Register entry 2026-03-27.*
+**Key parameters:** `normalization.method` (default: median), `imputation.mode` (default: mixed), `imputation.mnar_method` (default: minprob), `imputation.mar_method` (default: knn). See `03_normalization_imputation.Rmd` for full parameter table (10 parameters).
 
-**Purpose:** Fill in missing values in the normalized abundance matrix using a method appropriate to the missing data mechanism. Produce imputation diagnostics and compute per-protein replicate variability (CV) on observed values.
+**Status:** Design complete; not yet implemented. See `03_normalization_imputation.Rmd` (572 lines) for full spec.
 
-**Inputs:** Normalized abundance matrix (Parquet, from Module 03), metadata file.
+## 3.3 QC Report Assembly
 
-**Outputs:** Imputed abundance matrix (Parquet), imputation diagnostics (observed vs. imputed value distributions, per-protein and per-sample imputation fraction, sensitivity analysis if enabled -- Parquet + CSV + PNG + interactive HTML), CV summary table (Parquet + CSV, computed on normalized pre-imputation data for observed values only).
+*Updated 2026-03-27. Section renumbered from 3.4. References updated to reflect combined Module 03.*
 
-**Planned methods:**
+**Purpose:** Collect diagnostic outputs from Modules 02 and 03 and compile them into a single consolidated QC report. This creates a natural checkpoint in the pipeline: the researcher reviews data quality before differential abundance, enrichment, and database queries run.
 
-- **MinProb** (default for MNAR data): Draws imputed values from a distribution centered at the low end of the observed distribution. Appropriate when missing values are assumed to be below the detection limit.
-- **KNN (k-nearest neighbors):** Imputes based on similar proteins. More appropriate for MAR (missing at random) data.
-- **Left-censored / Perseus-style:** Similar to MinProb, draws from a down-shifted Gaussian. Widely used in the Perseus proteomics platform.
-- **None:** Skip imputation (carry missing values forward; downstream methods must handle NAs).
-
-Method is configurable via `imputation.method` in params.yml.
-
-**CV computation:** Coefficient of variation (SD/mean on linear scale, or SD on log2 scale) is computed within each group on observed (non-imputed) normalized values. This is placed in Module 04 because CV requires normalized data (Module 03 output) but must exclude imputed values (which would artificially reduce variability). The CV table is a QC diagnostic, not an analytical result, and feeds into the QC Report Assembly and ultimately into QC flags in the protein profiles.
-
-**Imputation sensitivity analysis (optional):** If enabled via `imputation.sensitivity_analysis: true`, runs imputation with multiple methods and compares the resulting abundance distributions and downstream effect on a simple fold-change calculation. Reported as a diagnostic, not used to select the method automatically.
-
-**Design decisions:**
-
-- Imputation method selection is the user's responsibility (configured in params.yml). The sensitivity analysis helps inform this choice but does not override it.
-- MNAR/MAR classification is handled at the imputation stage, not during QC. This follows the field consensus (Perseus, DEP, LFQ-Analyst, ProVision, msqrob2) that classification belongs at the point where it affects analytical decisions. The QC module (Module 02) reports missingness patterns; Module 04 acts on them.
-
-**Known limitations:** All imputation methods make assumptions about the missing data mechanism. MNAR-aware methods (MinProb, left-censored) assume missing values correspond to low-abundance proteins, which is generally but not always true in MS proteomics. Imputation can materially affect differential abundance results, especially for proteins with high missingness.
-
-**Status:** Not yet implemented.
-
-## 3.4 QC Report Assembly
-
-*Added 2026-03-27. See Decision Register entry 2026-03-27 for rationale.*
-
-**Purpose:** Collect diagnostic outputs from Modules 02, 03, and 04 and compile them into a single consolidated QC report. This creates a natural checkpoint in the pipeline: the researcher reviews data quality before differential abundance, enrichment, and database queries run.
-
-**Inputs:** Diagnostic outputs from Module 02 (pre-normalization QC), Module 03 (post-normalization diagnostics), Module 04 (imputation diagnostics and CV summary).
+**Inputs:** Diagnostic outputs from Module 02 (pre-normalization QC), Module 03 NORMALIZE process (post-normalization diagnostics, CV summary), Module 03 IMPUTE process (imputation diagnostics).
 
 **Outputs:** Consolidated QC report (HTML). This is a presentation/compilation step with no analytical logic.
 
 **Report structure (preliminary):**
 
-- Section 1: Missingness overview (from Module 02)
-- Section 2: Distributional assessment (from Module 02) with pre- vs. post-normalization comparison (from Module 03)
-- Section 3: PCA (pre-normalization from Module 02, post-normalization from Module 03)
+- Section 1: Missingness overview (from Module 01 MISSINGNESS_REPORT)
+- Section 2: Distributional assessment (from Module 02) with pre- vs. post-normalization comparison (from Module 03 NORMALIZE)
+- Section 3: PCA (pre-normalization from Module 02, post-normalization from Module 03 NORMALIZE)
 - Section 4: Sample correlation (pre- and post-normalization)
-- Section 5: Replicate variability / CV distributions (from Module 04)
-- Section 6: Imputation diagnostics (from Module 04)
+- Section 5: Replicate variability / CV distributions (from Module 03 NORMALIZE)
+- Section 6: Imputation diagnostics (from Module 03 IMPUTE)
 - Section 7: Sample and protein flags summary
 
-**Nextflow implementation:** A lightweight process that takes channels from Modules 02, 03, and 04, waits for all to complete, and runs a compilation script. No analytical computation.
+**Nextflow implementation:** A lightweight process that takes channels from Modules 02 and 03, waits for all to complete, and runs a compilation script. No analytical computation.
 
 **Status:** Not yet implemented.
 
-## 3.5 Differential Abundance Module (Module 05)
+## 3.4 Differential Abundance Module (Module 04)
 
-*Renumbered 2026-03-27 from Section 3.2 (was "Statistical Analysis Module"). Content unchanged except for module number references.*
+*Renumbered 2026-03-27 from Section 3.5 / Module 05. Content unchanged except for module number references.*
 
 **Purpose:** Identify differentially abundant proteins between conditions and provide robust statistical measures of significance and effect size.
 
-**Inputs:** Normalized, imputed abundance matrix (Parquet), metadata file, contrast specification from config.
+**Inputs:** Imputed abundance matrix (Parquet, from Module 03 IMPUTE), metadata file, contrast specification from config.
 
 **Outputs:** Differential abundance results table (Parquet + CSV) with columns for protein ID, log2 fold change, p-value, adjusted p-value, and method-specific statistics. Volcano plots, MA plots (PNG + interactive HTML).
 
@@ -453,9 +428,9 @@ Method is configurable via `imputation.method` in params.yml.
 
 **Status:** Not yet implemented.
 
-## 3.6 Enrichment Analysis Module (Module 06)
+## 3.5 Enrichment Analysis Module (Module 05)
 
-*Renumbered 2026-03-27 from Section 3.3. Content unchanged except for module number references.*
+*Renumbered 2026-03-27 from Section 3.6 / Module 06. Content unchanged except for module number references.*
 
 **Purpose:** Identify biological pathways, processes, and functional categories that are overrepresented among differentially abundant proteins (ORA) or show coordinated changes across the ranked protein list (GSEA).
 
@@ -476,9 +451,9 @@ Method is configurable via `imputation.method` in params.yml.
 
 **Status:** Not yet implemented.
 
-## 3.7 Interactive Frontend (Module 09)
+## 3.6 Interactive Frontend (Module 08)
 
-*Renumbered 2026-03-27 from Section 3.4. Content unchanged except for module number references. Targeted for Phase 4.*
+*Renumbered 2026-03-27 from Section 3.7 / Module 09. Content unchanged except for module number references. Targeted for Phase 4.*
 
 **Purpose:** Provide an interactive environment for exploring pipeline results, including a sortable/filterable protein database, individual protein profile pages, and a biological process view.
 
@@ -1094,6 +1069,28 @@ The QC Report Assembly process is placed after imputation but before differentia
 
 **Impact:** New Process 4.10 added to Module 01. New Nextflow process (MISSINGNESS_REPORT) and script (`bin/missingness_report.py`). Module 02 scope confirmed as excluding missingness. See Module 01 documentation Section 4.10 for full plot specifications.
 
+### 2026-03-27 -- Module 03 Normalization: VSN Included, Method-Aware Log2 Handling
+
+**Decision:** Module 03 (Normalization) includes four methods: median (default), quantile, VSN, and none. VSN is accessed via R/Bioconductor through rpy2. Log2 transformation is handled in a method-aware manner (Option B): median and quantile receive log2-transformed data; VSN receives raw linear-scale data and performs its own transformation. The permanent log2 transformation uses log2(x), not log2(x+1).
+
+**Rationale:** VSN is the statistically most rigorous normalization option for MS proteomics data because it addresses intensity-dependent variance (heteroscedasticity) that persists after log2 + median normalization. It is used by DEP (Bioconductor proteomics standard), the CTX Wistar core analysis, and the Arias-Hidalgo 2023 benchmarking study. Including it enables comparison with the Wistar core results. rpy2 is already in the conda environment for Module 05 (DEqMS), so this is not a new dependency class. Method-aware log2 handling is necessary because VSN operates on raw data and includes its own transformation, unlike median/quantile which require pre-transformed input. Log2(x) rather than log2(x+1) avoids the bias the +1 offset introduces for low-abundance proteins in statistical testing.
+
+**Alternatives considered:** (1) Exclude VSN, defer to later -- rejected because VSN is the community standard and its inclusion is needed for Wistar core comparison. (2) Uniform log2 preprocessing before all methods -- rejected because it would make VSN produce incorrect results.
+
+**Impact:** Module 03 is a mixed Python/R module (first module to use R). New parameter: `normalization.method`. Shared plotting utility (`bin/prosift_plot_utils.py`) recommended for diagnostic plot consistency between Modules 02 and 03. The `vsn` Bioconductor package must be verified in the conda environment. See `03_normalization_imputation.Rmd` for full spec.
+
+### 2026-03-27 -- Module 03 Recombined: Normalization & Imputation in One Module
+
+**Decision:** Normalization and imputation are recombined into a single Module 03 (two Nextflow processes: NORMALIZE and IMPUTE), reversing the earlier same-day decision to split them into separate modules. CV computation sits between the two processes. Downstream modules renumber: Differential Abundance becomes Module 04, Enrichment becomes Module 05, Database Queries Module 06, Results Assembly Module 07, Frontend Module 08.
+
+**Rationale:** The split added Nextflow wiring complexity (extra inter-module channel join) without meaningful benefit. Normalization and imputation always run in sequence with no branching. CV, the only analysis between them, is a few lines of code, not a module-scale operation. The two-process structure within a single module preserves the normalization/imputation boundary (changing imputation method re-runs IMPUTE but not NORMALIZE) while simplifying the pipeline.
+
+**Imputation design added:** DEP-style mixed imputation as default. MNAR values (SINGLE-GROUP proteins from Module 01) get MinProb. MAR values (sporadic in PASSED proteins) get KNN. Classification uses Module 01's detection_filter_table.csv directly. User can override with single-method mode (uniform MinProb, KNN, or left-censored/Perseus-style). CV computed on back-transformed linear scale (2^log2_value). Sensitivity analysis deferred.
+
+**Alternatives considered:** (1) Keep the split -- rejected as over-granular for operations that always run sequentially. (2) One process for everything -- rejected because the CV computation benefits from the process boundary.
+
+**Impact:** Module renumbering throughout all documentation. `03_normalization.Rmd` replaced by `03_normalization_imputation.Rmd`. `04_imputation.Rmd` absorbed. Detection filter table promoted from diagnostic to primary analytical input.
+
 ---
 
 # 10. Development Log
@@ -1275,6 +1272,18 @@ Refined the params.yml schema: dropped `input.protein_id_type` (hardcoded UniPro
 **Decisions made:** See Decision Register entries 2026-03-27 (module architecture revision, missingness visualizations in Module 01) for full rationale, alternatives considered, and impact.
 
 **Next steps identified:** Continue Module 02 (pre-normalization QC/EDA) design specification: per-sample intensity summaries, distributional assessment, PCA, sample correlation, outlier detection, QC flag schema. Renumber/split module documentation files to match new structure. Implement MISSINGNESS_REPORT process in Module 01.
+
+### 2026-03-27 -- Module 03 Normalization Design Complete
+
+**Work performed:** Designed Module 03 (Normalization) in full. Key design decision was whether to include VSN, which requires R via rpy2 and uses a fundamentally different input (raw linear-scale data instead of log2-transformed). Decided to include VSN because it is the community standard (DEP default, used by the CTX Wistar core analysis) and rpy2 is already a dependency for Module 05. This led to the method-aware log2 handling design (Option B): each normalization method path handles the `abundance_type` parameter appropriately rather than applying a uniform log2 step.
+
+Also resolved: log2(x) not log2(x+1) for the permanent transformation (the +1 bias matters for statistical testing), shared plotting utility module for diagnostic plot consistency between Modules 02 and 03, diagnostic plots produced even when method is "none", and warning/back-transform behavior when VSN receives pre-transformed data.
+
+**Decisions made:** See Decision Register entry 2026-03-27 (Module 03 normalization) for full rationale.
+
+**Outputs:** `03_normalization.Rmd` (full spec). Updated Project Documentation Section 3.2. Updated handoff: module status, Nextflow process table, session log, pending tasks, data contracts.
+
+**Next steps identified:** Implement MISSINGNESS_REPORT (Module 01 Process 4.10). Implement NORMALIZE and IMPUTE (Module 03). Design Module 04 (Differential Abundance). Verify `vsn` Bioconductor package availability in conda environment. Renumber downstream module documentation files to match combined Module 03.
 
 ---
 

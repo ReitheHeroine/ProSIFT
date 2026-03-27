@@ -9,18 +9,42 @@ output:
 ---
 
 **Last Updated:** 2026-03-27
-**Module Status:** Stub -- not yet designed
-**Pipeline Position:** [Module 02: Pre-Normalization QC/EDA] --> **Module 03: Normalization** --> [Module 04: Imputation]
+
+**Module Status:** Design complete; not yet implemented.
+
+**Pipeline Position:** [Module 01: Input Validation & ID Mapping] --> [Module 02: Pre-Normalization QC/EDA] --> **Module 03: Normalization** --> [Module 04: Imputation]
+
+**Scope note:** This module handles log2 transformation (when needed) and normalization. It does NOT handle imputation (Module 04), CV computation (Module 04), or differential abundance (Module 05). It produces post-normalization diagnostic plots that mirror Module 02's pre-normalization plots for before/after comparison.
 
 ---
 
 # 1. Purpose and Scope
 
-This module normalizes the log-transformed abundance data to correct for systematic technical biases between samples (differences in sample loading, instrument drift, etc.). Normalization runs after pre-normalization QC (Module 02) so that the raw distributional properties are already documented.
+This module transforms the filtered abundance data into a state suitable for downstream statistical analysis. It performs two operations:
 
-Post-normalization diagnostic plots are produced here so that normalization effectiveness can be evaluated before imputation begins.
+1. **Log2 transformation** (when `abundance_type` is `raw`): converts linear-scale intensities to log2 scale, which is required by downstream statistical methods (limma, DEqMS) and produces approximately normal distributions.
 
-**[FOLLOW-UP NEEDED]** Full design of this module is pending. Normalization method selection, log transformation logic, post-normalization diagnostic output spec, and process specifications need to be defined.
+2. **Normalization**: removes systematic technical variation between samples (loading differences, injection volume differences, instrument sensitivity drift) while preserving biological signal.
+
+The relationship between these two steps depends on the normalization method. Median and quantile normalization operate on log2-transformed data (log2 first, then normalize). VSN operates on raw linear-scale data and produces its own variance-stabilized transformation (approximately log2). This method-aware handling is a key design feature of this module (see Section 4.0).
+
+The output is always approximately log2-scale, normalized data, regardless of which method was used or what state the input arrived in. Everything downstream (Module 04 imputation, Module 05 differential abundance) can assume log2-scale input.
+
+**What this module does:**
+
+- Apply log2 transformation when needed (method-aware: not applied before VSN)
+- Normalize abundance values across samples using the configured method
+- Produce post-normalization diagnostic plots (box plots, PCA, sample correlation heatmap) that mirror Module 02's pre-normalization versions
+- Pass the normalized matrix downstream for imputation
+
+**What this module does NOT do:**
+
+- Imputation of missing values (Module 04)
+- CV computation (Module 04, on normalized but non-imputed data)
+- Differential abundance testing (Module 05)
+- Remove or exclude any samples or proteins (Module 03 transforms values; it does not filter)
+
+See master overview (Section 2.2, main spine) for how this module sits in the analytical path.
 
 ---
 
@@ -28,58 +52,344 @@ Post-normalization diagnostic plots are produced here so that normalization effe
 
 ## 2.1 Inputs
 
-- Filtered abundance matrix (Parquet, from Module 01 Process 4.4)
-- Validated metadata (Parquet, from Module 01)
-- params.yml
+- **Filtered abundance matrix** (`{run_id}.filtered_matrix.parquet`, from Module 01 FILTER_PROTEINS): post-detection-filter abundance data. For a typical CTX run, ~8,400 proteins x 6 samples, plus peptide count columns. Missing values are NaN. The data state (raw intensities, log2, or pre-normalized) is specified by `input.abundance_type` in params.yml.
+- **Validated metadata** (`{run_id}.validated_metadata.parquet`, from Module 01 VALIDATE_INPUTS): sample-to-group assignments. Needed for coloring diagnostic plots by group and for group-aware normalization methods if added in the future.
+- **params.yml**: provides `input.abundance_type`, `normalization.method`, and `design.group_column`.
+
+**Note on data flow:** Module 03 receives the same filtered matrix as Module 02. Module 02 branches off for QC without modifying the data; Module 03 is on the main analytical spine and transforms the data for downstream consumption. The two modules are independent in terms of Nextflow dependencies (Module 03 does not wait for Module 02 to complete).
 
 ## 2.2 Outputs
 
-- Normalized abundance matrix (Parquet)
-- Post-normalization diagnostic plots (for QC Report Assembly, Module 04b)
+**Primary output (consumed by Module 04):**
+
+- **Normalized abundance matrix** (`{run_id}.normalized_matrix.parquet`): same shape as the filtered matrix (same proteins, same samples), but with abundance values on log2 scale and normalized. Missing values remain as NaN (normalization does not fill them in). Peptide count columns are passed through unchanged (they are not normalized).
+
+**Diagnostic outputs (consumed by QC Report Assembly):**
+
+- **Post-normalization box plots** (`{run_id}.postnorm_boxplots`): PNG + interactive HTML. Same format as Module 02's pre-normalization box plots.
+- **Post-normalization PCA** (`{run_id}.postnorm_pca_scatter`): PNG + interactive HTML. Same format as Module 02's PCA (PC1 vs. PC2, colored by group, variance explained in axis labels).
+- **Post-normalization correlation heatmap** (`{run_id}.postnorm_correlation_heatmap`): PNG + interactive HTML. Same format as Module 02's heatmap (Pearson, observed-range scale, grouped by condition).
+- **Normalization summary** (`{run_id}.normalization_summary.txt`): text report documenting what was done (method used, log2 transformation applied or not, number of proteins and samples, any warnings).
+- **Post-normalization PCA results** (`{run_id}.postnorm_pca_results.parquet`): PCA coordinates and variance explained, same schema as Module 02's PCA output.
+- **Post-normalization correlation matrix** (`{run_id}.postnorm_correlation_matrix.parquet`): sample-by-sample Pearson correlation matrix.
+
+**Design note on diagnostic plot reuse:** The post-normalization diagnostic plots use the same plotting logic as Module 02's pre-normalization plots (box plots, PCA scatter, correlation heatmap). In implementation, the plotting functions should be shared (e.g., a common utility module imported by both `bin/prenorm_qc.py` and the normalization script) to ensure visual consistency and avoid code duplication. The QC Report Assembly process will place these side-by-side for before/after comparison.
 
 ---
 
-# 3. Sub-Workflow Diagram
+# 3. Workflow Diagram
 
-*[To be designed.]*
+**[FOLLOW-UP NEEDED]** Create workflow diagram for Module 03. The module is a single Nextflow process (NORMALIZE) calling one script. The diagram would show the method-aware branching logic (log2 handling differs by method).
 
 ---
 
 # 4. Process Specifications
 
-*[To be designed. Will cover:]*
+Module 03 is implemented as a single Nextflow process (NORMALIZE) calling a single script (`bin/normalize.py`). The script handles log2 transformation, normalization, and diagnostic plot generation.
 
-- Log2 transformation (conditional on `input.abundance_type`)
-- Normalization method application (median centering, quantile, VSN)
-- Post-normalization distribution and sample-correlation diagnostics
+## 4.0 Data Preparation and Method-Aware Log2 Handling
+
+**This is the most important design decision in this module.** The log2 transformation step is not a uniform preprocessing step applied before normalization. Instead, it depends on the normalization method:
+
+- **Median normalization:** log2(x) first, then normalize on log2 scale.
+- **Quantile normalization:** log2(x) first, then normalize on log2 scale.
+- **VSN:** do NOT log2 first. VSN takes raw linear-scale data and applies its own variance-stabilizing transformation (generalized log, approximately log2). Applying log2 before VSN would violate VSN's assumptions.
+- **None:** log2(x) only (if `abundance_type` is `raw`); pass-through if already log2/normalized.
+
+**Why method-aware handling:** VSN is fundamentally different from median/quantile normalization. Median and quantile are "distribution alignment" methods that operate on already-transformed data. VSN is a "transformation and normalization" method that starts from raw intensities and produces its own transformed output. Forcing a uniform log2 step before all methods would make VSN produce incorrect results.
+
+**Implementation logic:**
+
+```
+read abundance_type from params.yml
+read normalization.method from params.yml
+
+if method == "vsn":
+    if abundance_type == "raw":
+        pass raw data to VSN (VSN handles transformation internally)
+    elif abundance_type == "log2":
+        WARNING: VSN expects raw data. Back-transforming from log2 to raw (2^x)
+        before applying VSN. Consider using median or quantile normalization for
+        pre-transformed data.
+    elif abundance_type == "normalized":
+        WARNING: Data is already normalized. Skipping VSN. Passing through unchanged.
+
+elif method in ["median", "quantile"]:
+    if abundance_type == "raw":
+        apply log2(x) transformation first
+        validate no zeros (zeros would produce -Inf; warn if found)
+    elif abundance_type == "log2":
+        data is already on correct scale
+    elif abundance_type == "normalized":
+        WARNING: Data is already normalized. Skipping normalization. Passing through.
+    apply chosen normalization method
+
+elif method == "none":
+    if abundance_type == "raw":
+        apply log2(x) transformation only (no normalization)
+    else:
+        pass through unchanged
+
+output is always approximately log2-scale data
+```
+
+**Log2 transformation details:** When applied (for median/quantile with raw data, or for `method: none` with raw data), the transformation is log2(x), NOT log2(x+1). Module 02 used log2(x+1) as a safety margin for visualization, but Module 03 produces data for statistical testing where the +1 bias matters for low-abundance proteins. The filtered matrix should not contain zeros (a zero abundance value would have been counted as missing/NaN by the detection filter, not as a detection). If any zero values are encountered, the script logs a warning ("unexpected zero values in abundance data; these will become -Inf after log2 transformation") and converts them to NaN before log2 transformation.
+
+**Peptide count columns:** Passed through unchanged. They are not transformed or normalized. They are carried forward in the output parquet for Module 05 (DEqMS) to consume.
+
+## 4.1 Median Normalization
+
+**What it does:** Shifts each sample's log2 abundance distribution so that all samples have the same median. The shift is additive on the log2 scale (which corresponds to multiplicative on the linear scale).
+
+**Algorithm:**
+
+1. Compute the median of each sample's non-missing log2 abundance values.
+2. Compute the global median (median of all sample medians, or equivalently the median of all non-missing values pooled).
+3. For each sample, compute the shift: `shift_i = global_median - sample_median_i`.
+4. Add the shift to all values in that sample: `normalized_value = original_value + shift_i`.
+5. Missing values (NaN) remain NaN.
+
+**Assumptions:** Most proteins are not differentially abundant between conditions (the "majority rule"). If this holds, the median protein is a reliable reference point for aligning samples. The method also assumes that systematic technical variation affects all proteins uniformly (a global shift), which is a reasonable approximation for loading and injection differences.
+
+**When to use:** Default choice. Appropriate for most proteomics datasets where the dominant systematic bias is a global shift (loading differences). Simple, robust, well-understood.
+
+**Implementation:** Pure Python (numpy/pandas). No external dependencies.
+
+## 4.2 Quantile Normalization
+
+**What it does:** Forces all sample distributions to be identical. After quantile normalization, every sample has exactly the same distribution of values (though which protein gets which value still varies by sample).
+
+**Algorithm:**
+
+1. Rank the proteins within each sample (handling ties by averaging ranks).
+2. For each rank position, compute the mean value across all samples.
+3. Replace each value with the mean value for its rank.
+4. Missing values are excluded from ranking. After normalization, they remain NaN.
+
+**Handling of missing values:** Quantile normalization in its standard form requires complete data. With missing values, there are two approaches: (a) normalize on complete cases only and apply the learned transformation to incomplete cases, or (b) use a modified algorithm that handles NaN. Approach (a) is simpler and appropriate here because post-filter missingness is mild (at most 1-2 missing values per protein). The implementation should use complete cases to learn the rank-to-value mapping, then apply it to all data.
+
+**Assumptions:** All samples should have the same overall distribution of protein abundances. This is a stronger assumption than median normalization (which only assumes the same center). Appropriate when you believe the distributions should be identical up to measurement noise.
+
+**When to use:** When median normalization is insufficient (samples have different distributional shapes, not just shifted medians). Common in microarray analysis; used in proteomics when the data shows shape differences across samples beyond simple shifts. More aggressive than median normalization.
+
+**Implementation:** Pure Python (numpy/pandas, or scipy.stats.rankdata).
+
+## 4.3 VSN (Variance Stabilizing Normalization)
+
+**What it does:** Applies a parametric variance-stabilizing transformation to raw (linear-scale) intensity data. The transformation is calibrated to the specific dataset so that the variance of the transformed values is approximately constant across all intensity levels. VSN simultaneously normalizes (aligns sample distributions) and transforms (produces approximately log2-scale output).
+
+**Why VSN is different:** Median and quantile normalization are "post-transformation" methods: you log2-transform first, then align distributions. VSN is a "transformation method": it starts from raw data and produces its own transformation. The transformation is based on the arcsine hyperbolic function (arcsinh), which behaves like log2 for high values but is better-behaved near zero (it doesn't go to negative infinity). The specific parameters of the transformation are estimated from the data to minimize the intensity-dependence of variance.
+
+**Algorithm (high-level):**
+
+1. VSN fits a parametric model to the raw intensity data: `h(x) = arcsinh(a + bx)`, where `a` and `b` are estimated per sample to minimize the variance of the transformed values across samples.
+2. The fitted transformation is applied to all values, producing variance-stabilized, approximately log2-scale output.
+3. Missing values (NaN) are excluded from model fitting and remain NaN in the output.
+
+**Implementation:** Via R's Bioconductor `vsn` package, called through rpy2. The key function is `vsn::justvsn()`, which takes a matrix of raw intensities and returns the variance-stabilized matrix. The Python script prepares the data, calls R via rpy2, and converts the result back to a pandas DataFrame.
+
+**rpy2 integration pattern:**
+
+```python
+import rpy2.robjects as ro
+from rpy2.robjects import numpy2ri
+from rpy2.robjects.packages import importr
+
+numpy2ri.activate()
+vsn_pkg = importr('vsn')
+
+# Convert pandas abundance matrix to R matrix
+r_matrix = ro.r['matrix'](abundance_values.values, nrow=n_proteins, ncol=n_samples)
+ro.r.assign('colnames', ro.StrVector(sample_ids))
+# ... set row/column names
+
+# Run VSN
+vsn_result = vsn_pkg.justvsn(r_matrix)
+
+# Convert back to numpy/pandas
+normalized_values = numpy2ri.rpy2py(vsn_result)
+```
+
+**Input requirements:** VSN expects raw (linear-scale) intensities. If `abundance_type` is `log2`, the script back-transforms (2^x) before passing to VSN and logs a warning that VSN is designed for raw data. If `abundance_type` is `normalized`, VSN is skipped entirely (see Section 4.0).
+
+**Output scale:** VSN output is on a generalized log2 scale (glog2). It is approximately but not exactly log2. For practical purposes, downstream modules (imputation, differential abundance) treat it as log2-scale data. The difference from true log2 is most pronounced for very low-abundance values, where VSN's arcsinh transformation compresses less aggressively than log2.
+
+**When to use:** When the data shows strong intensity-dependent variance (high variability at low abundance, low variability at high abundance). Statistically the most rigorous option for proteomics data. Used by DEP (Bioconductor proteomics package) as the default normalization. Recommended when comparing ProSIFT results against analyses that used VSN (e.g., the CTX dataset's Wistar core analysis).
+
+**Dependencies:** R (r-base >= 4.3), rpy2 (>= 3.5), Bioconductor vsn package. All already in the conda environment. rpy2 is also needed by Module 05 (DEqMS), so this is not a new dependency class, but Module 03 would be the first module to actually use R.
+
+## 4.4 None (Pass-Through / Log2-Only)
+
+**What it does:** Skips normalization. If `abundance_type` is `raw`, applies log2 transformation only. If `abundance_type` is `log2` or `normalized`, passes the data through unchanged.
+
+**When to use:** When the user has already normalized their data externally (e.g., the data comes from a core facility that performed its own normalization) and wants ProSIFT to handle only imputation, differential abundance, and downstream analysis. Also useful for debugging: running the pipeline with `normalization.method: none` isolates whether an issue is caused by normalization or by something else.
+
+**Implementation:** The simplest path. Apply log2 if needed, copy the matrix to the output, still produce the diagnostic plots (so the QC Report Assembly has something to show for the "post-normalization" section, even though no normalization was applied).
+
+## 4.5 Post-Normalization Diagnostic Plots
+
+**Purpose:** Produce the same plot types as Module 02 (box plots, PCA, correlation heatmap) on the normalized data, so the QC Report Assembly can present before/after comparisons.
+
+**Why these specific plots:** Each diagnostic answers a specific question about whether normalization worked:
+
+- **Box plots:** Did normalization align the sample distributions? Pre-normalization box plots (Module 02) show shifted medians and possibly different spreads. Post-normalization box plots should show aligned medians (for median normalization) or identical distributions (for quantile normalization).
+- **PCA:** Did normalization change the dominant sources of variation? If pre-normalization PCA was dominated by technical variation (PC1 separated by loading), post-normalization PCA should show biological signal becoming more prominent (PC1 separating by condition). If the PCA looks the same before and after, normalization had little effect (which might be fine if the data was already well-behaved, or concerning if technical variation was expected).
+- **Correlation heatmap:** Did normalization improve within-group consistency? Within-group correlations should be the same or slightly higher after normalization. Between-group correlations may decrease slightly (as technical variation that was masking biological differences is removed).
+
+**Implementation:** The plotting logic should be shared with Module 02. Specifically, the functions that produce box plots, PCA scatter, and correlation heatmaps should be in a shared utility module (e.g., `bin/prosift_plot_utils.py`) that both `bin/prenorm_qc.py` and `bin/normalize.py` import. This ensures visual consistency (same axis labels, same color scheme, same layout) and avoids code duplication.
+
+The PCA computation follows the same procedure as Module 02 (Section 4.4): complete cases only, center and scale, PC1 vs. PC2. The correlation heatmap follows Module 02 (Section 4.5): Pearson, pairwise-complete, observed-range color scale. Box plots follow Module 02 (Section 4.2).
+
+**Outputs:** See Section 2.2 for the full list (3 plot types as PNG + HTML, PCA results parquet, correlation matrix parquet, normalization summary text).
 
 ---
 
 # 5. Design Decisions
 
-*[No module-specific decisions recorded yet.]*
+### 2026-03-27 -- Method-Aware Log2 Handling (Option B)
+
+**Decision:** Log2 transformation is handled within each normalization method path, not as a uniform preprocessing step at the top of the script. Median and quantile normalization receive log2-transformed data. VSN receives raw linear-scale data and performs its own transformation.
+
+**Rationale:** VSN operates on raw intensities and applies a variance-stabilizing transformation (generalized arcsinh) that simultaneously normalizes and produces approximately log2-scale output. Applying log2 before VSN would violate VSN's statistical model: it would be fitting a variance-stabilization function to already-transformed data, which defeats the purpose. Median and quantile normalization, by contrast, are distribution-alignment methods that operate on the transformed scale and require log2 input to produce meaningful results (an additive shift on log2 scale corresponds to a multiplicative fold-change, which is the biologically relevant unit).
+
+**Alternatives considered:** (1) Uniform log2 preprocessing before all methods (Option A) -- simpler but makes VSN produce incorrect results. (2) Exclude VSN to avoid the complexity -- rejected because VSN is the statistically most rigorous option for proteomics and is used by DEP, the CTX Wistar core analysis, and the Arias-Hidalgo 2023 benchmarking study.
+
+**Impact:** The script has method-dependent branching at the top (see Section 4.0 pseudocode). Each method path handles the `abundance_type` parameter appropriately. The output is always approximately log2-scale regardless of method.
+
+### 2026-03-27 -- VSN Included via rpy2
+
+**Decision:** Include VSN as a normalization option, accessed via R's Bioconductor `vsn` package through rpy2.
+
+**Rationale:** VSN addresses a specific property of mass spectrometry data: intensity-dependent variance (heteroscedasticity). After log2 + median normalization, low-abundance proteins still have higher relative variability than high-abundance proteins. VSN's parametric transformation is calibrated to the dataset to flatten this relationship, producing variance-stabilized values. This is statistically beneficial because downstream methods (limma, DEqMS) assume approximately constant variance. Additional motivations: (a) DEP uses VSN as its default, making it a community standard for proteomics normalization. (b) The CTX Wistar core analysis used VSN, so including it enables direct comparison. (c) rpy2 is already in the conda environment for Module 05's DEqMS, so it is not a new dependency class.
+
+**Tradeoffs acknowledged:** (1) Module 03 becomes a mixed Python/R module. The median and quantile paths are pure Python; the VSN path calls R via rpy2. This adds a potential failure point (rpy2 import, R package availability). (2) VSN is harder to explain to users than median normalization. (3) For well-behaved datasets (like the CTX data based on Module 02's results), VSN may provide marginal benefit over simpler methods because the empirical Bayes framework in DEqMS/limma already partially compensates for heteroscedasticity.
+
+**Alternatives considered:** (1) Defer VSN until Module 05 introduces R integration -- rejected because having VSN available during Phase 2 testing is valuable, and the R dependency is a one-time setup cost. (2) Use a Python approximation of VSN -- no mature Python implementation exists; the Bioconductor package is the authoritative implementation.
+
+**Impact:** Module 03 requires R and rpy2 at runtime (already in conda env). The `vsn` Bioconductor package must be installed. Claude Code should verify `vsn` is available in the conda environment during implementation (it may need `BiocManager::install("vsn")` from within R if it's not in the bioconda channel).
+
+### 2026-03-27 -- Log2(x) Not Log2(x+1) for Permanent Transformation
+
+**Decision:** When Module 03 applies log2 transformation (for median/quantile with raw data), it uses log2(x), not log2(x+1).
+
+**Rationale:** Module 02 used log2(x+1) as a safety margin for visualization (preventing -Inf from zeros). Module 03 produces data that flows into statistical testing, where the +1 introduces a systematic bias: a protein with intensity 1 becomes log2(2) = 1.0 instead of log2(1) = 0.0, and a protein with intensity 10 becomes log2(11) = 3.46 instead of log2(10) = 3.32. For low-abundance proteins near the detection limit, this bias can inflate fold-change estimates. The filtered matrix should not contain zeros (a zero would have been counted as NaN by the detection filter, not as a detection), so log2(x) is safe. Unexpected zeros are caught by a validation check and converted to NaN with a warning.
+
+**Alternatives considered:** log2(x+1) for consistency with Module 02 -- rejected because the bias matters for statistical results even if it's acceptable for visualization.
+
+**Impact:** If unexpected zeros are present in the filtered matrix, they produce NaN (not -Inf) after the validation check catches them. The warning alerts the user that something unexpected is in their data.
+
+### 2026-03-27 -- Single Nextflow Process
+
+**Decision:** Module 03 is implemented as a single Nextflow process (NORMALIZE) calling one script (`bin/normalize.py`).
+
+**Rationale:** Same reasoning as Module 02: all operations share the same inputs, are computationally light (normalization of ~8,400 proteins x 6 samples is near-instant; VSN is the slowest option but still completes in seconds), and produce outputs for the same downstream consumer. Splitting log2 transformation, normalization, and diagnostic plotting into separate processes would add wiring complexity with no parallelism benefit.
+
+**Impact:** One script, one process, one set of outputs.
+
+### 2026-03-27 -- Shared Plotting Utilities Between Modules 02 and 03
+
+**Decision:** The plotting functions for box plots, PCA scatter, and correlation heatmap should be implemented as a shared utility module (e.g., `bin/prosift_plot_utils.py`) imported by both Module 02 and Module 03 scripts.
+
+**Rationale:** The post-normalization diagnostic plots must be visually identical in format to the pre-normalization plots for the before/after comparison in the QC Report Assembly to be meaningful. Duplicating the plotting code in two scripts would risk visual inconsistencies (different axis labels, different color schemes, different layouts) and create a maintenance burden. A shared module ensures consistency.
+
+**Implementation note:** Nextflow's `bin/` directory is added to the process PATH, but Python imports from `bin/` require either (a) adding `bin/` to `sys.path` in each script, or (b) structuring the utilities as a proper Python package. Option (a) is simpler and sufficient for the current project scale. Claude Code should implement this as a simple import at the top of each script: `sys.path.insert(0, os.path.dirname(__file__)); from prosift_plot_utils import plot_boxplots, plot_pca, plot_correlation_heatmap`.
+
+**Impact:** New shared file: `bin/prosift_plot_utils.py`. Module 02's plotting code should be refactored into this file when Module 03 is implemented (or during a cleanup pass afterward). Both modules import from it.
+
+### 2026-03-27 -- Diagnostic Plots Produced Even When Method is "None"
+
+**Decision:** When `normalization.method: none`, Module 03 still produces all diagnostic plots (box plots, PCA, correlation heatmap) on the (possibly log2-transformed) data.
+
+**Rationale:** The QC Report Assembly process expects diagnostic outputs from Module 03 regardless of the method. If Module 03 produces no outputs when method is "none", the QC Report Assembly would need conditional logic to handle the gap. Producing the plots is computationally trivial and ensures the consolidated QC report is always complete. The plots in this case show the data after log2 transformation (if applied) but before any normalization, which is useful information.
+
+**Impact:** The "none" path is not a true pass-through at the code level; it still runs the diagnostic plotting. It just skips the normalization step.
+
+### 2026-03-27 -- Warning on VSN with Pre-Transformed Data
+
+**Decision:** If `normalization.method: vsn` and `abundance_type: log2`, the script back-transforms to linear scale (2^x) before passing to VSN, with a warning. If `abundance_type: normalized`, VSN is skipped entirely with a warning.
+
+**Rationale:** VSN is designed for raw intensities. Giving it log2-transformed data would fit the variance-stabilization model to already-compressed data, producing subtly wrong results. Back-transforming is the least-bad option: it recovers approximate raw intensities (assuming the log2 transformation was log2(x) without an offset) and lets VSN do its job. But it's not ideal because the back-transformation introduces floating-point imprecision. The warning makes the user aware that this is a non-standard usage and suggests using median or quantile normalization for pre-transformed data.
+
+For `abundance_type: normalized`, there's no way to recover the pre-normalization raw data, so VSN cannot be applied at all.
+
+**Impact:** An edge case path in the script. Expected to be rare in practice (most users with raw data will use VSN, most users with pre-transformed data will use median/quantile).
 
 ---
 
 # 6. Parameters
 
+Module 03 introduces one new parameter:
+
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `normalization.method` | string | "median" | median, quantile, vsn, or none |
-| `normalization.log_transform` | bool | true | Apply log2 if `input.abundance_type` is "raw" |
+| `normalization.method` | string | "median" | Normalization method: `median`, `quantile`, `vsn`, or `none`. Median shifts all sample medians to the global median (simple, robust). Quantile forces all sample distributions to be identical (more aggressive). VSN applies variance-stabilizing transformation from raw data (requires R/Bioconductor; statistically rigorous for MS data). None skips normalization (log2 is still applied if `abundance_type` is `raw`). |
+
+Module 03 also reads the following existing parameters:
+
+| Parameter | Defined By | Used For |
+|---|---|---|
+| `input.abundance_type` | Module 01 | Determines whether log2 transformation is applied and how it interacts with the normalization method. See Section 4.0 for the method-aware logic. |
+| `design.group_column` | Module 01 | Column name in metadata defining groups. Used for coloring diagnostic plots. |
+
+**Note on `normalization.log_transform`:** The original stub included a boolean parameter `normalization.log_transform`. This has been removed. Log2 transformation is now handled automatically based on `abundance_type` and the normalization method (Section 4.0). A separate toggle would create confusing edge cases (e.g., `log_transform: false` with `abundance_type: raw` and `method: median` would feed raw intensities into median normalization, producing meaningless results). The method-aware logic handles all cases correctly without user intervention.
 
 ---
 
 # 7. Known Limitations and Edge Cases
 
-- Normalization assumes that most proteins are not differentially abundant (the majority rule). When a large fraction of proteins are truly changed between conditions, standard normalization methods can introduce bias.
-- VSN is a variance-stabilizing transformation that normalizes and log-transforms simultaneously; it should not be combined with a separate log2 step.
+- **Majority rule assumption:** All normalization methods (median, quantile, VSN) assume that most proteins are not differentially abundant between conditions. When a large fraction of proteins are truly changed (e.g., in a treatment that globally upregulates protein expression), normalization can introduce bias by "correcting" real biological signal. This is a fundamental limitation of global normalization, not specific to ProSIFT.
+- **VSN with log2 input:** If `abundance_type` is `log2` and `method` is `vsn`, the script back-transforms (2^x) before applying VSN. This is an approximation that introduces floating-point imprecision and assumes the original log2 transformation was log2(x) without an offset. If the data was transformed with log2(x+1) or another variant, the back-transformation will be slightly off. The warning in the normalization summary alerts the user.
+- **VSN R dependency:** VSN requires R, rpy2, and the Bioconductor vsn package. If rpy2 or vsn is not available (e.g., on a system without R), the script should fail with a clear error message suggesting the user switch to `method: median` or `method: quantile`. This is a graceful degradation, not a silent fallback.
+- **Quantile normalization with missing values:** The current design normalizes on complete cases and applies the learned mapping to all data. This is appropriate for mild missingness (1-2 values per protein) but could be problematic for datasets with heavier missingness. If missingness patterns are systematic (proteins missing in one condition), the complete-case reference distribution may be biased. This is a known limitation of quantile normalization in proteomics.
+- **Zero values in raw data:** Unexpected zeros are caught and converted to NaN with a warning. If the data contains many zeros, this may indicate the data is not truly raw intensities or that the upstream detection filter was not applied correctly.
+- **Normalization changes the meaning of absolute values.** After normalization, the absolute log2 intensity of a protein is no longer interpretable as its "true" abundance; it is relative to the normalization reference. Only comparisons between conditions (fold changes) are meaningful. This is standard for normalized data but worth noting for users unfamiliar with the concept.
 
 ---
 
 # 8. Testing Notes
 
-*[To be populated during implementation.]*
+**Tests to run on CTX benchmark data (CTXcyto run):**
+
+**Log2 transformation (with `abundance_type: raw`):**
+
+- Verify that output values are on log2 scale (~15-25 range for DIA-NN intensities)
+- Verify no -Inf values in output (would indicate unexpected zeros)
+- Verify NaN values are preserved (same positions as in the input)
+
+**Median normalization:**
+
+- Verify that all sample medians in the output are identical (within floating-point tolerance)
+- Verify the shift applied to each sample (should match the difference between sample median and global median in the pre-normalization data)
+- Verify that protein rank order within each sample is preserved (median normalization is a global shift, not a reranking)
+
+**Quantile normalization:**
+
+- Verify that all sample distributions are identical after normalization (same set of values, different assignment to proteins)
+- Verify NaN handling: missing values remain NaN, non-missing values are normalized
+
+**VSN:**
+
+- Verify that rpy2 and vsn package are accessible
+- Verify output scale is approximately log2 (values in similar range to median-normalized output)
+- Verify that variance is approximately constant across the intensity range (plot variance vs. mean for binned proteins; the trend should be flat or nearly flat)
+- Compare VSN output to median normalization output to understand the magnitude of the difference
+
+**None:**
+
+- Verify that output values are log2-transformed (if input was raw) or identical to input (if input was log2/normalized)
+- Verify that diagnostic plots are still produced
+
+**Diagnostic plots:**
+
+- Verify box plots show aligned medians (for median normalization) or identical distributions (for quantile)
+- Compare post-normalization PCA to Module 02's pre-normalization PCA: does biological signal become more prominent?
+- Compare post-normalization correlation heatmap to Module 02's: are within-group correlations maintained or improved?
+
+**Edge cases:**
+
+- Test with `abundance_type: log2` and `method: vsn` -- verify warning is logged and back-transformation occurs
+- Test with `abundance_type: normalized` and `method: median` -- verify warning and pass-through
+- Test with `method: none` and `abundance_type: raw` -- verify log2-only transformation with diagnostic plots
 
 ---
 
@@ -91,3 +401,26 @@ Post-normalization diagnostic plots are produced here so that normalization effe
 **Reason:** Normalization and imputation are sequential but distinct steps with different diagnostic outputs and design considerations. Separating them allows each to have its own Nextflow process, parameter namespace, and output spec.
 **Affected processes:** N/A (stub only).
 **Downstream effects:** Module numbers 04-08 renumbered to 06-10.
+
+### 2026-03-27 -- Complete Design Based on Module 02 Session Decisions
+
+**Change:** Full rewrite of module specification. Major changes:
+
+1. **Method-aware log2 handling specified** (Option B). Log2 transformation is handled within each method path, not as a uniform preprocessing step. Median/quantile receive log2 data; VSN receives raw data. Eliminates the `normalization.log_transform` parameter.
+
+2. **VSN included** as a normalization option via R/Bioconductor vsn package through rpy2. Module 03 is a mixed Python/R module (median and quantile are pure Python; VSN calls R). rpy2 is already in the conda environment for Module 05.
+
+3. **Four normalization methods fully specified:** median (distribution shift), quantile (distribution forcing), VSN (variance-stabilizing transformation), none (log2-only or pass-through).
+
+4. **Log2(x) not log2(x+1)** for the permanent transformation. Module 02 used +1 for visualization safety; Module 03 avoids the bias for statistical testing. Zero validation with NaN conversion.
+
+5. **Post-normalization diagnostic plots specified:** box plots, PCA, correlation heatmap mirroring Module 02's formats. Shared plotting utility module recommended.
+
+6. **Single Nextflow process** (NORMALIZE), one parameter (`normalization.method`), six design decisions documented.
+
+7. **Output schema defined:** normalized matrix parquet, 3 diagnostic plot types (PNG + HTML), PCA results parquet, correlation matrix parquet, normalization summary text.
+
+**Reason:** Module 03 design follows directly from Module 02 session where the pipeline was restructured and normalization was split into its own module. The log2 handling and VSN inclusion decisions were made during the Module 03 design discussion.
+
+**Affected processes:** Entire module designed from stub. New process: NORMALIZE. New script: bin/normalize.py. New shared utility: bin/prosift_plot_utils.py.
+**Downstream effects:** Module 04 (Imputation) receives approximately log2-scale normalized data regardless of method. QC Report Assembly receives diagnostic plots for before/after comparison. The `normalization.method` parameter needs to be added to the params.yml template in prepare_prosift_input.py.
