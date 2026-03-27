@@ -125,16 +125,81 @@ See master overview (Section 2.1-2.2) for architectural context.
 
 **Why this step is needed:** Discovery proteomics datasets are often filtered globally (e.g., "detected in 3/3 replicates for at least one condition across all conditions in the experiment"). When a user subsets such a dataset for a focused comparison (e.g., one brain region, one subcellular fraction), some proteins pass the global filter only because they were detected in conditions not included in the subset. These proteins may be completely absent or sporadically detected in the run's samples. Without filtering, they would be entirely imputed, producing artificial fold changes and test statistics driven by the imputation method rather than by measured data. See Decision Register entry 2026-03-23 "Per-Run Detection Filtering in Validation Module" for full rationale.
 
-**Filter logic:** A protein passes the detection filter if it is detected (non-missing abundance) in at least `qc.min_detection_fraction` of replicates in at least one group. With the default of `qc.min_detection_fraction = 0.67` (2/3) and typical triplicate designs, this requires detection in at least 2 of 3 replicates in at least one group.
+**Filter logic:** A protein passes the detection filter if it is detected (non-missing abundance) in at least `qc.min_detections_per_group` replicates in at least one group. With the default of `qc.min_detections_per_group = 2` and typical triplicate designs, this requires detection in at least 2 of 3 replicates in at least one group.
 
 **Categories reported in validation summary:**
 
-- **Passed:** detected in >= `min_detection_fraction` replicates in at least one group. Retained for downstream analysis.
+- **Passed:** detected in >= `min_detections_per_group` replicates in at least one group. Retained for downstream analysis.
 - **Single-group detection (passed):** detected adequately in one group but completely absent in the other. These are potential presence/absence candidates. Retained, but flagged for the QC module to assess further.
-- **Sparse (removed):** detected in fewer than `min_detection_fraction` replicates in all groups. Insufficient data for reliable statistical testing.
+- **Sparse (removed):** detected in fewer than `min_detections_per_group` replicates in all groups. Insufficient data for reliable statistical testing.
 - **Absent (removed):** zero detections across all samples in the run. Completely uninformative for this comparison.
 
-**Output:** Filtered abundance matrix (proteins passing the detection filter) plus a detection filter summary table listing every protein's detection counts per group and its filter status. The summary table is retained as a diagnostic artifact so users can verify what was removed and why.
+**Output:** Two outputs:
+
+1. **Filtered abundance matrix** (Parquet): proteins passing the detection filter, ready for downstream processing.
+
+2. **Detection filter summary table** (CSV): one row per input protein with columns for per-group detection counts and filter status (PASSED, SINGLE-GROUP, SPARSE, ABSENT). Retained as a diagnostic artifact so users can verify what was removed and why.
+
+The Process 4.4 section of the **validation report** includes two blocks. The report is designed to be self-contained -- readers should not need to consult the module documentation to interpret the output.
+
+```
+================================================================
+DETECTION FILTER SUMMARY
+================================================================
+
+Filter threshold: min_detections_per_group = 2
+  A protein passes if detected (non-missing) in at least 2 replicates
+  in at least one group.
+
+Category definitions:
+  PASSED           - Detected in >= 2 replicates in both groups.
+                     Sufficient data for reliable statistical testing.
+  SINGLE-GROUP     - Detected in >= 2 replicates in one group
+                     but completely absent (0 detections) in the other.
+                     Retained as potential presence/absence candidates.
+                     Flagged for careful interpretation: the absent
+                     group will be entirely imputed.
+  SPARSE (removed) - Detected in < 2 replicates in ALL groups.
+                     Insufficient data for reliable statistical testing
+                     in any group.
+  ABSENT (removed) - Zero detections across all samples in this run.
+                     Protein was retained in the source dataset only
+                     because it was detected in conditions not included
+                     in this run.
+
+Results:
+  Input proteins:    8,948
+  Passed:            8,542  (95.5%)
+  Single-group:        237  ( 2.6%)  [flagged]
+  Sparse (removed):     55  ( 0.6%)
+  Absent (removed):    114  ( 1.3%)
+  --------------------------------
+  Retained:          8,779  (98.1%)
+  Removed:             169  ( 1.9%)
+
+================================================================
+PRE-FILTER MISSINGNESS OVERVIEW
+================================================================
+
+Total abundance values:  53,688  (8,948 proteins x 6 samples)
+Missing values:           3,174  (5.9%)
+
+Per-group detection rates:
+  WT:  mean 8,414 detected (94.0%), range 8,289-8,509
+  KO:  mean 8,458 detected (94.5%), range 8,368-8,572
+
+Per-sample detection:
+  CTXcyto_WT-1:  8,509 detected (95.1%),  439 missing (4.9%)
+  CTXcyto_WT-2:  8,289 detected (92.6%),  659 missing (7.4%)
+  CTXcyto_WT-3:  8,445 detected (94.4%),  503 missing (5.6%)
+  CTXcyto_KO-1:  8,572 detected (95.8%),  376 missing (4.2%)
+  CTXcyto_KO-2:  8,368 detected (93.5%),  580 missing (6.5%)
+  CTXcyto_KO-3:  8,434 detected (94.3%),  514 missing (5.7%)
+```
+
+*(Numbers above are representative examples from the CTXcyto run. Actual values depend on the run.)*
+
+The pre-filter missingness overview captures the data state before filtering. This is the only place it is recorded, since Module 02 (QC/EDA) operates only on post-filter data. See Decision Register entry 2026-03-25 "Missingness Overview in Module 01 Validation Report".
 
 **Error behavior:** Warning if more than 20% of proteins are removed (suggests the input may not be appropriate for this run configuration). Hard stop if fewer than 50 proteins remain after filtering (insufficient data for meaningful analysis).
 
@@ -166,7 +231,9 @@ See master overview (Section 2.1-2.2) for architectural context.
 
 **Unmapped IDs:** Input IDs that cannot be mapped (obsolete accessions, non-standard identifiers, or contaminant accessions retaining search engine prefixes such as MaxQuant's `CON__` or DIA-NN's `C_` tags) are not silently dropped. They are logged, included in the QC report as unmapped, and carried through the pipeline with empty annotations. The user sees which proteins could not be mapped and can investigate.
 
-**Output:** Mapping status column with values: mapped, unmapped, isoform_collapsed, multiple_mappings.
+**Secondary/merged accessions:** UniProt periodically merges entries or demotes accessions to secondary status. If the input contains an accession that is now secondary (typically because the search database FASTA was built from an older UniProt release), the API returns the current canonical accession. These cases are flagged `accession_redirected`. The abundance data remains keyed on the original `input_id`; the `uniprot_accession` column holds the canonical for all downstream annotation. This is distinct from isoform collapse (which is a biological relationship) -- accession redirection is a database-housekeeping artifact.
+
+**Output:** Mapping status column with values: mapped, unmapped, isoform_collapsed, accession_redirected, multiple_mappings.
 
 ## 4.7 Ortholog Mapping (Conditional)
 
@@ -196,7 +263,7 @@ The mapping module produces a single table (Parquet file) with one row per input
 - ensembl_gene_mouse: Ensembl gene ID (mouse)
 - human_ortholog_symbol: human ortholog gene symbol (null if no ortholog found)
 - human_ortholog_entrez: human ortholog Entrez ID (null if no ortholog found)
-- mapping_status: one of [mapped, unmapped, isoform_collapsed, multiple_mappings]
+- mapping_status: one of [mapped, unmapped, isoform_collapsed, accession_redirected, multiple_mappings]
 - mapping_notes: free text for edge cases and diagnostics
 
 Every downstream module reads this table and joins it with its input data to get the IDs it needs. The enrichment module uses gene_symbol_mouse. The PubMed module uses both gene_symbol_mouse and human_ortholog_symbol. DGIdb and DisGeNET use human_ortholog_entrez (and are skipped for proteins where it is null).
@@ -317,7 +384,7 @@ The filter belongs in the validation module rather than in an external preproces
 
 **Alternatives considered:** (1) Pre-filter in an extraction script -- quicker to implement but creates a preprocessing step outside the pipeline that is not documented or reproducible within the pipeline's own audit trail. (2) Feed all proteins and rely on downstream QC flagging -- the QC module would flag these proteins, but they would still flow through normalization and imputation, potentially influencing those steps (e.g., proteins with extreme missingness can affect quantile normalization reference distributions). (3) Hybrid approach (unfiltered test runs + filtered production runs) -- useful for pipeline validation but not a general-purpose solution.
 
-**Impact:** New process (4.4) added to the workflow between cross-validation and ID mapping. New parameters: `qc.min_detection_fraction` (default 0.67). Workflow diagram updated. Detection filter summary included in validation report output.
+**Impact:** New process (4.4) added to the workflow between cross-validation and ID mapping. New parameter: `qc.min_detections_per_group` (default 2). Workflow diagram updated. Detection filter summary included in validation report output.
 
 ### 2026-03-23 -- Peptide Counts Included in Abundance Matrix File
 
@@ -330,6 +397,26 @@ Including peptide counts in the same file as abundances (rather than a separate 
 **Alternatives considered:** (1) Separate peptide count file -- cleaner separation of concerns but adds a third required input file, increasing the chance of mismatched files and user error. (2) Single summary peptide count per protein (e.g., total unique peptides) rather than per-sample -- simpler but loses the per-sample information that DEqMS can use for more precise variance modeling. Per-sample counts are available in most search engine outputs, so there is no reason to discard them. (3) No peptide count support -- rejected because it would make DEqMS unusable, removing ProSIFT's primary advantage over generic differential expression tools.
 
 **Impact:** Input spec (Section 2.1) updated to include peptide count columns. Validate Matrix process (4.1) updated to check peptide count columns when the prefix is specified. New parameters: `input.abundance_prefix`, `input.peptide_count_prefix`. The statistical module (Module 02, not yet designed) will need to consume these columns and pass them to DEqMS.
+
+### 2026-03-25 -- Missingness Overview in Module 01 Validation Report
+
+**Decision:** The validation report includes a missingness overview that captures the pre-filter state of the data, even though Module 02 (QC/EDA) operates only on post-filter data.
+
+**Rationale:** Detection filtering runs in Module 01 (Process 4.4) because it requires group assignments to evaluate per-group detection rates. This means Module 02 QC/EDA never sees the raw data state -- its missingness analysis characterizes sporadic missingness among retained proteins, not the overall dataset. To ensure the pre-filter data state is documented and reviewable, the validation report includes a summary of protein counts by filter category (absent, sparse, single-group detection, passed) and per-group detection rates before filtering occurs.
+
+**Alternatives considered:** (1) Move detection filtering to Module 02 -- rejected because the filter requires group assignments from metadata validation, and placing it in Module 02 blurs the responsibility boundary between validation and QC. (2) Pass pre-filter matrix to Module 02 alongside post-filter matrix -- adds complexity and an extra data file for a one-time overview that fits naturally in the validation report.
+
+**Impact:** Process 4.4 output spec updated (Section 4.4) to include the missingness overview fields in the validation report. No new parameters needed.
+
+### 2026-03-25 -- Detection Filter Parameter Changed from Fraction to Integer
+
+**Decision:** Replace `qc.min_detection_fraction` (float, default 0.67) with `qc.min_detections_per_group` (integer, default 2). The parameter now specifies an absolute replicate count rather than a fraction.
+
+**Rationale:** With a typical triplicate design (n=3 per group), the intended threshold of "2 out of 3 replicates" is represented as the fraction 0.67. But `2/3 = 0.6667`, which is less than 0.67, so the filter `detected_count / n >= 0.67` would incorrectly exclude proteins detected in exactly 2 of 3 replicates -- the very case the threshold is meant to pass. Using an integer eliminates this floating-point edge case entirely: `detected_count >= 2` is exact, unambiguous, and directly readable.
+
+**Alternatives considered:** (1) Lower the float threshold to 0.666 or 0.6 to avoid the edge case -- would work for n=3 but creates different edge cases for other n values (e.g., n=4: `2/4 = 0.5 >= 0.6` is false, but `3/4 = 0.75 >= 0.6` is true, which may not be the intended behavior). (2) Keep the fraction but document the edge case -- defers the problem to users and is hard to notice without inspecting data closely. The integer parameterization is unambiguous regardless of group size.
+
+**Impact:** Parameter renamed and type changed. All existing `params.yml` files regenerated. Module 01 documentation updated throughout (filter logic description, parameter table, validation report format block, category definitions, testing notes).
 
 ---
 
@@ -353,7 +440,7 @@ The following params.yml fields control this module:
 | `design.batch_column` | string | null | Batch column name |
 | `project.organism` | string | "mouse" | Organism: mouse or human |
 | `qc.min_samples_per_group` | int | 2 | Minimum samples per group |
-| `qc.min_detection_fraction` | float | 0.67 | Minimum fraction of replicates in at least one group where a protein must be detected (non-missing) to pass the detection filter. Default 0.67 requires detection in at least 2/3 replicates. Set to 0 to disable. |
+| `qc.min_detections_per_group` | int | 2 | Minimum number of replicates in at least one group where a protein must be detected (non-missing) to pass the detection filter. Default 2 requires detection in at least 2 replicates. Set to 0 to disable. |
 | `databases.cache_days` | int | 30 | ID mapping cache lifetime in days |
 
 ---
@@ -395,7 +482,7 @@ The following params.yml fields control this module:
 - Verify proteins with 0/6 detection are classified as "absent (removed)"
 - Verify proteins with adequate detection in one group but zero in the other are classified as "single-group detection (passed)" and retained
 - Verify proteins with 1/3 detection in both groups are classified as "sparse (removed)"
-- Test with `qc.min_detection_fraction = 0` -- verify all proteins retained (filter disabled)
+- Test with `qc.min_detections_per_group = 0` -- verify all proteins retained (filter disabled)
 
 **Peptide count tests:**
 
@@ -696,7 +783,7 @@ design:
 
 qc:
   min_samples_per_group: 2
-  min_detection_fraction: 0.67
+  min_detections_per_group: 2
 
 databases:
   cache_days: 30
@@ -728,7 +815,7 @@ databases:
 
 3. **UniProt accessions documented as recommended protein ID type.** Inspection revealed 240 duplicate gene symbols across 518 rows in the Genes column (due to DIA-NN reporting distinguishable isoform groups separately), making gene symbols unsuitable as unique IDs without pre-aggregation. UniProt accessions (Protein Group column, first semicolon-delimited entry) produced zero duplicates across all 8,948 rows. Validate Matrix process (4.1) updated to handle semicolon-delimited protein group entries.
 
-4. **Per-run detection filter added** as new Process 4.4. Removes proteins with insufficient detection in the run's samples (default: requires detection in >= 2/3 replicates in at least one group). Motivated by finding that subsetting the 24-sample CTX dataset to 6-sample runs produces 114-322 completely absent proteins and 55-96 sparsely detected proteins per run. New parameter: `qc.min_detection_fraction` (default 0.67). Subsequent processes renumbered (old 4.4-4.8 became 4.5-4.9).
+4. **Per-run detection filter added** as new Process 4.4. Removes proteins with insufficient detection in the run's samples (default: requires detection in >= 2 replicates in at least one group). Motivated by finding that subsetting the 24-sample CTX dataset to 6-sample runs produces 114-322 completely absent proteins and 55-96 sparsely detected proteins per run. New parameter: `qc.min_detections_per_group` (default 2). Subsequent processes renumbered (old 4.4-4.8 became 4.5-4.9).
 
 5. **Known limitations and testing notes expanded** with findings from data inspection (protein group handling, gene symbol duplicates, detection filter edge cases, deprecated accession risk).
 

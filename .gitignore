@@ -14,9 +14,16 @@ prosift_inputs/
 .nextflow/
 .nextflow.log*
 work/
+.command.*
+
+# Test output directories
+results_test/
 
 # Cache files
 .cache/
+
+# R session history
+.Rhistory
 
 # System files
 .DS_Store

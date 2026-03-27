@@ -12,7 +12,7 @@ output:
 
 # ProSIFT -- Handoff File
 
-**Last Updated:** 2026-03-23
+**Last Updated:** 2026-03-26
 
 **Purpose:** Operational coordination across Claude sessions. Tracks current development state, active tasks, blockers, and environment details. Updated every session.
 
@@ -150,9 +150,9 @@ Step [X] complete.
 | Phase 3 | Database integration layer | Not started | [See Project Documentation Section 6.3] |
 | Phase 4 | Interactive frontend | Not started | [See Project Documentation Section 6.4] |
 
-**Current phase:** Phase 1 (pre-pipeline: data preparation scripts)
+**Current phase:** Phase 1 (Module 01 complete; Module 02 QC/EDA next)
 
-**Current focus:** Data preparation tooling for CTX/Synaptosome dataset
+**Current focus:** Module 02 (QC/EDA) design
 
 ## 2.2 Module Status
 
@@ -160,13 +160,15 @@ Tracks implementation status of individual modules within and across phases. A m
 
 | Module | Phase | Status | Last Touched | Blocking Issues | Notes |
 |---|---|---|---|---|---|
-| Project structure / repo setup | 1 | Not started | -- | -- | Follow nf-core conventions |
-| nextflow.config + params.yml schema | 1 | Not started | -- | -- | Split: infrastructure vs. scientific params |
-| Input validation | 1 | Not started | -- | -- | Nextflow process |
-| UniProt ID mapping | 1 | Not started | -- | -- | |
+| Project structure / repo setup | 1 | Complete | 2026-03-26 | -- | main.nf, nextflow.config, conf/base.config, workflows/, modules/local/, bin/ all created and functional |
+| nextflow.config + params.yml schema | 1 | Functional | 2026-03-26 | -- | local/pbs/conda/singularity profiles; samplesheet param replaces params_file; conda PATH workaround for macOS; cluster path needs updating before first cluster run |
+| Conda environment | 1 | Complete | 2026-03-25 | -- | environment.yml finalized; prosift env exists locally; not yet created on cluster |
+| Data preparation scripts | Pre-1 | Complete | 2026-03-26 | -- | All 3 scripts tested; samplesheet.csv generated; abundance_prefix bug fixed in prepare_prosift_input.py; 12 per-run input directories regenerated |
+| Input validation (Processes 4.1-4.3) | 1 | Complete | 2026-03-26 | -- | bin/validate_inputs.py implemented and tested standalone and through Nextflow |
+| Detection filter (Process 4.4) | 1 | Complete | 2026-03-26 | -- | bin/filter_proteins.py implemented and tested standalone and through Nextflow |
+| UniProt ID mapping (Processes 4.5-4.9) | 1 | Complete | 2026-03-26 | -- | bin/uniprot_mapping.py implemented; paginated JSON API; MD5 cache; 5 mapping statuses; ortholog columns null (Phase 3); tested end-to-end |
 | QC/EDA | 1 | Not started | -- | -- | |
-| Conda environment | 1 | Not started | -- | -- | |
-| Singularity definition | 1 | Not started | -- | Dependency list needed first | |
+| Singularity definition | 1 | Not started | -- | -- | Dependency list now established (environment.yml); ready to write .def file |
 | Imputation | 2 | Not started | -- | -- | |
 | Differential abundance (DEqMS) | 2 | Not started | -- | -- | |
 | ORA / GSEA enrichment | 2 | Not started | -- | -- | |
@@ -186,7 +188,9 @@ Tracks which Nextflow processes exist and whether they are functional. Populated
 
 | Process Name | Module | Status | Notes |
 |---|---|---|---|
-| -- | -- | -- | Implementation not yet started |
+| VALIDATE_INPUTS | 01 Input Validation | Functional | modules/local/validate_inputs/main.nf wired; calls bin/validate_inputs.py; tested end-to-end on all 12 runs |
+| FILTER_PROTEINS | 01 Input Validation | Functional | modules/local/filter_proteins/main.nf wired; calls bin/filter_proteins.py; tested end-to-end on all 12 runs |
+| UNIPROT_MAPPING | 01 Input Validation | Functional | modules/local/uniprot_mapping/main.nf wired; calls bin/uniprot_mapping.py; cache dir passed as params.outdir/cache/id_mapping; tested end-to-end on CTXcyto run |
 
 ---
 
@@ -202,6 +206,115 @@ Maintained by Claude Code. Claude.ai reads these entries to understand what work
 > - [Tests run and outcomes]
 > - [Decisions made -- flag for promotion to Project Documentation Decision Register if significant]
 > - [Issues encountered or flagged]
+
+### 2026-03-26 (Claude.ai) -- Module 01 Review; Architecture Decisions; Usability Assessment
+
+- Reviewed Claude Code's Module 01 implementation: `validate_inputs.py` (Processes 4.1-4.3), `filter_proteins.py` (Process 4.4), `uniprot_mapping.py` (Processes 4.5-4.9), samplesheet-based Nextflow wiring, `accession_redirected` mapping status addition
+- Walked through all Nextflow files line-by-line with developer: `main.nf`, `workflows/prosift.nf` (samplesheet channel, multiMap, join), `nextflow.config` (profiles, conda workaround, tracing), `conf/base.config` (error strategy), all three process module files (publishDir patterns, tuple I/O, stub blocks)
+- Evaluated four approaches for UniProt mapping architecture (accept redundancy, pre-fork mapping, file-based locking, simple Python cache). **Decision: Option 1 (accept redundancy).** 12 parallel API calls at ~10-30 sec each is negligible cost; architectural simplicity of self-contained runs outweighs the minor waste.
+- **Decision: Defer ortholog mapping to Phase 3.** Columns present but null in mapping table. Ortholog resource (Ensembl BioMart vs. JAX MGI) still an open question.
+- Compiled complete Module 01 input/output summary (6 output files per run, 2 primary data artifacts for downstream consumption: filtered_matrix.parquet and id_mapping.parquet)
+- **Usability assessment:** Current input workflow requires 3 preprocessing scripts + samplesheet + params files before pipeline runs. Acceptable for development phase; not suitable for bench scientists. Key finding: usability layer sits entirely outside the pipeline and can be rewritten at any point without touching Nextflow files or Python scripts. The input format contract (CSV conventions, metadata structure, params schema) is the stable interface -- everything above it is interchangeable. Added to deferred considerations.
+- All Module 01 statuses updated to Complete. Ready for Module 02 design.
+
+### 2026-03-26 (Claude Code) -- ID Mapping: accession_redirected Status Added
+
+- Added fifth `mapping_status` value: `accession_redirected`. Covers proteins where the input accession is a secondary or merged accession in UniProt -- the API returns a different canonical than what was submitted. Previously these were silently filed as "mapped" with no note, and `input_id != uniprot_accession` with no indication of the discrepancy.
+- Detection: in `parse_json_results`, after the isoform check, `is_redirected = not is_isoform and accession != input_id`. Notes field records the old -> new accession.
+- CTXcyto results: 6 proteins (0.1%) reclassified from "mapped" to "accession_redirected". All 6 listed explicitly in the report.
+- Report updated: new "Accession-Redirected Protein IDs" block lists each redirect pair (`input_id -> uniprot_accession`). Explains the FASTA vintage as likely cause.
+- Spec updated: `01_input_validation.Rmd` Sections 4.6 (edge cases) and 4.8 (schema) updated to include the new status and its definition.
+- **[FOLLOW-UP NEEDED]:** Cache stores the parsed DataFrame, not the raw API results. If parsing logic changes again (e.g., a new status added), stale cache entries will serve the old classification. A schema version field in the cache metadata JSON would prevent silent misclassification on re-runs. Not urgent now but relevant before Phase 3 changes.
+- **Downstream note for future modules:** The 6 redirected proteins have `input_id != uniprot_accession`. Joins from abundance data back to the mapping table must use `input_id` as the key, not `uniprot_accession`. This is already the intended design but worth enforcing explicitly in Module 02+ implementations.
+
+### 2026-03-26 (Claude Code) -- Module 01 Complete: bin/uniprot_mapping.py and UNIPROT_MAPPING Process
+
+- Implemented `bin/uniprot_mapping.py` (Processes 4.5-4.9): UniProt bulk ID mapping, edge case handling, cache management, ortholog stub columns.
+- **API approach:** The UniProt ID mapping API v2 (`to=UniProtKB`) does NOT support the generic TSV stream endpoint (`/idmapping/stream/{jobId}`). On completion, the status endpoint redirects to `/idmapping/uniprotkb/results/{jobId}`, which returns paginated JSON. The script paginates via `Link: <url>; rel="next"` headers (500 results/page). 17 pages for the CTXcyto run (8,403 proteins).
+- **Field extraction from JSON:** `to.genes[0].geneName.value` for gene symbol; first `uniProtKBCrossReferences` entry with `database == "GeneID"` for Entrez ID; first `database == "Ensembl"` entry's `properties[key=="GeneId"].value` for Ensembl gene ID.
+- **Isoform detection:** Input IDs matching `XXXXX-N` pattern (UniProt isoform suffix) that map to the canonical accession are flagged as `isoform_collapsed`. CTXcyto run: 425 isoforms (5.1%) collapsed.
+- **Cache:** MD5 hash of sorted protein IDs + source type + organism; JSON metadata file records timestamp; configurable `databases.cache_days` lifetime. Cache stored at `{params.outdir}/cache/id_mapping/` (outside Nextflow work dir, intentionally -- persists across pipeline re-runs).
+- **Nextflow wiring:** Rewrote `modules/local/uniprot_mapping/main.nf` (stub -> functional); added `map_params` branch to `multiMap` in `workflows/prosift.nf` (the `filter_params` branch was already consumed by the FILTER_PROTEINS join and could not be reused). Cache dir passed as `${params.outdir}/cache/id_mapping`.
+- **CTXcyto results:** 8,403 proteins submitted; 7,978 mapped (94.9%), 425 isoform_collapsed (5.1%), 0 unmapped; gene symbol coverage 8,383/8,403 (99.8%), Entrez ID 8,104/8,403 (96.4%), Ensembl gene 8,119/8,403 (96.6%).
+- **Tests:** script tested standalone (cache miss, then cache hit); full end-to-end pipeline run on CTXcyto run via `-resume` -- all 3 processes (VALIDATE_INPUTS, FILTER_PROTEINS, UNIPROT_MAPPING) completed successfully. Results: `results_test/CTXcyto_WT_vs_CTXcyto_KO/validation/` contains 6 files totaling ~1.1MB.
+- **[FOLLOW-UP NEEDED]:** Wire UNIPROT_MAPPING cache to a stable location that survives cluster job restarts. Currently `{params.outdir}/cache/id_mapping` -- confirm this is on a persistent filesystem (not scratch) on mesx.sdsu.edu before first cluster run.
+- Module 01 is now fully implemented and functional through Nextflow for all Processes 4.1-4.9.
+
+### 2026-03-26 (Claude.ai) -- Nextflow Walkthrough; UniProt Mapping Architecture Decision
+
+- Walked through all Nextflow files with the developer: `main.nf` (entry point), `workflows/prosift.nf` (samplesheet channel, multiMap, join operators), `nextflow.config` (params, profiles, execution tracing), `conf/base.config` (resource defaults, error strategy), `modules/local/validate_inputs/main.nf` (publishDir pattern filtering, input/output tuples, script/stub blocks), `modules/local/filter_proteins/main.nf` (publishDir without pattern, three diagnostic outputs), `modules/local/uniprot_mapping/main.nf` (stub structure)
+- Key concepts covered: DSL2 imports, channels as conveyor belts, `.splitCsv()` and `.map()` operators, `meta` map pattern for tracking run identity through channels, `.multiMap()` for forking channels, `.join()` for reassembling by meta key, `.combine()` for distributing shared resources to all runs, `publishDir` with and without `pattern:` filter, `stub:` blocks for wiring tests, the `work/` directory and hash-named subdirectories, `-resume` for picking up after failures, execution trace/timeline/report outputs
+- Discussed UniProt mapping architecture -- four approaches evaluated:
+  - **Option 1: Accept redundancy** (each run queries UniProt independently). Simplest, no architectural changes, self-contained runs. 12 nearly-identical API calls but each takes 10-30 seconds -- negligible cost.
+  - **Option 2: Pre-fork mapping** (run once on master file, distribute via `.combine()`). One API call, guaranteed consistency, but adds architectural complexity, creates a bottleneck process, and requires a new global parameter.
+  - **Option 3: File-based locking** (shared cache with lock files). Fragile, race conditions, breaks Nextflow's isolation model.
+  - **Option 4: Simple Python-level cache** (check for cached file, no locks). Pragmatic but non-deterministic, shared mutable state outside Nextflow's tracking.
+- **Decision: Option 1 (accept redundancy).** UniProt's bulk API is fast and generous. 12 calls at this scale is ~2-4 minutes total. The architectural simplicity of keeping runs self-contained outweighs the minor API waste. If this ever becomes a bottleneck, upgrading to Option 4 (add a cache check to the Python script) requires no Nextflow changes.
+- **Decision: Defer ortholog mapping to Phase 3.** The mapping table schema includes `human_ortholog_symbol`, `human_ortholog_entrez`, and `ortholog_mapping_status` columns, but they will be null for now. These columns are not consumed until Phase 3 (database queries to DGIdb and DisGeNET). The ortholog mapping resource (Ensembl BioMart vs. JAX MGI) is still an open design question that doesn't need to be resolved for Phase 1.
+
+### 2026-03-26 (Claude Code) -- Module 01 Implementation (Processes 4.1-4.4); Nextflow Wiring
+
+- Fixed bug in `prepare_prosift_input.py`: `abundance_prefix` was hardcoded as `""` in the params template -- leftover from when per-run abundance CSVs had bare column names. Now correctly inherited from `run_config.yml` source config (value: `"abundance_"` for CTX dataset). Regenerated all 12 params.yml files.
+- Implemented `bin/validate_inputs.py` (Processes 4.1-4.3): validates abundance matrix, validates metadata, cross-validates sample IDs. Outputs `*.validated_matrix.parquet`, `*.validated_metadata.parquet`, `*.validation_report_part1.txt`. Both scripts in `bin/` are executable with `#!/usr/bin/env python3` shebangs.
+- Implemented `bin/filter_proteins.py` (Process 4.4): classifies proteins as PASSED/SINGLE-GROUP/SPARSE/ABSENT, applies detection filter, produces missingness overview and detection filter summary blocks in the report. Outputs `*.filtered_matrix.parquet`, `*.detection_filter_table.csv`, `*.validation_report_part2.txt`. Fixed a bug where per-group detection rates used `sum(axis=1)` (per-protein replicate counts) instead of `sum(axis=0)` (per-sample protein counts).
+- Report design: two partial reports concatenated at end. Part 1 (validate_inputs.py) covers Processes 4.1-4.3. Part 2 (filter_proteins.py) covers Process 4.4 with self-contained category definitions and missingness overview.
+- Wired Nextflow processes: uncommented `modules/local/validate_inputs/main.nf` and `modules/local/filter_proteins/main.nf`; fully wired `workflows/prosift.nf` with channel logic (samplesheet -> multiMap -> VALIDATE_INPUTS -> join -> FILTER_PROTEINS). Updated `nextflow.config`: replaced `params_file` with `samplesheet` param.
+- Generated `prosift_inputs/samplesheet.csv` listing all 12 runs with absolute paths to abundance, metadata, and params files.
+- Resolved conda activation issue: Nextflow's `source activate` fails in non-interactive subprocesses on macOS because conda shell hooks aren't initialized. Workaround: `process.beforeScript` in the conda profile prepends the prosift env bin to PATH directly. [FOLLOW-UP NEEDED]: update the hardcoded local path (`/Users/reina/miniconda3/envs/prosift/bin`) to cluster path (`/home2/rhastings/miniconda3/envs/prosift/bin`) before first cluster run.
+- Tested full pipeline end-to-end: all 12 runs completed in parallel via `nextflow run main.nf -profile local,conda --samplesheet prosift_inputs/samplesheet.csv`. Results written to `results/{run_id}/validation/` (4 files per run: filtered_matrix.parquet, detection_filter_table.csv, validation_report_part1.txt, validation_report_part2.txt).
+- Results directory structure established: `results/{run_id}/validation/` for Module 01 outputs; `results/pipeline_info/` for Nextflow execution trace and reports.
+- [FOLLOW-UP NEEDED]: Add samplesheet.csv generation to `prepare_prosift_input.py` so it regenerates automatically with correct absolute paths on each machine.
+
+### 2026-03-25 (Claude Code) -- Cluster Survey; Environment Finalized
+
+- Surveyed mesx.sdsu.edu via SSH: Oracle Linux 8.10, x86_64; conda 25.1.1; Python 3.12.9 in base; Torque 6 confirmed at `/usr/local/torque6/bin` (already on PATH -- earlier "not found" was a false negative from `find` not reaching that directory); Java/Nextflow/R/Singularity not installed
+- Finalized `environment.yml`: added rpy2, r-base>=4.3, bioconductor-limma, bioconductor-deqms, gseapy, tqdm, pytest-cov; pinned pandas>=2.0,<3, numpy>=1.26,<2, scipy>=1.12, rpy2>=3.5, r-base>=4.3; updated Python pin from 3.11 to 3.12 to match cluster base
+- Corrected home directory in handoff (was `/usr/scratch2/userdata2/rhastings`, correct is `/home2/rhastings`; scratch is a separate mount)
+- Updated module status table: project structure and nextflow.config marked Complete/Functional; Conda environment row updated; Singularity row unblocked (dependency list now established)
+- Updated Section 8.3 with finalized dependency table, cluster setup sequence, and bioconductor-deqms follow-up flag
+
+### 2026-03-25 (Claude Code) -- Nextflow Skeleton; Parameter Rename
+
+- Created Nextflow pipeline skeleton following nf-core conventions: `main.nf`, `nextflow.config` (params + profiles: local/pbs/conda/singularity), `conf/base.config` (default resource allocations), `workflows/prosift.nf` (top-level workflow stub), three process stubs in `modules/local/` (VALIDATE_INPUTS, FILTER_PROTEINS, UNIPROT_MAPPING), and empty `bin/` directory
+- Renamed detection filter parameter from `qc.min_detection_fraction` (float, 0.67) to `qc.min_detections_per_group` (integer, 2) across all files: 12 `prosift_inputs/**/*_params.yml`, `scripts/prepare_prosift_input.py` (params template), `project_documentation/modules/01_input_validation.Rmd` (filter logic, parameter table, validation report format, category definitions, test cases, 2026-03-23 decision register entry), `project_documentation/ProSIFT_project_documentation.Rmd` (2026-03-23 decision register entry + dev log)
+- Added new decision register entry in 01_input_validation.Rmd (2026-03-25: "Detection Filter Parameter Changed from Fraction to Integer") documenting the edge case and rationale
+- Updated handoff file system map to reflect new Nextflow directory structure and corrected per-run directory listing (2 files per run, no abundance CSV)
+- Cleared Section 4.2 parameter rename item; moved to Section 4.3
+
+### 2026-03-25 (Claude.ai) -- Review of Claude Code Output; Simplification Decisions
+
+- Reviewed Claude Code's data preparation work (3 scripts, 12 runs, file system restructure)
+- Identified module doc version problem: Claude Code's `01_input_validation.Rmd` is the pre-session 270-line version, missing all 2026-03-23 updates. Flagged for replacement (see Section 4.2).
+- Noted Claude Code added a third script (`prepare_ctx_data.py`) not in original spec -- separates DIA-NN-specific parsing from generic run definition/splitting. Reasonable but a departure from the two-script design.
+- Noted 12 runs generated (4 genotype + 4 fraction + 4 region) vs. the 4 genotype runs we specified. Extra runs not harmful but weren't planned.
+- Decision: simplify to shared master abundance file, eliminate per-run abundance CSVs. Cross-validation already subsets by metadata. Per-run metadata files are what define a "run."
+- Decision: missingness overview with category definitions in validation report. Designed the report format with explicit definitions for PASSED, SINGLE-GROUP, SPARSE, ABSENT so the report is self-contained.
+- Resolved the tools survey open question (completed by Claude Code).
+
+### 2026-03-25 (Claude Code) -- Module 01 Spec Finalized; Section 4.2 Items Resolved
+
+- Verified `01_input_validation.Rmd` is at 778 lines (full updated version with detection filter, peptide count support, data prep scripts, 10+ decision register entries); CRITICAL flag from 4.2 resolved
+- Updated Process 4.4 output spec in Module 01 doc: replaced bulleted overview with full self-contained report format including explicit PASSED/SINGLE-GROUP/SPARSE/ABSENT category definitions and pre-filter missingness overview with per-sample detection rates
+- Cleared all three Section 4.2 items; all moved to Section 4.3 completed tasks
+
+### 2026-03-25 (Claude Code) -- Data Preparation Complete; Module 01 Design Refinement
+
+- Completed and tested all three data preparation scripts: `prepare_ctx_data.py`, `generate_run_config.py`, `prepare_prosift_input.py`
+- `prepare_prosift_input.py`: ran successfully against `run_config.yml`; produced 12 run directories, each with `_abundance.csv`, `_metadata.csv`, `_params.yml`; spot-checked abundance columns, metadata group assignments, protein counts (8,948 per run), and params.yml content -- all correct
+- Data preparation layer is complete; per-run inputs are ready for Module 01 implementation
+- Design decision: missingness overview added to Module 01 validation report output (Section 4.4). Rationale: detection filtering runs in Module 01 before QC/EDA, so Module 02 never sees the pre-filter data state. The validation report will capture total proteins, absent/sparse/single-group/passed counts, and per-group detection rates to document what was removed and why. Decision recorded in Module 01 Decision Register (2026-03-25).
+- Merged duplicate handoff and project documentation files (copies had diverged between project_documentation/ and project_documentation/modules/); canonical copies now in project_documentation/ only
+
+### 2026-03-23 (Claude.ai) -- Input Validation Design and Data Preparation Planning
+
+- Inspected CTX/Synaptosome Filtered Proteins CSV (8,948 proteins, 178 columns) to inform Module 01 input spec
+- Key data findings: Protein Group column has semicolon-delimited UniProt accessions (90.1% single, 9.9% multi-member groups, zero duplicate first accessions); Genes column has 240 duplicate gene symbols across 518 rows (5.8%) making gene symbols unsuitable as unique IDs; per-run missingness of 1.9-4.7% when subsetting to 6-sample runs
+- Analyzed statistical tradeoffs of separate vs. combined runs for the 2x2x2 factorial design; decided on 4 separate runs
+- Dropped `input.protein_id_type` parameter (hardcoded UniProt for Phase 1); retained `input.abundance_type`; added peptide count support, detection filter, column prefix parameters
+- Designed two-script data preparation architecture: `generate_run_config.py` (interactive) + `prepare_prosift_input.py` (extraction)
+- Updated Module 01 doc (01_input_validation.Rmd): 270 to 757 lines, 10 decision register entries, new Section 9 (Data Preparation Scripts)
+- Updated master Project Documentation: Section 2.3 (input spec), Section 2.6 (ID mapping), Section 7 (CTX benchmark), 4 new decision register entries, 1 new dev log entry
+- Decisions made: all promoted to Project Documentation Decision Register (2026-03-23 entries)
 
 ### 2026-03-23 (Claude Code) -- Session 2
 
@@ -245,8 +358,6 @@ Maintained by Claude Code. Claude.ai reads these entries to understand what work
 > - **Acceptance criteria:** [How to know when it's done]
 > - **Dependencies:** [Other tasks or modules that must be complete first]
 
-None currently.
-
 ## 4.2 Decisions and Designs for Review
 
 > Implementation choices, design tradeoffs, or prototype outputs produced by Claude Code
@@ -258,8 +369,24 @@ None currently.
 
 > **Entry format:** [Task name] -- [Date completed] -- [Output location / notes]
 
-- Data preparation scripts (prepare_ctx_data.py, generate_run_config.py, prepare_prosift_input.py) -- 2026-03-23 -- scripts/
-- CTX/Synaptosome 12-run input generation -- 2026-03-23 -- prosift_inputs/
+- Data preparation scripts (prepare_ctx_data.py, generate_run_config.py, prepare_prosift_input.py) -- 2026-03-25 -- scripts/
+- CTX/Synaptosome 12-run input generation -- 2026-03-25 -- prosift_inputs/
+- Simplify to shared master abundance file (eliminate per-run abundance CSVs) -- 2026-03-25 -- scripts/prepare_prosift_input.py updated; 12 per-run abundance CSVs deleted; params.yml files regenerated with ../master path
+- Module 01 doc version resolved: 01_input_validation.Rmd confirmed at 778 lines with all 2026-03-23 updates -- 2026-03-25
+- Missingness overview spec added to Module 01 Process 4.4 (with full report format and category definitions) -- 2026-03-25 -- project_documentation/modules/01_input_validation.Rmd
+- Nextflow pipeline skeleton created (nf-core conventions) -- 2026-03-25 -- main.nf, nextflow.config, conf/base.config, workflows/prosift.nf, modules/local/{validate_inputs,filter_proteins,uniprot_mapping}/main.nf, bin/
+- Parameter rename (min_detection_fraction -> min_detections_per_group) -- 2026-03-25 -- all 12 params.yml files, scripts/prepare_prosift_input.py, 01_input_validation.Rmd (logic, table, report format, category defs, decision register), ProSIFT_project_documentation.Rmd
+- environment.yml finalized (Python 3.12, all Phase 1+ dependencies, version pins) -- 2026-03-25
+- Cluster surveyed via SSH; confirmed Torque 6, Oracle Linux 8.10, x86_64, Python 3.12 in base -- 2026-03-25
+- abundance_prefix bug fixed in prepare_prosift_input.py; all 12 params.yml regenerated with correct prefix -- 2026-03-26
+- bin/validate_inputs.py implemented and tested (Processes 4.1-4.3) -- 2026-03-26
+- bin/filter_proteins.py implemented and tested (Process 4.4) -- 2026-03-26
+- Nextflow processes wired (VALIDATE_INPUTS, FILTER_PROTEINS); full pipeline tested end-to-end on all 12 runs -- 2026-03-26
+- samplesheet.csv generated (prosift_inputs/samplesheet.csv) -- 2026-03-26
+- Results directory structure established (results/{run_id}/validation/) -- 2026-03-26
+- bin/uniprot_mapping.py implemented and tested (Processes 4.5-4.9); UNIPROT_MAPPING process wired -- 2026-03-26 -- bin/uniprot_mapping.py, modules/local/uniprot_mapping/main.nf, workflows/prosift.nf
+- Module 01 end-to-end pipeline tested (all 3 processes, CTXcyto run): 6 output files in results_test/CTXcyto_WT_vs_CTXcyto_KO/validation/ -- 2026-03-26
+- accession_redirected mapping status added to bin/uniprot_mapping.py; spec updated (01_input_validation.Rmd sections 4.6 and 4.8) -- 2026-03-26
 
 ---
 
@@ -279,14 +406,20 @@ None currently.
 >
 > **Entry format:** [DATE opened] [Question] [Status/progress]
 
-- 2026-03-20 -- Survey of existing proteomics analysis tools needed [See Project Documentation Section 1.4]
-- 2026-03-20 -- Benchmark/validation dataset not yet identified [See Project Documentation Section 7]
 - 2026-03-20 -- PubMed co-occurrence normalization approach not yet selected [See Project Documentation Section 4.3]
 - 2026-03-20 -- Frontend technology not yet selected (deferred to after Phase 2) [See Project Documentation Section 3.4]
+- ~~2026-03-26 -- nextflow.config conda profile has hardcoded local path~~ Resolved 2026-03-26: `process.beforeScript` now uses `$(conda info --base)/envs/prosift/bin` to find the conda prefix dynamically. Works on any machine where conda is on PATH and the `prosift` env exists -- no edits needed when deploying to cluster.
+- ~~2026-03-26 -- samplesheet.csv generation not yet added to `prepare_prosift_input.py`~~ Resolved 2026-03-26: `write_samplesheet()` added to `prepare_prosift_input.py`; samplesheet now auto-generated with absolute paths on every run.
+- 2026-03-26 -- ID mapping cache has no schema version. If parsing logic changes (new status added, field renamed), existing cache files will be loaded and served with the old classification without any warning. Adding a `schema_version` field to the cache metadata JSON would protect against this. Low priority now; becomes important before Phase 3 changes to the mapping logic.
+- 2026-03-26 -- UniProt cache dir on cluster must be on persistent storage. Currently `{params.outdir}/cache/id_mapping`. Confirm `params.outdir` resolves to a persistent mount (home2 or scratch, not a temp FS) before first cluster run. If outdir is on scratch, the cache may be deleted between submissions, defeating the point.
+- 2026-03-26 -- Input usability: current workflow requires 3 preprocessing scripts + samplesheet + per-run params/metadata before pipeline runs. Acceptable for development; not suitable for bench scientists. The usability layer sits entirely outside the pipeline and can be rewritten at any point without architectural changes. Deferred to post-Phase 1. [See also Project Documentation Section 6.5]
 
 ## 5.3 Resolved Questions
 
 > **Entry format:** **Q:** [Question] **A:** [Answer] ([Date resolved])
+
+- **Q:** Benchmark/validation dataset not yet identified. **A:** CTX/Synaptosome dataset (Blanco-Suarez Lab, Wistar project 25-L185) selected as Phase 1 benchmark. 4 separate runs, comparison against Wistar core results. (2026-03-23) [See Project Documentation Section 7]
+- **Q:** Survey of existing proteomics analysis tools needed. **A:** Completed by Claude Code (2026-03-25). Three-category survey (statistical platforms, database resources, enrichment tools) now in Project Documentation Section 1.4. (2026-03-25)
 
 ---
 
@@ -311,56 +444,111 @@ Each entry defines what a module outputs and which downstream modules consume th
 
 No data contracts defined yet. Populate as modules are implemented.
 
+### Module 01 (Input Validation & ID Mapping) --> Module 02 (QC/EDA)
+- **Producer:** FILTER_PROTEINS, UNIPROT_MAPPING
+- **Consumer:** Module 02 QC/EDA process(es) (not yet implemented)
+- **Primary data artifacts:**
+  - `{run_id}.filtered_matrix.parquet` -- post-detection-filter abundance data (~8,500-8,800 proteins x 6 samples per run, plus peptide count columns). Parquet format. Produced by FILTER_PROTEINS.
+  - `{run_id}.id_mapping.parquet` -- protein ID mapping table (10 columns: protein_id, uniprot_accession, gene_symbol_mouse, entrez_id_mouse, ensembl_gene_mouse, human_ortholog_symbol [null], human_ortholog_entrez [null], ortholog_mapping_status [null], mapping_status, mapping_notes). One row per protein. Produced by UNIPROT_MAPPING.
+- **Join key:** `protein_id` (UniProt accession, first from semicolon-delimited protein group). NOTE: for 6 accession-redirected proteins per run, `protein_id` (input accession) differs from `uniprot_accession` (canonical). Downstream joins must use `protein_id`, not `uniprot_accession`.
+- **Also available (diagnostic, not primary):** validation_report_part1.txt, validation_report_part2.txt, validation_report_part3.txt, detection_filter_table.csv -- published to `results/{run_id}/validation/` but not consumed by downstream processes.
+
 ---
 
 # 7. File System Map
 
 ## 7.1 Directory Structure
 
-**Last updated by Claude Code:** 2026-03-23
+**Last updated by Claude Code:** 2026-03-26
 
 ```
 ProSIFT/
 │
 ├── .gitignore
-├── environment.yml
+├── CLAUDE.md                                # Project-level Claude Code instructions
+├── environment.yml                          # Conda environment spec (Python 3.12, all Phase 1+ deps)
+├── main.nf                                  # Nextflow entry point
+├── nextflow.config                          # Pipeline config (params, profiles: local/pbs/conda/singularity)
+│
+├── conf/
+│   └── base.config                          # Default resource allocations per process
+│
+├── workflows/
+│   └── prosift.nf                           # Top-level PROSIFT workflow (VALIDATE_INPUTS -> FILTER_PROTEINS wired)
+│
+├── modules/
+│   └── local/
+│       ├── validate_inputs/main.nf          # Process: VALIDATE_INPUTS (functional)
+│       ├── filter_proteins/main.nf          # Process: FILTER_PROTEINS (functional)
+│       └── uniprot_mapping/main.nf          # Process: UNIPROT_MAPPING (functional)
+│
+├── bin/                                     # Python scripts called from Nextflow processes (executable, shebangs set)
+│   ├── validate_inputs.py                   # Processes 4.1-4.3: matrix/metadata/cross-validation
+│   ├── filter_proteins.py                   # Process 4.4: detection filter + missingness overview
+│   └── uniprot_mapping.py                   # Processes 4.5-4.9: UniProt bulk ID mapping + cache
+│
 ├── project_documentation/
 │   ├── ProSIFT_project_documentation.Rmd    # Architectural reference (Project Documentation)
 │   ├── ProSIFT_handoff.Rmd                  # THIS FILE - operational coordination
 │   ├── ProSIFT_handoff.html                 # Rendered handoff
-│   ├── prosift_pipeline_dag.svg             # Pipeline DAG diagram
+│   ├── figures/
+│   │   ├── prosift_pipeline_dag.svg         # Pipeline DAG diagram
+│   │   └── prosift_input_validation_workflow.svg
 │   └── modules/
-│       └── 01_input_validation.Rmd          # Module 01 design spec
+│       ├── 01_input_validation.Rmd          # Module 01: Input Validation & ID Mapping (design complete)
+│       ├── 02_qc_eda.Rmd                    # Module 02: QC/EDA (design in progress)
+│       ├── 03_normalization_imputation.Rmd  # Module 03 (design in progress)
+│       ├── 04_differential_abundance.Rmd    # Module 04 (design in progress)
+│       ├── 05_enrichment.Rmd                # Module 05 (design in progress)
+│       ├── 06_database_queries.Rmd          # Module 06 (design in progress)
+│       ├── 07_results_assembly.Rmd          # Module 07 (design in progress)
+│       └── 08_frontend.Rmd                  # Module 08 (design in progress)
 │
 ├── CTX_synaptosome_project_data/
 │   └── Filtered Proteins-Table 1.csv        # Raw DIA-NN output (source data, not committed)
 │
-├── scripts/
+├── scripts/                                 # Data preparation scripts (not part of pipeline)
 │   ├── prepare_ctx_data.py                  # CTX-specific: raw DIA-NN -> master ProSIFT files
 │   ├── generate_run_config.py               # Interactive: master files -> run_config.yml
-│   └── prepare_prosift_input.py             # run_config.yml -> per-run input directories
+│   └── prepare_prosift_input.py             # run_config.yml -> per-run input directories + samplesheet.csv
 │
-├── prosift_inputs/
-│   ├── CTX_synaptosome_abundance.csv        # Master abundance (8,948 proteins x 49 cols)
+├── prosift_inputs/                          # Pre-pipeline inputs (generated by data prep scripts)
+│   ├── CTX_synaptosome_abundance.csv        # Master abundance (8,948 proteins x 49 cols; shared by all runs)
 │   ├── CTX_synaptosome_metadata.csv         # Master metadata (24 samples)
 │   ├── CTX_synaptosome_protein_reference.csv # Protein reference (gene symbols, descriptions)
-│   ├── run_config.yml                       # 12 run definitions
-│   ├── CTXcyto_WT_vs_CTXcyto_KO/           # Per-run directories (12 total)
-│   │   ├── CTXcyto_WT_vs_CTXcyto_KO_abundance.csv
-│   │   ├── CTXcyto_WT_vs_CTXcyto_KO_metadata.csv
-│   │   └── CTXcyto_WT_vs_CTXcyto_KO_params.yml
-│   └── [11 more run directories...]
+│   ├── run_config.yml                       # 12 run definitions (generated by generate_run_config.py)
+│   ├── samplesheet.csv                      # Nextflow input: one row per run (run_id, abundance, metadata, params)
+│   ├── CTXcyto_WT_vs_CTXcyto_KO/           # Per-run directories (12 total, 2 files each)
+│   │   ├── CTXcyto_WT_vs_CTXcyto_KO_metadata.csv   # sample_id + group column for this run's 6 samples
+│   │   └── CTXcyto_WT_vs_CTXcyto_KO_params.yml     # Run params; abundance_matrix -> ../CTX_synaptosome_abundance.csv
+│   └── [11 more run directories, same structure]
 │
-└── [pipeline structure TBD during Phase 1 implementation -- follow nf-core conventions]
+├── work/                                    # Nextflow work directory (not committed; auto-generated on run)
+│
+└── results/                                 # Pipeline outputs (not committed; populated on run)
+    ├── cache/
+    │   └── id_mapping/                      # UniProt API response cache (persists across runs; key = MD5 hash)
+    ├── pipeline_info/                       # Nextflow execution trace, timeline, report
+    └── {run_id}/
+        └── validation/                      # Module 01 outputs per run (6 files)
+            ├── {run_id}.filtered_matrix.parquet        # Proteins passing detection filter (input to Module 02)
+            ├── {run_id}.detection_filter_table.csv     # Per-protein filter status and detection counts
+            ├── {run_id}.id_mapping.parquet             # UniProt mapping table (10 cols; input to all downstream modules)
+            ├── {run_id}.validation_report_part1.txt    # Processes 4.1-4.3 report
+            ├── {run_id}.validation_report_part2.txt    # Process 4.4 report (filter summary + missingness)
+            └── {run_id}.validation_report_part3.txt    # Processes 4.5-4.9 report (mapping summary + coverage)
 ```
 
 ## 7.2 Scripts Reference
 
 | Script | Module | Description | Last Updated |
 |---|---|---|---|
-| scripts/prepare_ctx_data.py | Data prep | Converts raw DIA-NN CTX output to master ProSIFT-format files | 2026-03-23 |
-| scripts/generate_run_config.py | Data prep | Interactive tool: define pairwise runs from master files, outputs run_config.yml | 2026-03-23 |
-| scripts/prepare_prosift_input.py | Data prep | Splits master files into per-run input directories using run_config.yml | 2026-03-23 |
+| scripts/prepare_ctx_data.py | Data prep | Converts raw DIA-NN CTX output to master ProSIFT-format files | 2026-03-25 |
+| scripts/generate_run_config.py | Data prep | Interactive tool: define pairwise runs from master files, outputs run_config.yml | 2026-03-25 |
+| scripts/prepare_prosift_input.py | Data prep | Splits master files into per-run input directories using run_config.yml; generates samplesheet.csv | 2026-03-26 |
+| bin/validate_inputs.py | Module 01 | Processes 4.1-4.3: validates abundance matrix, metadata, cross-validates samples; outputs validated Parquets + report part 1 | 2026-03-26 |
+| bin/filter_proteins.py | Module 01 | Process 4.4: detection filter; classifies proteins PASSED/SINGLE-GROUP/SPARSE/ABSENT; outputs filtered Parquet, filter table, report part 2 | 2026-03-26 |
+| bin/uniprot_mapping.py | Module 01 | Processes 4.5-4.9: UniProt bulk ID mapping via paginated JSON results endpoint; MD5-keyed file cache; ortholog columns null (Phase 3); outputs id_mapping.parquet + report part 3 | 2026-03-26 |
 
 ## 7.3 File System Update Instructions
 
@@ -382,11 +570,20 @@ When creating, moving, or deleting files:
 
 **Cluster:** mesx.sdsu.edu (pipeline execution)
 
+*Surveyed via SSH 2026-03-25. All entries below are confirmed unless noted.*
+
 - SSH access: `ssh rhastings@mesx.sdsu.edu` (key-based auth, no password)
-- Home directory: `/usr/scratch2/userdata2/rhastings`
-- Conda: miniconda3 installed at `/home2/rhastings/miniconda3`
-- Job scheduler: Torque/PBS (not SLURM -- confirmed 2026-03-23). Nextflow supports PBS natively via the `pbspro` or `pbs` executor.
-- No git, Nextflow, Singularity, or Apptainer installed on the cluster as of 2026-03-23. These will be installed via conda or other means during setup.
+- OS: Oracle Linux Server 8.10, x86_64
+- Home directory: `/home2/rhastings` (2.5 TB available)
+- Scratch directory: `/usr/scratch2/userdata2/rhastings` (11 TB available)
+- Conda: miniconda3 25.1.1 at `/home2/rhastings/miniconda3`; Python 3.12.9 in base
+- Existing conda envs: `base`, `classes`, `ml_hop` -- no `prosift` env yet
+- Job scheduler: **Torque 6** at `/usr/local/torque6/bin` (on PATH); `pbspro` Nextflow executor is correct
+- Java: not installed system-wide; will be installed via `openjdk=17` in prosift conda env
+- Nextflow: not installed; will be installed via conda
+- R: not installed; will be installed via conda (r-base>=4.3)
+- Singularity/Apptainer: not installed; deferred to later phase
+- Git: not installed on cluster (by design -- rsync workflow, see Section 8.2)
 
 ## 8.2 Development Workflow: Local + Cluster via rsync
 
@@ -433,28 +630,53 @@ rsync -avz rhastings@mesx.sdsu.edu:~/ProSIFT/results/ \
 
 ## 8.3 Environment Setup
 
-**Development environment:** Conda (environment.yml to be created in Phase 1)
+**Development environment:** Conda -- `environment.yml` finalized 2026-03-25. Pin strategy: Python, pandas, numpy, scipy, rpy2, r-base pinned to major version ranges; other packages unpinned. Python=3.12 to match cluster base.
 
 ```bash
+# Create environment (first time)
+conda env create -f environment.yml
+
+# Update existing environment
+conda env update -f environment.yml --prune
+
 # Activate before running any scripts
 conda activate prosift
-
-# Verify environment is active
 ```
 
-**Production environment:** Singularity container (.sif) [See Project Documentation Section 5.2]
+**Key dependencies (finalized -- see environment.yml for exact specs):**
 
-**Key dependencies (preliminary -- finalize during Phase 1):**
+| Package | Purpose | Phase |
+|---|---|---|
+| python=3.12 | Runtime | 1+ |
+| openjdk=17 | Required by Nextflow | 1+ |
+| nextflow | Pipeline orchestration | 1+ |
+| pandas, numpy, pyarrow, pyyaml | Data handling, Parquet intermediates | 1+ |
+| requests, tqdm | UniProt API + progress | 1+ |
+| r-base, rpy2, bioconductor-limma, bioconductor-deqms | Statistical analysis | 2 |
+| scipy, scikit-learn | Statistics, imputation | 2 |
+| gseapy | ORA/GSEA enrichment | 2 |
+| matplotlib, seaborn, plotly | QC/EDA visualization | 2 |
+| pytest, pytest-cov | Testing | 1+ |
 
-- Python 3.11+
-- R (for DEqMS, limma via rpy2)
-- Nextflow
-- pandas, numpy, scipy, scikit-learn
-- pyarrow (Parquet support)
-- matplotlib, seaborn, plotly
-- gseapy
-- rpy2
-- requests (API queries)
+**[FOLLOW-UP NEEDED]** Verify `bioconductor-deqms` installs via bioconda. If not available, fallback is `BiocManager::install("DEqMS")` from within R after env creation.
+
+**Production environment:** Singularity container (.sif) -- deferred. [See Project Documentation Section 5.2]
+
+**Cluster setup sequence (first time):**
+
+```bash
+# 1. Sync project to cluster
+rsync -avz --exclude='.git' --exclude='prosift_inputs/' \
+  --exclude='.nextflow/' --exclude='work/' --exclude='.DS_Store' \
+  "/Users/reina/Library/Mobile Documents/com~apple~CloudDocs/Blanco-Suárez Lab/ProSIFT/" \
+  rhastings@mesx.sdsu.edu:~/ProSIFT/
+
+# 2. On cluster: create prosift environment
+conda env create -f ~/ProSIFT/environment.yml
+
+# 3. Verify Nextflow can find Java
+conda activate prosift && nextflow -version
+```
 
 ## 8.4 GitHub Repository
 

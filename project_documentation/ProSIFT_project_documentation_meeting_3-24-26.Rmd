@@ -10,11 +10,9 @@ output:
     theme: default
 ---
 
-**Last Updated:** 2026-03-23
+**Last Updated:** 2026-03-24
 
 **Working Project Name:** ProSIFT (PROtein Statistical Integration and Filtering Tool)
-
-**Name Status:** Working name; may be revised before publication. Name collision search conducted 2026-03-20 confirmed no existing bioinformatics tool with this name.
 
 **Purpose:** This document is the cumulative, archival record of the ProSIFT project. It contains all background context, architectural decisions, design rationale, development progress, and detailed explanations. It serves as both a development reference and a record of the reasoning behind every major choice.
 
@@ -26,22 +24,7 @@ output:
 
 ProSIFT is a pipeline and interactive exploration platform for discovery proteomics data. Its purpose is to take quantitative protein abundance data, run it through quality control, statistical analysis, functional enrichment, and multi-database annotation, and produce comprehensive "protein profiles" that consolidate all available information about each protein into a single, searchable, sortable resource.
 
-The core problem ProSIFT addresses: researchers conducting discovery proteomics experiments typically identify hundreds to thousands of proteins, many of which are differentially abundant across conditions. Evaluating which of these proteins are biologically interesting requires manually querying multiple databases (UniProt, DisGeNET, DGIdb, PubMed, CTD, etc.), cross-referencing enrichment results, and mentally integrating statistical evidence with biological context. This process is time-consuming, error-prone, and difficult to systematize. ProSIFT automates and integrates these steps into a single pipeline with an interactive frontend for exploration.
-
-## 1.2 Target Users and Use Cases
-
-**Primary audience:** The developer's own lab, working with discovery proteomics datasets. The tool is designed with the possibility of broader community adoption if it proves effective, but generalizability is a secondary concern during initial development.
-
-**Typical use case:** A researcher has a quantitative proteomics dataset (tens of samples, thousands of proteins) from a discovery experiment. They want to:
-
-- Assess data quality (missingness, outliers, replicate concordance)
-- Identify differentially abundant proteins across conditions
-- Run functional enrichment analyses (ORA, GSEA)
-- Query external databases for disease associations, druggability, literature co-occurrence, and general protein annotation
-- Explore results interactively, sorting/filtering proteins by various criteria (fold change, significance, disease relevance, druggability, literature hits)
-- View biological process-level summaries alongside protein-level profiles
-
-## 1.3 Project Scope
+## 1.2 Project Scope
 
 **In scope (current vision):**
 
@@ -73,7 +56,7 @@ The core problem ProSIFT addresses: researchers conducting discovery proteomics 
 - AWS deployment for hosted access
 - Multi-organism support
 
-## 1.4 Existing Tools and Landscape
+## 1.3 Existing Tools and Landscape
 
 *Updated 2026-03-23 based on a survey of proteomics analysis platforms and database resources.*
 
@@ -97,23 +80,7 @@ These tools accept a protein or peptide abundance table and produce differential
 
 **MSstats** deserves separate mention as it is widely used in regulated and clinical proteomics settings. It provides rigorous statistical models for both label-free and labeled experiments and is used in pharmaceutical and clinical research. It is methodologically strong but operates purely at the statistical layer -- no database annotation.
 
-### Category 2: Biological database resources
-
-Individual databases that researchers query manually, one protein at a time or in small batches:
-
-**UniProt** -- the canonical protein database. Provides gene names, function descriptions, subcellular localization, GO annotations, pathway membership, disease associations, and cross-references to other databases. Queried via REST API or bulk download.
-
-**DisGeNET** -- gene-disease association database integrating data from GWAS, animal models, and curated literature. Provides association scores. Heavily human-centric. Requires registration for full API access.
-
-**DGIdb** -- the Drug-Gene Interaction Database. Aggregates drug-gene interactions from over 40 sources into a single queryable resource. Provides druggability annotations, interaction types, and supporting evidence. Available via API and bulk download.
-
-**CTD** -- the Comparative Toxicogenomics Database. Chemical-gene and chemical-disease interactions. Useful for environmental and pharmacological exposure associations. Available via bulk download.
-
-**PubMed (via E-utilities)** -- the biomedical literature. Can be queried programmatically for co-occurrence of a gene symbol with terms of interest, providing a rough measure of how well-studied a protein is in a specific research context.
-
-Each of these databases is valuable individually, but no existing tool queries all of them programmatically for a list of proteins and consolidates the results into a unified, searchable format. A researcher evaluating hundreds of differentially abundant proteins must currently visit each database manually, one protein at a time -- a process that is time-consuming, error-prone, and effectively impossible to do systematically at scale.
-
-### Category 3: Pathway and enrichment tools
+### Category 2: Pathway and enrichment tools
 
 Tools like g:Profiler, Enrichr, DAVID, and STRING accept a gene list and return enrichment results, interaction networks, or functional annotations at the gene set level. They are widely used and complement the statistical tools in Category 1. However, they operate at the aggregate level (which pathways are enriched?) rather than providing per-protein annotation profiles (what do we know about this specific protein's disease associations, druggability, and literature context?).
 
@@ -178,19 +145,16 @@ Two major branching points structure the rest of the pipeline:
 
 ## 2.3 Input Specification
 
-*Updated 2026-03-23 to reflect Phase 1 UniProt-only requirement, add peptide count columns, and note separate-run approach for factorial designs.*
-
-**Primary input (Phase 1):** A protein-level abundance matrix plus a metadata file. For datasets with factorial designs (e.g., multiple brain regions, subcellular fractions, or treatment conditions beyond a simple two-group comparison), the recommended approach is separate ProSIFT runs per comparison context rather than a single combined run. See Decision Register entry 2026-03-23 "Separate Runs for Factorial Designs" for rationale.
+**Primary input (Phase 1):** A protein-level abundance matrix plus a metadata file.
 
 **Abundance matrix:**
 
 - Format: CSV or TSV
 - Rows: proteins (one per row)
-- Columns: one protein ID column, then one column per sample containing abundance values, and optionally per-sample peptide count columns
-- Protein IDs: UniProt accessions required in Phase 1. For protein group data (common in search engine output), the first semicolon-delimited accession is used as the representative ID. Gene symbol and Ensembl ID input may be supported in future phases. See Decision Register entry 2026-03-23 "UniProt Accessions Required for Phase 1."
+- Columns: one protein ID column, then one column per sample containing abundance values
+- Protein IDs: UniProt accessions preferred; gene symbols accepted (will be mapped internally)
 - Abundance values: can be raw intensities, normalized values, or log-transformed values (pipeline configuration specifies the state of the input data)
 - Missing values: represented as NA or empty cells
-- Peptide count columns (optional but recommended): per-sample peptide counts used by DEqMS for variance modeling. If absent, the statistical module falls back to limma. See Module 01 documentation for column naming conventions.
 
 **Metadata file:**
 
@@ -251,9 +215,7 @@ This file follows nf-core conventions where practical, making the pipeline recog
 
 ## 2.6 ID Mapping Strategy
 
-*Updated 2026-03-20 with expanded details on many-to-many handling, ortholog mapping, and mapping table schema. Updated 2026-03-23 to note Phase 1 UniProt-only simplification.*
-
-**Phase 1 simplification:** The pipeline requires UniProt accessions as input in Phase 1 (see Decision Register entry 2026-03-23). This simplifies the ID mapping step since the source IDs are already in UniProt's native format -- the mapping is essentially a cross-reference lookup rather than a translation. Support for gene symbol or Ensembl ID input may be added in a future phase; the architecture supports this without redesign (just adding the corresponding UniProt API "from" type).
+*Updated 2026-03-20 with expanded details on many-to-many handling, ortholog mapping, and mapping table schema.*
 
 Protein ID mapping is handled centrally at the start of each pipeline run using UniProt's ID mapping API. The pipeline queries UniProt once in bulk for all protein IDs in the input dataset and caches the resulting mapping table locally. This mapping table is then used by every downstream module that needs to translate between ID types (e.g., UniProt accessions for database queries, gene symbols for enrichment analysis, Entrez IDs where needed).
 
@@ -539,27 +501,25 @@ The pipeline's final assembly step writes all results into a single SQLite datab
 
 ## 5.1 Cluster Configuration
 
-*Updated 2026-03-25 -- SSH survey of cluster completed. Supersedes 2026-03-23 entry.*
+*Updated 2026-03-23 to reflect confirmed cluster environment (Torque/PBS, not SLURM).*
 
 ProSIFT is designed to run on the mesx.sdsu.edu HPC cluster, which uses Torque/PBS as its job scheduler (not SLURM as originally assumed). Nextflow supports PBS natively via the `pbspro` executor, handling job submission, resource allocation, and dependency management through its configuration system.
 
-**Target cluster details (confirmed 2026-03-25 via SSH survey):**
+**Target cluster details (confirmed 2026-03-23):**
 
 - Host: mesx.sdsu.edu
-- OS: Oracle Linux Server 8.10, x86_64
-- Job scheduler: Torque 6, binaries at `/usr/local/torque6/bin` (on PATH)
-- User home: `/home2/rhastings` (2.5 TB available)
-- Scratch: `/usr/scratch2/userdata2/rhastings` (11 TB available)
-- Conda: miniconda3 25.1.1 at `/home2/rhastings/miniconda3`; Python 3.12.9 in base
-- Java: not installed system-wide (will be installed via `openjdk=17` in prosift conda env)
-- Nextflow: not installed (will be installed via conda)
-- R: not installed (will be installed via conda)
-- Git: not installed (not needed -- rsync workflow; see development workflow in Handoff Section 8.2)
-- Singularity/Apptainer: not installed; deferred to later phase
+- Job scheduler: Torque/PBS (qsub/qstat, not sbatch/squeue)
+- User home: /usr/scratch2/userdata2/rhastings
+- Conda: miniconda3 at /home2/rhastings/miniconda3
+- Git: not installed (not needed on cluster; see development workflow below)
+- Singularity/Apptainer: not installed as of 2026-03-23
+- Nextflow: not installed as of 2026-03-23 (will be installed via conda)
 
 **Nextflow PBS integration:** Each Nextflow process specifies resource requirements (CPUs, memory, time) via process directives or in nextflow.config. Nextflow translates these into PBS qsub directives automatically when the `pbspro` executor is selected. Nextflow monitors job status, handles retries for failed jobs, and manages the work directory where intermediate files are staged.
 
-**Development workflow:** Code is developed locally (macOS) and synced to the cluster via rsync over SSH for execution. Git is used locally only, for tracking meaningful milestones -- not for shuttling changes between machines. See Handoff File Section 8.2 for rsync commands and operational details.
+**Development workflow:** Code is developed locally (macOS) and synced to the cluster via rsync over SSH for execution. Git is used locally only, for tracking meaningful milestones -- not for shuttling changes between machines. This avoids cluttering the git history with small iterative fixes during cluster debugging. See Handoff File Section 8.2 for rsync commands and operational details.
+
+*[Specific nextflow.config executor settings to be documented once implementation begins.]*
 
 ## 5.2 Singularity/Apptainer Container
 
@@ -587,23 +547,9 @@ During development (before the Singularity container is finalized), a Conda envi
 
 ## 5.4 Directory Structure
 
-*Updated 2026-03-26 to reflect the established nf-core-convention directory structure.*
+*[To be defined during Phase 1 implementation. Will include: source code layout, config file location, input/output directory conventions, results directory structure, and the Singularity image location.]*
 
-The project directory follows nf-core conventions:
-
-- `main.nf` -- pipeline entry point
-- `nextflow.config` -- infrastructure config (params defaults, executor profiles, tracing)
-- `conf/base.config` -- per-process resource allocations and error strategy
-- `workflows/prosift.nf` -- top-level workflow (samplesheet parsing, channel wiring, module orchestration)
-- `modules/local/{process_name}/main.nf` -- individual Nextflow process definitions
-- `bin/` -- Python scripts called by Nextflow processes (executable, on PATH during execution)
-- `scripts/` -- data preparation scripts (outside the pipeline, not called by Nextflow)
-- `prosift_inputs/` -- master abundance file, per-run metadata/params, samplesheet (not committed to git)
-- `results/{run_id}/validation/` -- Module 01 published outputs (6 files per run)
-- `results/pipeline_info/` -- Nextflow execution trace, timeline, and report
-- `project_documentation/` -- master doc, handoff, module docs in `modules/` subdirectory
-
-See the Handoff File (Section 7) for the current detailed file system map.
+**[FOLLOW-UP NEEDED]** Restructure project documentation from single file into master overview + module files before implementation begins. Planned structure: `ProSIFT_Project_Overview.Rmd` (architecture, DAG, config, roadmap, decision register, dev log, Claude instructions) plus separate module files for input validation/ID mapping, QC/EDA, normalization/imputation, differential abundance, enrichment, database queries, results assembly/SQLite schema, and frontend design. This keeps the master document concise while allowing module-level detail to grow without making the file unwieldy.
 
 ---
 
@@ -631,7 +577,7 @@ See the Handoff File (Section 7) for the current detailed file system map.
 - Directory structure conventions (aligning with nf-core standards)
 - Channel design for the main pipeline flow
 
-**Status:** In progress. Module 01 (Input Validation & ID Mapping) complete as of 2026-03-26. All three Nextflow processes (VALIDATE_INPUTS, FILTER_PROTEINS, UNIPROT_MAPPING) implemented, wired, and tested end-to-end on CTX benchmark data. Deliverables completed: project directory structure, nextflow.config with PBS/local/conda/singularity profiles, per-run params.yml schema, input validation processes, UniProt ID mapping with bulk API and local cache, Conda environment.yml. Remaining: QC/EDA module, Singularity definition file.
+**Status:** Not yet started.
 
 ## 6.2 Phase 2 -- Statistical Analysis
 
@@ -687,7 +633,6 @@ See the Handoff File (Section 7) for the current detailed file system map.
 The following ideas have been discussed and noted but are explicitly not committed to any phase. They are recorded here so they are not lost.
 
 - **Ingestion modules** for MaxQuant, DIA-NN, FragPipe output formats (Phase 2+)
-- **Input usability simplification** -- current workflow requires 3 preprocessing scripts + samplesheet + per-run params/metadata before pipeline runs. Acceptable for development; not suitable for bench scientists. The usability layer sits entirely outside the pipeline (above the input format contract) and can be rewritten at any point without touching Nextflow files or Python scripts. Options evaluated: merge preprocessing scripts into one, build ingestion into Nextflow itself, auto-detect comparisons from sample names. (Added 2026-03-26)
 - **SQLite compiled database** as backend for frontend queries (Phase 4+)
 - **AWS deployment** for hosted access if the tool gains community adoption
 - **AlphaFold integration** for structure thumbnails in protein profiles
@@ -699,25 +644,14 @@ The following ideas have been discussed and noted but are explicitly not committ
 
 # 7. Testing and Validation
 
-*Updated 2026-03-23 to identify the CTX/Synaptosome dataset as the Phase 1 benchmark.*
+*[To be populated as the tool is developed. Will include:]*
 
-## 7.1 Benchmark Dataset
+- Test datasets: at least one well-characterized dataset where expected results are known (e.g., a published proteomics dataset with validated differentially abundant proteins)
+- Per-module validation approach
+- Benchmarking results
+- Known issues and bugs
 
-**CTX/Synaptosome Proteomics Dataset (Blanco-Suarez Lab, Wistar project 25-L185).** This dataset serves as the primary test case for Phase 1 development. It is well-suited for validation because the developer has deep familiarity with the data, the experimental design, and the expected results from the Wistar core's independent analysis.
-
-**Dataset characteristics:** 8,948 filtered protein groups from DIA-NN v2.2.0 search of mouse cortex and hippocampus (synaptosomes and cytosol fractions), 2x2x2 factorial design (genotype x region x fraction), 24 total samples (n=3 per group), CHRDL1 knockout vs. wild-type. Raw ion intensities with 7.5% overall missingness. Per-sample stripped sequence counts available for DEqMS.
-
-**Test configuration:** Four separate ProSIFT runs, one per region/fraction combination (CTXcyto, CTXsynap, HIPcyto, HIPsynap), each a simple 6-sample KO vs. WT comparison. This tests ProSIFT's two-group design with real data at realistic scale.
-
-**Validation approach:** Compare ProSIFT's differential abundance results (DEqMS, separate-run normalization) against the Wistar core's results (moderated t-test, combined normalization across all 24 samples). The two analyses use different statistical methods and different normalization contexts, so exact agreement is not expected. However, the significant protein lists should show substantial overlap. Large discrepancies warrant investigation. Expected significant protein counts from the core's analysis: CTXcyto ~838, CTXsynap ~526, HIPcyto ~475, HIPsynap ~260.
-
-## 7.2 Per-Module Validation
-
-*[To be populated as modules are implemented.]*
-
-## 7.3 Known Issues and Bugs
-
-*[To be populated during development.]*
+**[FOLLOW-UP NEEDED]** Identify a suitable benchmark dataset for validation during Phase 1.
 
 ---
 
@@ -896,58 +830,6 @@ SQLite's practical advantages for this use case: single portable file (no server
 
 **Impact:** Operational rsync commands are documented in the Handoff File Section 8.2. Git is configured locally only. The cluster has no .git directory.
 
-### 2026-03-23 -- UniProt Accessions Required for Phase 1
-
-**Decision:** The pipeline requires UniProt accessions as protein IDs in Phase 1. The `input.protein_id_type` parameter is dropped. Gene symbol and Ensembl ID input may be supported in future phases.
-
-**Rationale:** Standard proteomics search engines (DIA-NN, MaxQuant, FragPipe, Spectronaut, Proteome Discoverer, PEAKS) almost universally output UniProt accessions because they search against UniProt FASTA databases. Inspection of the CTX/Synaptosome dataset (the Phase 1 benchmark) confirmed this: the Protein Group column contains UniProt accessions, and taking the first semicolon-delimited accession produces 8,948 unique IDs with zero duplicates. Gene symbols, by contrast, had 240 duplicates across 518 rows due to DIA-NN reporting distinguishable isoform groups separately -- making them unsuitable as unique IDs without prior aggregation. The ID mapping architecture supports multiple source types internally, so adding the parameter later requires no redesign.
-
-**Impact:** Simplifies the ID mapping module and input validation. The `input.protein_id_type` parameter is removed from params.yml. See Module 01 documentation for full data analysis supporting this decision.
-
-### 2026-03-23 -- Peptide Counts in Abundance Matrix for DEqMS
-
-**Decision:** Per-sample peptide count columns are included in the abundance matrix file, identified by a configurable column name prefix. They are optional: if absent, the statistical module falls back to limma.
-
-**Rationale:** DEqMS, ProSIFT's preferred differential abundance method, requires peptide counts to model the relationship between measurement precision and the number of quantifying peptides. The CTX/Synaptosome dataset includes per-sample stripped sequence counts (24 columns), confirming this data is available in typical search engine output. Including them in the same file as abundances (rather than a separate file) keeps the input contract simple: one abundance matrix, one metadata file.
-
-**Impact:** Input specification (Section 2.3) updated. New params.yml fields: `input.abundance_prefix`, `input.peptide_count_prefix`. The statistical module (Phase 2) will consume these columns.
-
-### 2026-03-23 -- Per-Run Detection Filter in Validation Module
-
-**Decision:** The input validation module includes a configurable detection filter that removes proteins with insufficient detection in the run's samples. Default threshold: detected in at least 2/3 replicates in at least one group.
-
-**Rationale:** When users subset a globally-filtered dataset for a focused comparison (e.g., one brain region from a multi-region experiment), some proteins pass the global filter only because they were detected in conditions not included in the subset. In the CTX/Synaptosome dataset, subsetting to 6-sample runs produces 114-322 completely absent proteins per run (1.3-3.6%). Without filtering, these would be entirely imputed, producing artificial fold changes driven by the imputation method rather than measured data. The filter runs after cross-validation (needs group assignments) but before normalization (to prevent uninformative proteins from influencing the reference distribution).
-
-**Impact:** New process in the Module 01 workflow. New param: `qc.min_detections_per_group` (default 2). See Module 01 documentation for full specification.
-
-### 2026-03-23 -- Separate Runs for Factorial Designs
-
-**Decision:** For datasets with factorial designs (multiple regions, fractions, or conditions beyond a simple two-group comparison), the recommended approach is separate ProSIFT runs per comparison context. For the CTX/Synaptosome benchmark, this means 4 runs (CTXcyto, CTXsynap, HIPcyto, HIPsynap), each a 6-sample KO vs. WT comparison.
-
-**Rationale:** Separate runs avoid cross-group normalization artifacts (forcing biologically distinct fractions onto the same reference distribution), biologically inappropriate imputation (using cytosol abundance to estimate missing synaptosome values), and homoscedasticity violations in the combined variance model. The statistical cost is reduced degrees of freedom (4 residual df vs. 16 in a combined model), but this is substantially mitigated by the empirical Bayes framework in DEqMS/limma, which borrows information across thousands of proteins. The Wistar core's combined-analysis results serve as a comparison baseline. See Module 01 documentation for the full statistical tradeoff analysis.
-
-**Impact:** The CTX benchmark is prepared as 4 separate runs. ProSIFT's current two-group design is sufficient for Phase 1. Multi-group model support (contrast extraction from multi-level designs) is noted as a future enhancement.
-
-### 2026-03-26 -- UniProt Mapping: Accept Per-Run Redundancy (No Shared Cache or Pre-Fork)
-
-**Decision:** Each run queries UniProt independently, even when multiple runs share the same (or nearly identical) protein lists. No shared cache, no pre-fork mapping step, no file locking.
-
-**Rationale:** Four approaches were evaluated: (1) accept redundancy (each run queries independently), (2) pull ID mapping before the per-run fork (one API call, distribute via `.combine()`), (3) file-based locking (shared cache with lock files), (4) simple Python-level cache (no locks, accept occasional duplicate queries). Option 1 was selected because UniProt's bulk API handles thousands of IDs in 10-30 seconds, making 12 redundant calls a total cost of 2-4 minutes -- negligible in a pipeline that will eventually include enrichment analysis and five database queries per protein. The architectural complexity of Options 2-4 (pre-fork bottleneck, race conditions, shared mutable state outside Nextflow's tracking) is not justified at this scale. If the number of runs or the API latency ever grows enough to matter, upgrading to Option 4 (add a cache check to the Python script) requires no Nextflow changes.
-
-**Note:** Claude Code did implement a per-run file cache that speeds up re-runs of the same run (e.g., during `-resume` or debugging). This is not the shared cross-run cache that was rejected -- each run maintains its own cache keyed by its own protein list. This is a pragmatic local optimization, not an architectural change.
-
-**Alternatives considered:** See rationale above for all four options.
-
-**Impact:** Pipeline architecture stays as designed. All runs are self-contained and independent.
-
-### 2026-03-26 -- Ortholog Mapping Deferred to Phase 3
-
-**Decision:** The ID mapping table includes `human_ortholog_symbol`, `human_ortholog_entrez`, and `ortholog_mapping_status` columns, but they are set to null in Phase 1. Ortholog mapping will be implemented in Phase 3 when the database query modules (DGIdb, DisGeNET) that consume ortholog information are built.
-
-**Rationale:** The ortholog columns are not consumed by any Phase 1 or Phase 2 module. The ortholog mapping resource (Ensembl BioMart vs. JAX MGI) is still an open design question (see Section 2.6). Implementing ortholog mapping now would require resolving that question and building/testing the mapping layer without any way to validate it end-to-end (since the databases that use the orthologs don't exist yet). Deferring means the mapping table schema is forward-compatible (columns exist, downstream modules can expect them) without premature implementation.
-
-**Impact:** Proteins with no human ortholog data will have null ortholog columns. This is expected and documented. The detection filter report and QC module do not use ortholog information. Phase 3 will populate these columns and implement the database query gating rule (DGIdb and DisGeNET query only proteins with non-null human_ortholog_symbol).
-
 ---
 
 # 10. Development Log
@@ -1016,30 +898,6 @@ Updated configuration schema documentation to reflect Nextflow's dual configurat
 
 **Next steps identified:** Continue design phase with unsolidified decisions: finalize YAML params schema, input validation specification, QC/EDA module details, normalization/imputation specification, differential abundance specification, enrichment specification, database integration specification, results directory structure, frontend specification, and project directory layout.
 
-### 2026-03-23 -- Input Validation Module Design: CTX Dataset Inspection and Data Preparation Planning
-
-**Work performed:** Detailed design of Module 01 (Input Validation & ID Mapping) driven by inspection of the actual CTX/Synaptosome benchmark dataset (Filtered Proteins-Table 1.csv, 8,948 proteins, 178 columns from DIA-NN output). Inspected the Protein Group column format (semicolon-delimited UniProt accessions, 90.1% single accession, 9.9% multi-member groups), the Genes column (240 duplicate gene symbols across 518 rows due to isoform-level protein groups), and per-run missingness patterns when subsetting to 6-sample region/fraction runs.
-
-Analyzed statistical tradeoffs of separate vs. combined runs for the 2x2x2 factorial design, covering normalization, imputation, differential abundance (degrees of freedom vs. homoscedasticity), and enrichment analysis. Decided on 4 separate runs.
-
-Designed two-script data preparation architecture: `generate_run_config.py` (interactive setup tool) and `prepare_prosift_input.py` (extraction workhorse). Specified the interactive walkthrough, YAML run definition format, output file conventions, and draft params.yml generation.
-
-Refined the params.yml schema: dropped `input.protein_id_type` (hardcoded UniProt for Phase 1), retained `input.abundance_type`, added `input.abundance_prefix`, `input.peptide_count_prefix`, and `qc.min_detections_per_group`.
-
-**Outputs:** Updated Module 01 documentation (01_input_validation.Rmd, expanded from 270 to 757 lines). Updated master project documentation (this file).
-
-**Key findings:** Real data inspection revealed design considerations not apparent from the abstract specification. The gene symbol duplicate problem (5.8% of proteins) would have caused a hard validation failure if gene symbols had been chosen as the default ID type. The per-run missingness analysis (1.9-4.7% of proteins would be uninformative per run) motivated the detection filter. The statistical tradeoff analysis confirmed that separate runs are defensible despite the power cost.
-
-**Decisions made:** See Decision Register entries dated 2026-03-23 (UniProt required, peptide counts, detection filter, separate runs).
-
-**Next steps identified:**
-
-- Code the two data preparation scripts (`generate_run_config.py`, `prepare_prosift_input.py`)
-- Run the scripts on the CTX dataset to produce the 4 sets of ProSIFT input files
-- Regenerate the Module 01 workflow diagram SVG to include the detection filter step
-- Update the master doc's params.yml schema draft (Section 2.5) once the module 01 parameters are confirmed through implementation
-- Begin Phase 1 implementation: project directory structure, Nextflow skeleton, input validation processes
-
 ### 2026-03-23 -- Data Preparation Scripts Implemented
 
 **Work performed:** Implemented three data preparation scripts that convert raw search engine output into ProSIFT-format input files. These scripts are not part of the ProSIFT pipeline itself -- they are preprocessing tools that bridge the gap between search engine output and ProSIFT's expected input format. See Module 01 documentation (Section 9) for the design rationale.
@@ -1075,45 +933,6 @@ Refined the params.yml schema: dropped `input.protein_id_type` (hardcoded UniPro
 **Decisions made:** Missingness classification deferred from Module 02 to Module 03 (see Module 02 design decision and change history entries dated 2026-03-23).
 
 **Next steps identified:** Continue QC module design (outlier detection method). Continue working through remaining unresolved design questions for Modules 02-08.
-
-### 2026-03-25 -- Nextflow Skeleton; Environment Finalized; Cluster Survey
-
-**Work performed:** Three infrastructure tasks completed before beginning Module 01 implementation.
-
-**Nextflow skeleton:** Created nf-core-convention directory structure: `main.nf` (entry point), `nextflow.config` (infrastructure config with local/pbs/conda/singularity profiles and resource params), `conf/base.config` (per-process resource defaults with OOM retry strategy), `workflows/prosift.nf` (top-level PROSIFT workflow stub), three process stubs in `modules/local/` (VALIDATE_INPUTS, FILTER_PROTEINS, UNIPROT_MAPPING), and empty `bin/` directory for Python logic. All module includes and workflow bodies are commented out; they will be uncommented as processes are implemented.
-
-**Environment finalized:** `environment.yml` updated with complete dependency list: rpy2, r-base>=4.3, bioconductor-limma, bioconductor-deqms, gseapy, tqdm added; pandas, numpy, scipy, rpy2, r-base pinned to major version ranges for reproducibility; Python updated from 3.11 to 3.12 to match cluster base. `pytest-cov` added.
-
-**Cluster survey:** SSH inspection of mesx.sdsu.edu confirmed: Oracle Linux 8.10, x86_64; conda 25.1.1; Python 3.12.9 in base; Torque 6 binaries at `/usr/local/torque6/bin` (on PATH -- `pbspro` executor confirmed correct); Java/Nextflow/R/Singularity not installed (all to be installed via conda env). Corrected home directory to `/home2/rhastings` (2.5 TB); scratch is `/usr/scratch2/userdata2/rhastings` (11 TB).
-
-**Parameter rename:** Renamed `qc.min_detection_fraction` (float, 0.67) to `qc.min_detections_per_group` (integer, 2) to eliminate a floating-point edge case where `2/3 = 0.6667 < 0.67` causes the "at least 2 of 3" threshold to fail. Updated all 12 per-run params.yml files, `prepare_prosift_input.py`, Module 01 documentation (filter logic, parameter table, report format, category definitions, decision register), and this document. New decision register entry added in Module 01 doc.
-
-**Outputs:** `main.nf`, `nextflow.config`, `conf/base.config`, `workflows/prosift.nf`, `modules/local/{validate_inputs,filter_proteins,uniprot_mapping}/main.nf`, `bin/`, `environment.yml` (updated), 12 `prosift_inputs/**/*_params.yml` (updated), `project_documentation/modules/01_input_validation.Rmd` (updated).
-
-**Next steps identified:** Create `prosift` conda environment locally and on the cluster. Begin Module 01 implementation: `bin/validate_inputs.py`, `bin/filter_proteins.py`, wire up Nextflow process files.
-
-### 2026-03-26 -- Module 01 Complete: All Processes Implemented and Tested
-
-**Work performed:** Module 01 (Input Validation & ID Mapping) fully implemented, wired into Nextflow, and tested end-to-end on CTX benchmark data.
-
-**Implementation summary:**
-
-- `bin/validate_inputs.py` (Processes 4.1-4.3): validates abundance matrix structure, validates metadata structure, cross-validates sample IDs between the two files. Reads master abundance CSV (all 24 samples), subsets to the 6 samples in the per-run metadata, writes validated Parquet intermediates and Part 1 validation report.
-- `bin/filter_proteins.py` (Process 4.4): computes per-group detection rates, classifies proteins as PASSED/SINGLE-GROUP/SPARSE/ABSENT, removes proteins below the `min_detections_per_group` threshold. Writes filtered matrix Parquet, detection filter table CSV, and Part 2 validation report with category definitions and missingness overview.
-- `bin/uniprot_mapping.py` (Processes 4.5-4.9): queries UniProt bulk ID mapping API (paginated JSON endpoint, 500 results/page), extracts gene symbol, Entrez ID, and Ensembl ID from nested JSON response. Handles isoform collapse (Q8C8R3-3 to canonical Q8C8R3), accession redirects (secondary/merged accessions), and unmapped IDs. Writes mapping table Parquet and Part 3 validation report. Implements per-run file cache (MD5-keyed, configurable expiry).
-- Nextflow wiring: samplesheet-based input (12 runs processed in parallel from a single pipeline invocation), `multiMap` channel forking to distribute params files to multiple processes, `.join()` operations to reassemble per-run tuples. All three process modules (`VALIDATE_INPUTS`, `FILTER_PROTEINS`, `UNIPROT_MAPPING`) connected and functional.
-
-**Test results (CTXcyto run):** 8,948 input proteins, 8,779 retained after detection filter (169 removed: 114 absent, 55 sparse), 8,403 proteins submitted to UniProt after further filtering, 94.9% mapped directly, 5.1% isoform-collapsed, 0.1% accession-redirected, 0% unmapped. Gene symbol coverage 99.8%, Entrez ID 96.4%, Ensembl gene 96.6%. Full pipeline (all 3 processes) completed successfully via `nextflow run main.nf -profile local,conda`. Six output files per run published to `results/{run_id}/validation/`.
-
-**Architecture decisions made:**
-
-- UniProt mapping: accept per-run redundancy (Option 1). Each run queries independently. Simplest architecture, negligible API cost at this scale. (See Decision Register entry 2026-03-26.)
-- Ortholog mapping: deferred to Phase 3. Mapping table columns present but null. (See Decision Register entry 2026-03-26.)
-- Usability assessment: current input workflow (3 preprocessing scripts + samplesheet) acceptable for development but not for bench scientists. The usability layer sits outside the pipeline and can be rewritten without architectural changes. Added to deferred considerations (Section 6.5).
-
-**Outputs:** `bin/validate_inputs.py`, `bin/filter_proteins.py`, `bin/uniprot_mapping.py`, functional `modules/local/*/main.nf` (3 files), wired `workflows/prosift.nf`, `prosift_inputs/samplesheet.csv`, `results/{run_id}/validation/` (6 files per run).
-
-**Next steps identified:** Design and implement Module 02 (QC/EDA).
 
 ---
 

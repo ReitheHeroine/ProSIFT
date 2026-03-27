@@ -1,0 +1,98 @@
+---
+title: "ProSIFT Module 03: Normalization & Imputation"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: default
+---
+
+**Last Updated:** 2026-03-23
+**Module Status:** Stub -- not yet designed
+**Pipeline Position:** [Input validation & ID mapping] --> **Normalization & Imputation** --> [Differential abundance]
+
+---
+
+# 1. Purpose and Scope
+
+This module normalizes the abundance data and imputes missing values, preparing the data for differential abundance analysis. Normalization corrects for systematic technical biases between samples. Imputation addresses missing values, which in proteomics are predominantly missing not at random (MNAR) due to detection limits.
+
+A sensitivity analysis option compares results across multiple imputation methods to assess how robust downstream findings are to the imputation choice.
+
+**[FOLLOW-UP NEEDED]** Full design of this module is pending. Normalization methods, imputation methods, sensitivity analysis design, and process specifications need to be defined.
+
+---
+
+# 2. Inputs and Outputs
+
+## 2.1 Inputs
+
+- Validated abundance matrix (Parquet, from Module 01)
+- Validated metadata (Parquet, from Module 01)
+
+## 2.2 Outputs
+
+- Normalized, imputed abundance matrix (Parquet)
+- Imputation report: which values were imputed, by which method
+- Sensitivity analysis results (if enabled): comparison of downstream statistics across imputation methods
+
+---
+
+# 3. Sub-Workflow Diagram
+
+*[To be designed.]*
+
+---
+
+# 4. Process Specifications
+
+*[To be designed. Will cover:]*
+
+- Normalization method options (median, quantile, vsn, none)
+- Log transformation logic
+- Imputation method options (MinProb, KNN, left-censored)
+- Sensitivity analysis design
+
+---
+
+# 5. Design Decisions
+
+*[No module-specific decisions recorded yet.]*
+
+---
+
+# 6. Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `normalization.method` | string | "median" | median, quantile, vsn, or none |
+| `normalization.log_transform` | bool | true | Apply log2 if abundance_type is "raw" |
+| `imputation.method` | string | "minprob" | minprob, knn, left_censored, or none |
+| `imputation.minprob_quantile` | float | 0.01 | For minprob: quantile of observed distribution |
+| `imputation.knn_neighbors` | int | 5 | For KNN: number of neighbors |
+| `imputation.sensitivity_analysis` | bool | true | Run all methods and compare |
+
+---
+
+# 7. Known Limitations and Edge Cases
+
+- All imputation methods make assumptions about the missing data mechanism. MNAR-aware methods (MinProb, left-censored) assume that missing values correspond to low-abundance proteins, which is generally but not always true in MS proteomics.
+- Imputation method choice can materially affect differential abundance results.
+
+---
+
+# 8. Testing Notes
+
+*[To be populated during implementation.]*
+
+---
+
+# 9. Change History
+
+### 2026-03-23 -- Initial Stub
+
+**Change:** Module file created as a stub during documentation restructuring.
+**Reason:** Module design has not yet been conducted. Parameters and limitations captured from earlier discussions.
+**Affected processes:** N/A.
+**Downstream effects:** N/A.

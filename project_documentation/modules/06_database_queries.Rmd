@@ -1,0 +1,180 @@
+---
+title: "ProSIFT Module 06: Database Queries"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: default
+---
+
+**Last Updated:** 2026-03-23
+**Module Status:** Design in progress
+**Pipeline Position:** [Differential abundance] --> **Database queries** --> [Results assembly]
+
+---
+
+# 1. Purpose and Scope
+
+This module queries five external databases for each protein of interest, retrieving disease associations, druggability information, chemical interactions, literature co-occurrence data, and general protein annotations. Queries are parallelized across proteins and across databases. Results are cached locally to avoid redundant API calls across pipeline runs.
+
+The database query gating rule (from master overview Decision Register, 2026-03-21): UniProt, PubMed, and CTD query all proteins regardless of ortholog status. DGIdb and DisGeNET query only proteins with a human ortholog.
+
+---
+
+# 2. Inputs and Outputs
+
+## 2.1 Inputs
+
+- Significant protein list or all protein IDs (channel from Module 04, depending on `databases.query_scope`)
+- ID mapping table (Parquet, from Module 01) -- for gene symbols, Entrez IDs, and ortholog information
+
+## 2.2 Outputs
+
+- Per-database cached response files (JSON, in cache directory)
+- Consolidated database results (passed to Module 07 for SQLite assembly)
+
+---
+
+# 3. Sub-Workflow Diagram
+
+**[FOLLOW-UP NEEDED]** Design sub-workflow diagram showing the five parallel query paths, the ortholog gating check, caching logic, and error handling.
+
+---
+
+# 4. Process Specifications
+
+## 4.1 General Architecture
+
+Individual database responses are cached locally as JSON files during pipeline execution. At the results assembly step (Module 07), all cached results are consolidated and written into the SQLite results database. Two access strategies are used:
+
+- **Bulk local download:** For databases with stable, periodic releases (UniProt, CTD, DGIdb). Faster, more reliable, not subject to rate limits.
+- **API queries:** For databases where recency matters (PubMed E-utilities) or where bulk download is impractical (DisGeNET). Per-protein API calls with caching and rate limiting.
+
+**Caching strategy:** All API responses are cached locally (keyed by protein ID and query parameters). Cache invalidation is time-based (configurable via `databases.cache_days`, default 30 days).
+
+**Error handling:** API failures (timeouts, rate limit hits, server errors) are logged and retried with exponential backoff. Proteins for which a database query fails are flagged in the output rather than causing the pipeline to halt.
+
+**API keys:** Stored as environment variables, never in params.yml. The params file specifies the environment variable names via `databases.api_keys`.
+
+## 4.2 UniProt
+
+**What it provides:** Gene name, protein name, function description, subcellular location, tissue expression, GO annotations, pathway membership, protein-protein interactions, disease associations, cross-references.
+
+**Access method:** UniProt REST API for ID mapping (handled in Module 01); bulk download (Swiss-Prot XML or flat files) for annotation retrieval.
+
+**Rate limits:** Generous but should not be abused. Bulk download preferred.
+
+**Data freshness:** Updated approximately every 8 weeks. Local copies should be updated periodically.
+
+**Query scope:** All proteins.
+
+**Priority:** High -- foundational annotation source. Implemented first.
+
+## 4.3 PubMed E-utilities
+
+**What it provides:** Literature co-occurrence counts. For each protein, queries PubMed for the co-occurrence of the protein gene symbol with user-defined terms of interest (specified in `databases.pubmed.search_terms`). Supports compound queries (e.g., "ketamine AND TBI").
+
+**Access method:** NCBI E-utilities API (ESearch endpoint). Requires API key for higher rate limits.
+
+**Rate limits:** 3 requests/second without API key; 10 requests/second with key. For thousands of proteins and multiple search terms, this is a bottleneck. Parallelization within rate limits and caching are essential.
+
+**Data freshness:** High value in recency. API queries are the correct approach (not bulk download).
+
+**Normalization:** Raw co-occurrence counts are biased by how well-studied a protein is overall. Normalization options: pointwise mutual information (PMI), ratio (co-occurrence / total protein publications), or both. Configurable via `databases.pubmed.normalization`.
+
+**Query scope:** All proteins. Uses both mouse gene symbol and human ortholog symbol where available.
+
+**[FOLLOW-UP NEEDED]** Select and validate a normalization approach for PubMed co-occurrence scores.
+
+**Priority:** High -- unique value not provided by other databases.
+
+## 4.4 DisGeNET
+
+**What it provides:** Gene-disease associations with association scores.
+
+**Access method:** DisGeNET REST API. Requires registration for full access.
+
+**Rate limits:** Public API is restricted. Full academic access requires registration and API key.
+
+**Data freshness:** Updated periodically. Local caching with periodic refresh appropriate.
+
+**Licensing note:** DisGeNET has specific licensing terms for academic and commercial use. Terms should be reviewed before distribution.
+
+**Query scope:** Only proteins with a human ortholog. Queried using human ortholog identifiers.
+
+**Priority:** High.
+
+## 4.5 DGIdb (Drug Gene Interaction Database)
+
+**What it provides:** Druggability annotations -- whether a protein is a known drug target, what drugs interact with it, interaction types.
+
+**Access method:** DGIdb API or bulk data download.
+
+**Rate limits:** Generally permissive.
+
+**Data freshness:** Updated periodically. Bulk download appropriate.
+
+**Query scope:** Only proteins with a human ortholog. Queried using human ortholog identifiers.
+
+**Priority:** High.
+
+## 4.6 CTD (Comparative Toxicogenomics Database)
+
+**What it provides:** Chemical-gene interactions and chemical-disease associations.
+
+**Access method:** Bulk data download (CTD provides downloadable datasets).
+
+**Rate limits:** Not applicable for bulk download.
+
+**Data freshness:** Updated monthly. Periodic re-download appropriate.
+
+**Query scope:** All proteins.
+
+**Priority:** Medium.
+
+---
+
+# 5. Design Decisions
+
+*[No module-specific decisions beyond the ortholog gating rule recorded in the master overview Decision Register (2026-03-21).]*
+
+---
+
+# 6. Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `databases.enabled` | list | [uniprot, pubmed, disgenet, dgidb, ctd] | Which databases to query |
+| `databases.query_scope` | string | "significant" | Query significant proteins only, or all |
+| `databases.cache_days` | int | 30 | Cache lifetime in days |
+| `databases.pubmed.search_terms` | list | (required) | PubMed search terms |
+| `databases.pubmed.normalization` | string | "pmi" | pmi, ratio, or both |
+| `databases.api_keys.pubmed` | string | "NCBI_API_KEY" | Env var name for PubMed API key |
+| `databases.api_keys.disgenet` | string | "DISGENET_API_KEY" | Env var name for DisGeNET API key |
+
+---
+
+# 7. Known Limitations and Edge Cases
+
+- External database dependencies mean results depend on the completeness and accuracy of third-party resources. Well-studied proteins will have richer profiles than understudied ones.
+- PubMed co-occurrence is not causation -- it measures research attention, not biological relevance.
+- DisGeNET licensing may restrict redistribution of results. Review terms before sharing output.
+- API rate limits (especially PubMed and DisGeNET) constrain throughput. Querying thousands of proteins across multiple terms takes time.
+
+---
+
+# 8. Testing Notes
+
+*[To be populated during implementation.]*
+
+---
+
+# 9. Change History
+
+### 2026-03-23 -- Initial Design
+
+**Change:** Module documentation created from content previously in Section 4 of the monolithic project documentation.
+**Reason:** Documentation restructured into master overview + module files.
+**Affected processes:** All (initial design capture).
+**Downstream effects:** None.

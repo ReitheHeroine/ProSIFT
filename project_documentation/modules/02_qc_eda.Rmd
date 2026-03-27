@@ -1,0 +1,117 @@
+---
+title: "ProSIFT Module 02: QC / EDA"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: default
+---
+
+**Last Updated:** 2026-03-23
+**Module Status:** Design in progress
+**Pipeline Position:** [Input validation & ID mapping] --> **QC / EDA** --> [QC report + flags --> Results assembly]
+
+---
+
+# 1. Purpose and Scope
+
+This module assesses data quality, identifies problematic samples or proteins, characterizes distributional properties, and produces diagnostic visualizations. It runs on the validated but un-normalized data (intentionally -- raw distributional properties need to be assessed before transformation). Its outputs are a QC report and a set of per-protein and per-sample flags that are carried through the pipeline and incorporated into protein profiles at the assembly stage.
+
+This module does not modify the data. It observes and flags. Decisions about excluding samples or proteins are left to the user.
+
+See master overview (Section 2.2, first fork) for how this module branches off the main analytical path.
+
+---
+
+# 2. Inputs and Outputs
+
+## 2.1 Inputs
+
+- Validated abundance matrix (Parquet, from Module 01)
+- Validated metadata (Parquet, from Module 01)
+- ID mapping table (Parquet, from Module 01)
+
+## 2.2 Outputs
+
+- QC report (HTML with interactive plots)
+- QC summary table (Parquet + CSV): per-protein flags for missingness, CV, outlier status
+- Flagged samples list: samples identified as potential outliers
+- PCA coordinates (Parquet): for downstream use or re-plotting
+- Sample correlation matrix (Parquet)
+
+---
+
+# 3. Sub-Workflow Diagram
+
+**[FOLLOW-UP NEEDED]** Design sub-workflow diagram for QC/EDA module.
+
+---
+
+# 4. Process Specifications
+
+## 4.1 Missingness Analysis
+
+Per-protein and per-sample missing value counts and percentages. Distinguish between structured missingness (patterned by condition, which may be biologically meaningful) and sporadic missingness (data quality issue). This distinction matters because proteomics missing data is overwhelmingly "missing not at random" (MNAR) -- low-abundance proteins drop below the detection limit. A protein absent in treatment but present in control is potentially interesting biology, not a QC failure.
+
+**[FOLLOW-UP NEEDED]** Define specific criteria for classifying structured vs. sporadic missingness.
+
+## 4.2 Replicate Variability
+
+Coefficient of variation (CV) distributions within groups. Flag proteins with unusually high CVs. Output includes per-protein CV values and a distribution plot.
+
+## 4.3 Sample-Level QC
+
+Sample-to-sample correlation heatmap, PCA to check for clustering by condition, batch, or unexpected groupings. Flag samples that are clear outliers.
+
+**[FOLLOW-UP NEEDED]** Define the outlier detection method (PCA distance-based, correlation-based, or both).
+
+## 4.4 Distributional Assessment
+
+Distribution shapes of abundance values, assessment of whether transformation (log2, etc.) is needed, comparison across samples/conditions.
+
+## 4.5 QC Report Assembly
+
+Compile all analyses into a single HTML report with interactive Plotly plots.
+
+---
+
+# 5. Design Decisions
+
+*[No module-specific decisions recorded yet.]*
+
+---
+
+# 6. Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `qc.missingness_threshold` | float | 0.5 | Flag proteins missing in > fraction (per group) |
+| `qc.cv_threshold` | float | 0.5 | Flag proteins with CV > this (per group) |
+| `qc.min_samples_per_group` | int | 2 | Min non-missing samples per group to retain |
+| `qc.pca_components` | int | 5 | Number of PCA components to compute |
+| `qc.detect_outlier_samples` | bool | true | Run sample-level outlier detection |
+
+---
+
+# 7. Known Limitations and Edge Cases
+
+- Automated outlier detection is advisory, not prescriptive -- the tool flags potential issues but does not automatically exclude samples or proteins without user confirmation.
+- Missingness classification (structured vs. sporadic) is heuristic; edge cases exist where the distinction is ambiguous.
+
+---
+
+# 8. Testing Notes
+
+*[To be populated during implementation.]*
+
+---
+
+# 9. Change History
+
+### 2026-03-23 -- Initial Design
+
+**Change:** Module documentation created from content previously in Section 3.1 of the monolithic project documentation.
+**Reason:** Documentation restructured into master overview + module files.
+**Affected processes:** All (initial design capture).
+**Downstream effects:** None.

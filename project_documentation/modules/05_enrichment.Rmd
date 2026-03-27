@@ -1,0 +1,110 @@
+---
+title: "ProSIFT Module 05: Enrichment Analysis"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: default
+---
+
+**Last Updated:** 2026-03-23
+**Module Status:** Design in progress
+**Pipeline Position:** [Differential abundance] --> **Enrichment analysis** --> [Results assembly]
+
+---
+
+# 1. Purpose and Scope
+
+This module identifies biological pathways, processes, and functional categories that are overrepresented among differentially abundant proteins (ORA) or show coordinated changes across the ranked protein list (GSEA). Both analyses are run because they answer complementary questions: ORA tests whether significant proteins are enriched for a function (dependent on a significance cutoff), while GSEA detects coordinated changes using the full ranked list (no cutoff needed).
+
+---
+
+# 2. Inputs and Outputs
+
+## 2.1 Inputs
+
+- Differential abundance results table (Parquet, from Module 04)
+- ID mapping table (Parquet, from Module 01) -- for gene symbol lookup
+- Significant protein list (from Module 04, for ORA)
+- Full ranked protein list (from Module 04, for GSEA)
+
+## 2.2 Outputs
+
+- Enrichment results tables (Parquet + CSV): one table for ORA, one for GSEA
+- Enrichment dot plots (PNG + interactive HTML)
+- GSEA running enrichment score plots (PNG + interactive HTML)
+- Protein-term mapping table (Parquet): which proteins belong to which terms, for the biological process view
+
+---
+
+# 3. Sub-Workflow Diagram
+
+*[Likely not needed -- ORA and GSEA are two parallel runs against the same gene set libraries, with no complex internal dependencies.]*
+
+---
+
+# 4. Process Specifications
+
+## 4.1 Overrepresentation Analysis (ORA)
+
+Tests whether significantly differential proteins are enriched for specific functional categories compared to a background set.
+
+**Tool:** gseapy (Python wrapper).
+
+**Background set:** By default, all proteins detected in the dataset (not the entire proteome), since the set of detectable proteins is already biased by the experimental method. Configurable via `enrichment.background`.
+
+## 4.2 Gene Set Enrichment Analysis (GSEA)
+
+Uses the full ranked protein list to detect coordinated changes in gene sets.
+
+**Tool:** gseapy.
+
+**Ranking metric:** Configurable via `enrichment.gsea_ranking`. Options: `signed_log10p` (sign of fold change times negative log10 p-value, weights both magnitude and significance) or `log2fc` (fold change only, simpler but ignores statistical confidence).
+
+## 4.3 Gene Set Libraries
+
+Default set includes GO Biological Process, GO Molecular Function, GO Cellular Component, KEGG pathways, and Reactome pathways. Mouse-specific annotations are used where available. Additional libraries configurable via params.yml.
+
+---
+
+# 5. Design Decisions
+
+*[No module-specific decisions beyond those captured in the master overview.]*
+
+---
+
+# 6. Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `enrichment.run_ora` | bool | true | Run ORA |
+| `enrichment.run_gsea` | bool | true | Run GSEA |
+| `enrichment.gene_set_libraries` | list | [GO_BP, GO_MF, GO_CC, KEGG, Reactome] | Libraries to test |
+| `enrichment.background` | string | "detected" | Background: detected or genome |
+| `enrichment.gsea_ranking` | string | "signed_log10p" | Ranking metric: signed_log10p or log2fc |
+
+---
+
+# 7. Known Limitations and Edge Cases
+
+- Enrichment results are sensitive to the background set definition and to the quality of gene set annotations.
+- GO annotations are biased toward well-studied organisms and proteins. Mouse annotations are less comprehensive than human.
+- Results should be interpreted as hypothesis-generating, not confirmatory.
+
+---
+
+# 8. Testing Notes
+
+*[To be populated during implementation.]*
+
+---
+
+# 9. Change History
+
+### 2026-03-23 -- Initial Design
+
+**Change:** Module documentation created from content previously in Section 3.3 of the monolithic project documentation.
+**Reason:** Documentation restructured into master overview + module files.
+**Affected processes:** All (initial design capture).
+**Downstream effects:** None.
