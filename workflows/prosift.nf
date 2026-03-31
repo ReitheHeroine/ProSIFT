@@ -16,6 +16,13 @@ include { MISSINGNESS_REPORT } from '../modules/local/missingness_report/main'
 // Module 02: Pre-Normalization QC/EDA
 include { PRENORM_QC         } from '../modules/local/prenorm_qc/main'
 
+// Module 03: Normalization & Imputation
+include { NORMALIZE          } from '../modules/local/normalize/main'
+include { IMPUTE             } from '../modules/local/impute/main'
+
+// Module 04: Differential Abundance
+include { DIFFERENTIAL_ABUNDANCE } from '../modules/local/differential_abundance/main'
+
 workflow PROSIFT {
 
     // --- Build per-run input channel from samplesheet ---
@@ -28,10 +35,12 @@ workflow PROSIFT {
     // in DSL2 and do not need multiMap even with multiple downstream subscribers.
     //
     // Branches:
-    //   validate       -> VALIDATE_INPUTS
-    //   filter_params  -> FILTER_PROTEINS (joined after validation)
-    //   map_params     -> UNIPROT_MAPPING (joined after detection filter)
-    //   prenorm_params -> PRENORM_QC (joined after ID mapping)
+    //   validate          -> VALIDATE_INPUTS
+    //   filter_params     -> FILTER_PROTEINS (joined after validation)
+    //   map_params        -> UNIPROT_MAPPING (joined after detection filter)
+    //   prenorm_params    -> PRENORM_QC (joined after ID mapping)
+    //   normalize_params  -> NORMALIZE (joined after QC)
+    //   impute_params     -> IMPUTE (joined after NORMALIZE)
     Channel
         .fromPath(params.samplesheet, checkIfExists: true)
         .splitCsv(header: true)
@@ -44,13 +53,19 @@ workflow PROSIFT {
         }
         .multiMap { meta, abund, meta_csv, params_yml ->
             // validate branch: all four inputs for VALIDATE_INPUTS
-            validate:       [ meta, abund, meta_csv, params_yml ]
+            validate:         [ meta, abund, meta_csv, params_yml ]
             // filter_params: params_yml for the FILTER_PROTEINS join
-            filter_params:  [ meta, params_yml ]
+            filter_params:    [ meta, params_yml ]
             // map_params: params_yml for the UNIPROT_MAPPING join
-            map_params:     [ meta, params_yml ]
+            map_params:       [ meta, params_yml ]
             // prenorm_params: params_yml for the PRENORM_QC join
-            prenorm_params: [ meta, params_yml ]
+            prenorm_params:   [ meta, params_yml ]
+            // normalize_params: params_yml for the NORMALIZE join
+            normalize_params: [ meta, params_yml ]
+            // impute_params: params_yml for the IMPUTE join
+            impute_params:    [ meta, params_yml ]
+            // da_params: params_yml for the DIFFERENTIAL_ABUNDANCE join
+            da_params:        [ meta, params_yml ]
         }
         .set { ch_input }
 
@@ -93,5 +108,37 @@ workflow PROSIFT {
         .set { ch_prenorm_input }
 
     PRENORM_QC(ch_prenorm_input)
+
+    // --- Module 03: Normalization ---
+    // Joins: filtered_matrix (post-filter) + validated_metadata + params_yml
+    // PRENORM_QC runs in parallel -- NORMALIZE does not depend on its outputs.
+    FILTER_PROTEINS.out.matrix
+        .join(VALIDATE_INPUTS.out.metadata)
+        .join(ch_input.normalize_params)
+        .set { ch_normalize_input }
+
+    NORMALIZE(ch_normalize_input)
+
+    // --- Module 03: Imputation ---
+    // Joins: normalized_matrix (NORMALIZE) + validated_metadata (VALIDATE_INPUTS)
+    //        + filter_table (FILTER_PROTEINS, for MNAR/MAR classification) + params_yml
+    NORMALIZE.out.normalized_matrix
+        .join(VALIDATE_INPUTS.out.metadata)
+        .join(FILTER_PROTEINS.out.filter_table)
+        .join(ch_input.impute_params)
+        .set { ch_impute_input }
+
+    IMPUTE(ch_impute_input)
+
+    // --- Module 04: Differential Abundance ---
+    // Joins: imputed_matrix (IMPUTE) + validated_metadata (VALIDATE_INPUTS)
+    //        + mapping_table (UNIPROT_MAPPING) + params_yml
+    IMPUTE.out.imputed_matrix
+        .join(VALIDATE_INPUTS.out.metadata)
+        .join(UNIPROT_MAPPING.out.mapping_table)
+        .join(ch_input.da_params)
+        .set { ch_da_input }
+
+    DIFFERENTIAL_ABUNDANCE(ch_da_input)
 
 }

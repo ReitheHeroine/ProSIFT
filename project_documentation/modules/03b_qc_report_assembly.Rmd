@@ -1,5 +1,5 @@
 ---
-title: "ProSIFT Module 04b: QC Report Assembly"
+title: "ProSIFT QC Report Assembly (Module 03b)"
 output:
   html_document:
     toc: true

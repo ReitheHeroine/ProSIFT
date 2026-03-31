@@ -314,15 +314,23 @@ def compute_and_plot_correlation(
     # Pairwise-complete Pearson correlation (pandas default)
     corr_df = log2_ordered.corr(method="pearson")
 
-    # Anchor color scale to the range of off-diagonal values
+    # Anchor color scale to a round number below the actual minimum off-diagonal
+    # correlation. Flooring to the nearest 0.05 prevents the full color range
+    # from compressing into a tiny span when all correlations are very high
+    # (e.g. 0.977-1.0), which would make visually similar values appear very
+    # different. The floor of 0.80 ensures the scale never anchors so low that
+    # real variation is obscured.
     mask = ~np.eye(len(sample_order), dtype=bool)
     min_corr = float(corr_df.values[mask].min())
+    zmin = max(0.80, np.floor(min_corr * 20) / 20)  # floor to nearest 0.05
 
     # Axis labels: "Group: SampleID"
     group_of = dict(zip(summary_df["sample_id"], summary_df["group"].astype(str)))
     axis_labels = [f"{group_of[s]}: {s}" for s in sample_order]
 
-    # Cell annotations with 2dp correlation values
+    # Cell annotations with 3dp so displayed values match the color differences
+    # visible on the heatmap (2dp would round distinct values to identical text
+    # while their colors still differ, which is visually inconsistent).
     annotations = []
     for i, row_sid in enumerate(sample_order):
         for j, col_sid in enumerate(sample_order):
@@ -330,7 +338,7 @@ def compute_and_plot_correlation(
             annotations.append(
                 dict(
                     x=j, y=i,
-                    text=f"{val:.2f}",
+                    text=f"{val:.3f}",
                     showarrow=False,
                     font=dict(size=10, color="black"),
                 )
@@ -342,7 +350,7 @@ def compute_and_plot_correlation(
             x=axis_labels,
             y=axis_labels,
             colorscale="RdBu",
-            zmin=min_corr,
+            zmin=zmin,
             zmax=1.0,
             colorbar=dict(title="Pearson r"),
             hovertemplate="%{y}<br>%{x}<br>r = %{z:.4f}<extra></extra>",

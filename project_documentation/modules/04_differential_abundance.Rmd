@@ -1,0 +1,599 @@
+---
+title: "ProSIFT Module 04: Differential Abundance"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: default
+---
+
+**Last Updated:** 2026-03-30
+**Module Status:** Implemented and tested (2026-03-30)
+**Pipeline Position:** [Module 03: Normalization & Imputation] --> **Module 04: Differential Abundance** --> [Module 05: Enrichment, Module 06: Database Queries]
+
+---
+
+# 1. Purpose and Scope
+
+This module identifies differentially abundant proteins between conditions and provides statistical measures of significance and effect size. It is the pivot point of the pipeline: everything upstream prepares the data; everything downstream interprets the results.
+
+**What this module does:**
+
+- Parses user-specified contrasts from params.yml and validates them against metadata
+- Fits a linear model per protein using limma, then applies empirical Bayes variance shrinkage
+- When peptide count information is available (default), applies the DEqMS peptide-count-aware correction on top of limma's output
+- When peptide counts are unavailable, falls back to limma-only
+- Produces a per-protein results table with fold changes, p-values, and significance calls
+- Generates volcano and MA plots (static PNG + interactive Plotly HTML)
+- Emits the full results table for downstream consumption (enrichment module uses the full ranked list for GSEA; database query module filters to significant proteins)
+
+**What this module does NOT do:**
+
+- Imputation (handled by Module 03)
+- Multiple comparison adjustments beyond Benjamini-Hochberg (no stage-wise testing, no IHW)
+- Peptide-level or PSM-level analysis (input is protein-level abundances)
+- Enrichment analysis (Module 05)
+
+**Scope boundary with Module 05 (Enrichment):** This module produces the results table that Module 05 consumes. Volcano and MA plots are generated here because they are direct visualizations of the differential abundance results. Enrichment dot plots and GSEA running score plots belong to Module 05.
+
+---
+
+# 2. Inputs and Outputs
+
+## 2.1 Inputs
+
+| Input | Source | Format | Description |
+|---|---|---|---|
+| Imputed abundance matrix | Module 03 IMPUTE | Parquet | Fully imputed, approximately log2-scale, normalized. No NaN values. Contains abundance columns (`abundance_{sample_id}`) and peptide count columns (`peptide_count_{sample_id}`). One row per protein. |
+| Validated metadata | Module 01 VALIDATE_INPUTS | Parquet | One row per sample. Contains `sample_id` and the group column (name specified by `design.group_column` in params.yml). |
+| ID mapping table | Module 01 UNIPROT_MAPPING | Parquet | One row per protein. Contains `protein_id`, `gene_symbol_mouse`, and other ID columns. Used for gene symbol annotation on plots and in the summary. |
+| Parameters | params.yml | YAML | Contrast specification, method choice, significance thresholds, peptide count prefix. |
+
+**Data scale assumption:** The imputed matrix is on an approximately log2 scale (guaranteed by Module 03 regardless of normalization method). limma and DEqMS expect log-transformed data. No additional transformation is applied.
+
+**Peptide count columns:** Named `peptide_count_{sample_id}`, one per sample, dtype int64, no NaN. Values of 0 correspond to imputed positions (the protein was not detected in that sample by DIA-NN). These per-sample counts are summarized to a single per-protein integer before being passed to DEqMS (see Section 4.3).
+
+## 2.2 Outputs
+
+| Output | Format | Description |
+|---|---|---|
+| `{run_id}.diff_abundance_results.parquet` | Parquet | Full results table, all proteins, all columns (see Section 4.5 for schema) |
+| `{run_id}.diff_abundance_results.csv` | CSV | Same content, user-accessible export |
+| `{run_id}.diff_abundance_summary.txt` | Text | Human-readable summary: method, thresholds, counts, top hits |
+| `{run_id}.volcano_plot.png` | PNG | Static volcano plot (one per contrast) |
+| `{run_id}.volcano_plot.html` | HTML | Interactive volcano plot (Plotly, one per contrast) |
+| `{run_id}.ma_plot.png` | PNG | Static MA plot (one per contrast) |
+| `{run_id}.ma_plot.html` | HTML | Interactive MA plot (Plotly, one per contrast) |
+
+All outputs publish to `results/{run_id}/differential_abundance/`.
+
+**Multi-contrast naming:** Plot filenames always include the contrast identifier regardless of how many contrasts the run has: `{run_id}.{contrast}.volcano_plot.png` (e.g., `CTXcyto_WT_vs_CTXcyto_KO.KO_vs_WT.volcano_plot.png`). This ensures glob patterns (`*.volcano_plot.png`) work consistently across single- and multi-contrast runs without needing to know the number of contrasts at pipeline-definition time. The results table includes all contrasts in a single file, distinguished by the `contrast` column.
+
+**Nextflow channel emission:** The full results Parquet file is emitted as the primary output channel. Downstream processes filter as needed:
+
+- Module 05 (Enrichment): uses the full ranked list for GSEA, filters to significant proteins for ORA
+- Module 06 (Database Queries): filters to significant proteins (or uses all proteins if `databases.query_scope = "all"`)
+
+---
+
+# 3. Sub-Workflow Diagram
+
+Module 04 is a single Nextflow process (DIFFERENTIAL_ABUNDANCE). No sub-workflow is needed. The internal logic is linear:
+
+```
+Read inputs
+    |
+    v
+Validate contrasts against metadata
+    |
+    v
+Extract and separate abundance columns from peptide count columns
+    |
+    v
+Summarize per-sample peptide counts to per-protein integer (min of nonzero)
+    |
+    v
+Build design matrix from metadata
+    |
+    v
+For each contrast:
+    |
+    +-- Build contrast matrix
+    |
+    +-- limma: lmFit -> contrasts.fit -> eBayes
+    |
+    +-- If peptide counts available: DEqMS spectraCounteBayes
+    |
+    +-- Extract results to pandas DataFrame
+    |
+    +-- Apply significance thresholds, assign direction
+    |
+    v
+Merge contrast results (if multiple)
+    |
+    v
+Write results table (Parquet + CSV)
+Write summary text file
+Generate volcano plot (PNG + HTML) per contrast
+Generate MA plot (PNG + HTML) per contrast
+```
+
+---
+
+# 4. Process Specifications
+
+## 4.1 Contrast Handling
+
+### Format
+
+Contrasts are specified in params.yml using the `numerator_vs_denominator` convention:
+
+```yaml
+differential_abundance:
+  contrasts:
+    - "KO_vs_WT"
+```
+
+The term before `_vs_` is the numerator: a positive log2 fold change means the protein is more abundant in the numerator group. This convention is consistent with the run directory naming (`CTXcyto_WT_vs_CTXcyto_KO`), although the contrast uses short group names from the metadata rather than the full run-prefixed names.
+
+### Parsing
+
+The `_vs_` string is split to produce the numerator and denominator group names. These are translated into R's `makeContrasts()` syntax: `"KO_vs_WT"` becomes `KO - WT` in R.
+
+**Split rule:** Split on the first occurrence of `_vs_`. This handles the (unlikely) edge case where a group name itself contains `_vs_` as a substring. However, such group names would make contrast strings ambiguous and should be avoided. This constraint is documented in the params.yml comments.
+
+### Validation
+
+Before any R calls, the script validates each contrast against the metadata:
+
+1. Read `design.group_column` from params.yml (e.g., `genotype`, `fraction`, `region`).
+2. Extract the unique values from that column in the validated metadata.
+3. For each contrast string:
+   a. Verify exactly one `_vs_` delimiter is present. Fail if not.
+   b. Split into numerator and denominator.
+   c. Verify both groups exist in the metadata column. If not, fail with a clear error:
+      `Contrast 'KO_vs_WT': group 'KO' not found in metadata column 'genotype'. Available groups: ['WT', 'HET']`
+
+**Multiple contrasts:** The module supports multiple contrasts per run. Each contrast is processed independently through the full limma/DEqMS pipeline (separate `contrasts.fit()` call per contrast, applied to the same `lmFit()` output). Results for all contrasts are combined into a single output table, distinguished by the `contrast` column.
+
+## 4.2 Statistical Pipeline: limma + DEqMS via rpy2
+
+The statistical core runs entirely in R via rpy2, following the established pattern from Module 03's VSN implementation. The Python script handles all data I/O, validation, and plotting; R handles only the statistical model fitting.
+
+### Step 1: Build the design matrix
+
+```r
+design <- model.matrix(~ 0 + group, data = metadata)
+```
+
+The `~ 0 + group` formula creates a means model where each column represents a group mean directly. This makes it straightforward to specify arbitrary contrasts. Column names in the design matrix are the group names from the metadata (e.g., `WT`, `KO`).
+
+### Step 2: Fit the linear model
+
+```r
+fit <- lmFit(abundance_matrix, design)
+```
+
+Fits a separate linear model to each protein (row of the abundance matrix). Output: per-protein coefficients (group means) and per-protein residual variances. With n=3 per group in the benchmark data, the residual degrees of freedom are 4 per protein.
+
+### Step 3: Apply the contrast
+
+```r
+contrast_matrix <- makeContrasts(KO - WT, levels = design)
+fit2 <- contrasts.fit(fit, contrast_matrix)
+```
+
+Translates from group means to group differences. For a two-group comparison, this computes `mean_KO - mean_WT` per protein. The `fit2` object now contains log2 fold changes and associated statistics for the contrast of interest.
+
+### Step 4: Empirical Bayes moderation (limma)
+
+```r
+fit3 <- eBayes(fit2)
+```
+
+This is limma's core contribution. It estimates a global prior variance (s0^2) and prior degrees of freedom (d0) from the distribution of per-protein variance estimates across all proteins, then computes a moderated variance for each protein as a weighted average of its own variance and the prior. The result is a moderated t-statistic with d0 + d degrees of freedom (more than the original d), producing better-calibrated p-values. Benjamini-Hochberg FDR correction is applied to the p-values.
+
+**limma-only path:** If no peptide counts are available, results are extracted here using `topTable(fit3, number=Inf, sort.by="none")`. The output columns are: `logFC`, `AveExpr`, `t`, `P.Value`, `adj.P.Val`, `B`.
+
+### Step 5: DEqMS peptide count correction
+
+```r
+fit3$count <- peptide_counts  # integer vector, one per protein
+fit4 <- spectraCounteBayes(fit3)
+results <- outputResult(fit4, coef_col = 1)
+```
+
+DEqMS fits a smooth curve (variance as a function of peptide count) across all proteins, then re-estimates the prior variance for each protein conditional on its peptide count. Proteins quantified by few peptides get stronger shrinkage (their individual variance estimate is less reliable); proteins with many peptides get less shrinkage. The result is a refined moderated t-statistic (`sca.t`) and corrected p-values (`sca.P.Value`, `sca.adj.pval`).
+
+The peptide count vector attached to `fit3$count` is the summarized per-protein integer (min of nonzero per-sample values; see Section 4.3).
+
+### rpy2 mechanics
+
+The rpy2 bridge follows the same pattern as Module 03's VSN, using the rpy2 3.5+ API:
+
+1. Import R packages: `limma` via `importr('limma')`, `DEqMS` via `importr('DEqMS')`.
+2. Pass data to R via `ro.globalenv["prosift_*"]` variable assignments. The abundance matrix is converted to an R matrix with `byrow=TRUE` ordering and protein IDs set as rownames.
+3. Build the design matrix, contrast matrix, and run the function chain as an R code string executed via `ro.r(...)`: `lmFit` -> `contrasts.fit` -> `eBayes` -> `spectraCounteBayes`. The results DataFrame is assigned to `ro.globalenv["prosift_results"]` from within the R block, with `protein_id <- rownames(prosift_results)` prepended so the column survives conversion.
+4. Extract results back to a pandas DataFrame using the `localconverter` context manager:
+   ```python
+   with localconverter(ro.default_converter + pandas2ri.converter):
+       raw_df = ro.conversion.rpy2py(ro.globalenv["prosift_results"])
+   ```
+
+**Why `localconverter` instead of `pandas2ri.activate()`:** `pandas2ri.activate()` is deprecated in rpy2 3.5+ and should not be used. The `localconverter` context manager is the current API: it applies the pandas-to-R converter only within its scope, which is both safer and cleaner than global activation.
+
+**Slot assignment for peptide counts:** `fit3$count <- prosift_counts` is set within the R code string using R's own assignment syntax. This is simpler and more reliable than Python-side R object slot assignment.
+
+**macOS requirement:** rpy2 requires `R_HOME` and `DYLD_LIBRARY_PATH` to be set in the process environment on macOS. Without them, rpy2 segfaults (exit code 139) at import time even when R is on PATH. These are set in the conda profile's `process.beforeScript` in nextflow.config. This must be verified before the first cluster run as well.
+
+## 4.3 Peptide Count Summarization
+
+DEqMS requires a single integer per protein representing quantification depth. The input data contains per-sample peptide counts (`peptide_count_{sample_id}` columns, int64, no NaN).
+
+**Summarization method:** For each protein, take the minimum of the nonzero values across all samples.
+
+**Rationale:** Per-sample counts of 0 correspond to imputed positions where DIA-NN reported no quantification. These zeros represent "no measurement," not "low precision," and should not be included in the summary. Min-of-nonzero captures the worst-case real measurement precision, which is the most conservative representation of how precisely the protein was actually measured. This is the standard DEqMS convention.
+
+**Alternatives considered:**
+
+- Min across all samples: gives 0 for every imputed protein, rendering the DEqMS count uninformative for those proteins. Rejected.
+- Median of nonzero: less conservative, biased toward the typical case rather than the worst case. DEqMS models a smooth trend, so the practical difference from min-of-nonzero is small, but min is the more standard choice.
+- Min within each comparison group, then take the lower: more conservative in a group-aware way, but adds complexity for marginal gain. The difference between group-aware and group-naive min is negligible on DEqMS's smooth variance curve.
+
+**Edge case:** No protein in the imputed matrix can have all-zero peptide counts. Module 01's detection filter removes ABSENT proteins (zero detections in all groups), so every protein surviving to Module 04 was detected in at least one sample, guaranteeing at least one nonzero peptide count.
+
+**Expected value range (CTXcyto benchmark):** Median ~10-11 peptides/protein, mean ~16, max ~350. These are DIA-NN precursor counts.
+
+## 4.4 Method Selection and Fallback Logic
+
+The `differential_abundance.method` parameter controls which method is used:
+
+**`method = "deqms"` (default):**
+
+1. Check whether columns matching the `peptide_count_` prefix exist in the imputed matrix.
+2. If found: run the full limma + DEqMS pipeline (steps 1-5). DEqMS-corrected p-values are the primary significance measure.
+3. If not found: log a warning (`DEqMS requested but no peptide count columns found. Falling back to limma.`), run limma-only (steps 1-4). limma p-values become the primary significance measure. DEqMS-specific columns in the output table are set to null.
+
+**`method = "limma"`:**
+
+Run limma-only (steps 1-4) regardless of whether peptide counts are available. DEqMS-specific columns in the output table are set to null.
+
+The `peptide_count_` prefix is currently hardcoded to match ProSIFT's internal naming convention (established in data preparation scripts and carried through Modules 01-03). If a future ingestion module uses a different naming scheme, the prefix can be parameterized at that time.
+
+## 4.5 Output Schema
+
+The results table contains one row per protein per contrast. All proteins are included regardless of significance (downstream processes filter as needed).
+
+| Column | Type | Source | Description |
+|---|---|---|---|
+| `protein_id` | string | input matrix | Original protein ID (join key for all downstream tables) |
+| `gene_symbol` | string | ID mapping table | Mouse gene symbol (for human-readable output; null if unmapped) |
+| `log2_fc` | float64 | limma | Log2 fold change (numerator - denominator; positive = higher in numerator) |
+| `avg_abundance` | float64 | limma | Average log2 abundance across all samples (AveExpr) |
+| `limma_t` | float64 | limma eBayes | Moderated t-statistic |
+| `limma_pvalue` | float64 | limma eBayes | Raw p-value |
+| `limma_adj_pvalue` | float64 | limma eBayes | BH-adjusted p-value |
+| `deqms_t` | float64 | DEqMS | Peptide-count-corrected t-statistic (null if limma-only) |
+| `deqms_pvalue` | float64 | DEqMS | DEqMS raw p-value (null if limma-only) |
+| `deqms_adj_pvalue` | float64 | DEqMS | DEqMS BH-adjusted p-value (null if limma-only) |
+| `n_peptides` | int64 | derived | Summarized peptide count (min of nonzero across samples; null if limma-only) |
+| `significant` | bool | derived | True if passes both FDR and FC thresholds (see below) |
+| `direction` | string | derived | "up" (positive FC, significant), "down" (negative FC, significant), or "ns" |
+| `contrast` | string | params | Which contrast produced this row (e.g., "KO_vs_WT") |
+
+**Significance determination:** A protein is called significant if:
+
+- Its primary adjusted p-value is below `differential_abundance.significance.fdr_threshold` (default 0.05), AND
+- The absolute value of `log2_fc` is above `differential_abundance.significance.fc_threshold` (default 1.0; set to 0 for no fold change filter)
+
+The primary adjusted p-value is `deqms_adj_pvalue` when DEqMS was used, or `limma_adj_pvalue` when falling back to limma-only.
+
+**Direction assignment:**
+
+- `"up"`: significant = True and log2_fc > 0
+- `"down"`: significant = True and log2_fc < 0
+- `"ns"`: significant = False
+
+## 4.6 Summary Text File
+
+Human-readable summary following the format established by Modules 01-03. Template:
+
+```
+========================================
+DIFFERENTIAL ABUNDANCE SUMMARY
+========================================
+
+Run:              {run_id}
+Date:             {timestamp}
+Method:           {DEqMS / limma}
+Contrast:         {KO_vs_WT}  (KO - WT)
+
+----------------------------------------
+INPUT
+----------------------------------------
+
+Proteins tested:          {n_proteins}
+Samples:                  {n_samples} ({n_numerator} {numerator_name}, {n_denominator} {denominator_name})
+
+----------------------------------------
+PEPTIDE COUNTS (DEqMS)
+----------------------------------------
+
+Summary method:           min of nonzero values per protein
+Median count:             {median}
+Range:                    {min} - {max}
+
+(Section omitted when method = limma or limma fallback)
+
+----------------------------------------
+SIGNIFICANCE THRESHOLDS
+----------------------------------------
+
+FDR threshold:            {fdr_threshold} (BH-corrected)
+log2 FC threshold:        {fc_threshold} (absolute)
+Primary p-value:          {deqms_adj_pvalue / limma_adj_pvalue}
+
+----------------------------------------
+RESULTS
+----------------------------------------
+
+Significant proteins:     {n_sig} / {n_proteins} ({pct_sig}%)
+  Up-regulated:           {n_up} ({pct_up}%)
+  Down-regulated:         {n_down} ({pct_down}%)
+Not significant:          {n_ns}
+
+----------------------------------------
+TOP 10 BY SIGNIFICANCE
+----------------------------------------
+
+  protein_id              gene_symbol     log2_fc     adj_pvalue
+  {row1}
+  {row2}
+  ...
+```
+
+When the method is limma (either by user choice or fallback), the PEPTIDE COUNTS section is replaced with: `Method: limma (peptide count columns not available)` or `Method: limma (user-specified)`.
+
+When multiple contrasts are present, the block from CONTRAST through TOP 10 is repeated per contrast, separated by the `========` delimiter.
+
+## 4.7 Volcano Plot
+
+**Axes:** x = log2 fold change, y = -log10(primary adjusted p-value).
+
+**Coloring:** Three categories based on the `direction` column:
+
+- Up-regulated (significant, positive FC): colored (suggest red or a warm color from the ProSIFT palette)
+- Down-regulated (significant, negative FC): colored (suggest blue or a cool color)
+- Not significant: gray
+
+**Threshold lines:** Horizontal dashed line at -log10(FDR threshold). Two vertical dashed lines at +/- FC threshold. Lines drawn in a neutral color (light gray or dashed black) so they don't compete with the data points.
+
+**Labels:** No gene symbol labels on the static PNG (unreadable with hundreds of significant proteins). The interactive HTML (Plotly) shows hover text for each point: protein_id, gene_symbol, log2_fc (rounded to 2 decimal places), adjusted p-value (scientific notation).
+
+**Title:** `"Volcano Plot: {contrast}"` (e.g., "Volcano Plot: KO_vs_WT").
+
+**Implementation:** Uses Plotly for the interactive version, with `kaleido` for static PNG export. Consistent with the approach used in Modules 02-03. New plotting functions specific to Module 04 (volcano and MA are structurally different from box plots, PCA, and correlation heatmaps, so they do not use `prosift_plot_utils.py`).
+
+## 4.8 MA Plot
+
+**Axes:** x = average abundance (AveExpr from limma, i.e., mean log2 abundance across all samples), y = log2 fold change.
+
+**Coloring:** Same three-category scheme as the volcano plot.
+
+**Threshold lines:** Two horizontal dashed lines at +/- FC threshold.
+
+**Labels:** Same hover-only strategy as the volcano plot.
+
+**Title:** `"MA Plot: {contrast}"` (e.g., "MA Plot: KO_vs_WT").
+
+**Purpose:** The MA plot reveals intensity-dependent effects that the volcano plot cannot show. If the fold change distribution shifts systematically at low or high abundance, it may indicate incomplete normalization or an abundance-dependent technical artifact. In a well-normalized dataset, significant proteins should be scattered across the abundance range without a strong trend.
+
+---
+
+# 5. Design Decisions
+
+### 2026-03-23 -- DEqMS as Default Over limma
+
+**Decision:** DEqMS is the default method; limma is the fallback when peptide count information is unavailable.
+
+**Rationale:** DEqMS explicitly models the peptide count-variance relationship, which is specific to MS proteomics. Proteins quantified by more peptides have more reliable abundance estimates, and DEqMS accounts for this by conditioning the empirical Bayes variance shrinkage on peptide count. limma applies the same prior variance to all proteins regardless of measurement quality.
+
+**Alternatives considered:** MSstats (operates at peptide/transition level, which is below our input scope), plain t-test (no variance borrowing across proteins), rank-based methods (lower power with small sample sizes).
+
+**Impact:** Params must include a way to identify peptide count columns. The module must detect when peptide counts are unavailable and fall back to limma gracefully, with a logged warning.
+
+### 2026-03-23 -- Explicit Contrast Specification
+
+**Decision:** Users write out each contrast explicitly (e.g., "KO_vs_WT") rather than specifying a reference group.
+
+**Rationale:** Explicit contrasts give full control over which comparisons are made. Reference-group specification auto-generates all pairwise comparisons against the reference, which may produce comparisons the user doesn't care about and inflates multiple testing burden.
+
+**Alternatives considered:** (1) Reference group with auto-generation -- simpler for common case but less flexible. (2) All pairwise -- produces potentially many unnecessary comparisons. Both may be added as options later.
+
+**Impact:** Users must enumerate each comparison they want in params.yml.
+
+### 2026-03-30 -- rpy2 Inline Over Subprocess R Script
+
+**Decision:** The limma/DEqMS pipeline is called inline via rpy2 from within the Python script, rather than as a separate R script called via subprocess.
+
+**Rationale:** Consistency with Module 03's VSN implementation, which uses the same rpy2 pattern. Keeps the one-script-per-process convention. Avoids file I/O overhead of writing temporary files for subprocess communication. Error handling is more direct (rpy2 exceptions vs. subprocess exit codes and stderr parsing).
+
+**Alternatives considered:** Standalone R script called via subprocess. Easier to develop and debug in RStudio, but introduces two scripts to maintain, file-based data passing, and less clean error propagation. The rpy2 complexity for the DEqMS pipeline is manageable (five R function calls in a well-defined chain).
+
+**Impact:** The `differential_abundance.py` script imports rpy2 and R packages (limma, DEqMS). No separate R script needed.
+
+### 2026-03-30 -- Peptide Count Summarization: Min of Nonzero
+
+**Decision:** Per-sample peptide counts are summarized to a single per-protein integer using the minimum of nonzero values across all samples.
+
+**Rationale:** Per-sample counts of 0 correspond to imputed positions where no measurement occurred. Including zeros would misrepresent measurement precision. Min-of-nonzero captures the worst-case real measurement quality, which is the standard DEqMS convention. The summarized count positions each protein on DEqMS's variance-vs-count curve.
+
+**Alternatives considered:** (1) Min across all samples -- gives 0 for imputed proteins, not useful. (2) Median of nonzero -- less conservative, marginally different in practice since DEqMS models a smooth trend. (3) Min within each comparison group, then take the lower -- more conservative in a group-aware way but adds complexity for negligible gain on the smooth curve.
+
+**Edge case confirmed:** No protein in the imputed matrix can have all-zero peptide counts, because Module 01's detection filter removes ABSENT proteins. Every protein has at least one nonzero count.
+
+**Impact:** One additional data processing step before the R pipeline: extract peptide count columns, compute per-protein min-of-nonzero, produce an integer vector aligned with the protein order in the abundance matrix.
+
+### 2026-03-30 -- Contrast Format: numerator_vs_denominator
+
+**Decision:** Contrasts use the `numerator_vs_denominator` format (e.g., `"KO_vs_WT"`), split on `_vs_` for parsing. The numerator is the group of interest; positive fold change means higher abundance in the numerator.
+
+**Rationale:** Consistent with ProSIFT's existing naming convention (run directories follow the same pattern). Human-readable. The `_vs_` delimiter is unambiguous for biological group names, which are typically short alphabetic strings.
+
+**Validation:** Contrast strings are validated against the metadata at runtime before any statistical computation. Both the numerator and denominator must appear in the column specified by `design.group_column`. Validation failures produce clear error messages listing the offending term and the available group values.
+
+**Constraint:** Group names containing the literal substring `_vs_` would make contrast strings ambiguous. This is documented as a naming constraint. In practice, biological group names (WT, KO, CTX, HIP, cyto, synap, treated, vehicle) do not contain this substring.
+
+**Impact:** Simple string parsing in the Python script. The R-side contrast is constructed as `"{numerator} - {denominator}"` for `makeContrasts()`.
+
+### 2026-03-30 -- Retain Both limma and DEqMS Statistics
+
+**Decision:** The output table includes both limma statistics (`limma_t`, `limma_pvalue`, `limma_adj_pvalue`) and DEqMS statistics (`deqms_t`, `deqms_pvalue`, `deqms_adj_pvalue`). DEqMS columns are null when falling back to limma-only.
+
+**Rationale:** Retaining both lets users see the effect of the peptide count correction on individual proteins. Some proteins may shift in or out of significance after DEqMS correction. Having both columns available supports diagnostic comparisons (e.g., scatter plot of limma vs. DEqMS p-values) without re-running the analysis.
+
+**Alternatives considered:** (1) Report only the primary p-value (DEqMS when used, limma otherwise) -- simpler but loses the comparison. (2) Report only DEqMS -- loses the ability to assess the correction's impact. (3) Report only limma -- defeats the purpose of running DEqMS.
+
+**Impact:** 13-column output schema. The `significant` and `direction` columns are computed from the primary p-value (DEqMS when available, limma otherwise).
+
+### 2026-03-30 -- Emit Full Results Table, Not Filtered Subset
+
+**Decision:** The DIFFERENTIAL_ABUNDANCE process emits the full results table (all proteins) as its primary Nextflow channel output. Downstream processes filter as needed.
+
+**Rationale:** Different downstream consumers need different subsets. GSEA (Module 05) requires the full ranked list of all proteins. ORA (Module 05) requires the significant subset. Database queries (Module 06) may query significant proteins only or all proteins depending on `databases.query_scope`. Emitting the full table avoids duplicating filtering logic and keeps downstream modules in control of their own filtering criteria.
+
+**Alternatives considered:** (1) Emit both a full table and a filtered ID list -- adds a second output artifact that could get out of sync with the full table. (2) Emit only significant proteins -- breaks GSEA, which needs the full ranked list.
+
+**Impact:** The Nextflow process has one primary data output channel (the full results Parquet). Downstream processes are responsible for filtering.
+
+### 2026-03-30 -- Single DIFFERENTIAL_ABUNDANCE Process
+
+**Decision:** Statistics and visualization are bundled in a single Nextflow process rather than split into separate processes.
+
+**Rationale:** The visualizations (volcano, MA) depend directly on the statistical results. They always run together, and there is no scenario where you'd want to re-run plots without re-running statistics (or vice versa). Splitting would add Nextflow wiring complexity for no caching benefit. Consistent with how NORMALIZE and IMPUTE each bundle their diagnostic plots.
+
+**Impact:** One process definition in `modules/local/differential_abundance/main.nf`. One Python script (`bin/differential_abundance.py`) handles the full pipeline from input validation through plot generation.
+
+### 2026-03-30 -- Build limma Fallback Now
+
+**Decision:** Implement the limma-only fallback path in Phase 1 rather than deferring it.
+
+**Rationale:** The implementation cost is near zero. The limma pipeline is steps 1-4 of the DEqMS pipeline; DEqMS adds step 5. The fallback is a single if/else that skips one function call and nulls the DEqMS output columns. Building it now makes the module immediately usable for anyone providing a generic abundance matrix without peptide counts, and avoids a hard crash on unexpected input.
+
+**Alternatives considered:** Validate that peptide count columns exist and fail with a clear error if they don't, deferring the actual limma-only path to a later phase. Reasonable but unnecessary given the trivial cost.
+
+**Impact:** One additional code path (limma-only) tested alongside the primary DEqMS path.
+
+---
+
+# 6. Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `differential_abundance.method` | string | `"deqms"` | Statistical method: `"deqms"` (limma + DEqMS) or `"limma"` (limma only). When `"deqms"` is selected but peptide count columns are not found, falls back to limma with a warning. |
+| `differential_abundance.significance.fdr_threshold` | float | `0.05` | Adjusted p-value cutoff for significance calling. Applied to the primary p-value (DEqMS-corrected when available, limma otherwise). |
+| `differential_abundance.significance.fc_threshold` | float | `1.0` | Absolute log2 fold change cutoff for significance calling. Set to `0` to disable the fold change filter. |
+| `design.group_column` | string | (required) | Name of the metadata column containing group assignments (e.g., `"genotype"`, `"fraction"`, `"region"`). Already present in params.yml from earlier modules; not new to Module 04. |
+| `design.contrasts` | list of strings | (required) | Contrast specifications in `numerator_vs_denominator` format. Each string is validated against the group values in the metadata. Example: `["KO_vs_WT"]`. |
+
+**Parameters NOT included (with rationale):**
+
+- `differential_abundance.peptide_count_column`: Removed. The column prefix `peptide_count_` is hardcoded to match ProSIFT's internal naming convention established in data preparation. Auto-detected by scanning for columns matching this prefix. No user configuration needed.
+- `databases.query_scope`: Listed in the stub but belongs to Module 06 (Database Queries), not Module 04. Module 04 emits the full results table; Module 06 decides what to do with it.
+- Multiple testing correction method: Hardcoded to Benjamini-Hochberg. Alternative methods (e.g., Bonferroni, IHW) could be parameterized later but are not needed for Phase 1.
+
+---
+
+# 7. Known Limitations and Edge Cases
+
+**Statistical power:** With n=3 per group (the benchmark dataset), statistical power for detecting small fold changes is limited. The empirical Bayes framework (limma/DEqMS) helps by borrowing variance estimates across proteins, but cannot fully compensate for small sample sizes. Effect size estimates (log2 FC) may be imprecise for individual proteins.
+
+**Multiple testing burden:** With ~8,000-9,000 proteins tested per run, Benjamini-Hochberg correction is conservative. Truly differentially abundant proteins with modest effect sizes may not reach significance. This is inherent to the multiple testing problem, not a limitation of the method.
+
+**Imputation effects on differential abundance:** Imputed values (from Module 03) are treated as real measurements by limma/DEqMS. For MNAR-imputed proteins (low-abundance draws from MinProb), the imputed values are at the low end of the distribution, which will inflate fold change estimates for proteins absent in one condition and present in another. This is the expected behavior of MNAR imputation and is standard in the field, but users should be aware that fold changes for proteins with heavy imputation are less reliable than for fully observed proteins. The `imputation_summary.parquet` from Module 03 provides per-protein imputation fractions for cross-referencing.
+
+**DEqMS with very low peptide counts:** Proteins quantified by only 1-2 peptides are at the noisy end of DEqMS's variance curve. DEqMS handles this correctly (strong shrinkage toward the prior), but the corrected p-values for such proteins should be interpreted cautiously.
+
+**limma fallback changes the statistical model:** When DEqMS is requested but peptide counts are unavailable, the fallback to limma changes the statistical model (no peptide-count-aware variance correction). The summary text file and log both record which method was actually used, but users should be aware that results under the two methods are not directly comparable.
+
+**Single-contrast assumption in current benchmark:** The module supports multiple contrasts per run, but the benchmark dataset (2x2x2 factorial, separate runs) always has exactly one contrast per run. The multi-contrast path should be tested before it is relied upon.
+
+---
+
+# 8. Testing Notes
+
+## 8.1 Acceptance Criteria
+
+*All criteria met as of 2026-03-30.*
+
+1. DEqMS produces per-protein logFC, adj.P.Val, and peptide-count-corrected statistics for the CTXcyto benchmark run. **DONE** -- 8,403 proteins, 778 significant (9.3%).
+2. Volcano plot: -log10(adj_pvalue) vs. log2_fc, colored by significance and direction, threshold lines visible. **DONE** -- PNG + HTML produced per contrast.
+3. MA plot: log2_fc vs. avg_abundance, same coloring scheme. **DONE** -- PNG + HTML produced per contrast.
+4. Results table matches the 14-column schema. **DONE** -- verified.
+5. Summary text file reports correct counts and top hits. **DONE** -- verified.
+6. Wired in workflows/prosift.nf with correct channel inputs. **DONE**
+7. Stub-tested across all 12 runs. **DONE** -- all 12 runs, correct contrast names in stub filenames.
+8. Standalone tested on CTXcyto benchmark with spot-checks. **DONE** -- see Section 8.2.
+
+## 8.2 Spot-Check Results (CTXcyto benchmark, 2026-03-30)
+
+All checks passed.
+
+- **Row count:** 8,403 rows for CTXcyto (1 contrast). Matches imputed matrix protein count. PASS.
+- **No NaN in required columns:** All required columns non-null. DEqMS columns (deqms_t, deqms_pvalue, deqms_adj_pvalue, n_peptides) populated as expected. PASS.
+- **Fold change symmetry:** 395 up-regulated, 383 down-regulated among significant proteins. Approximately symmetric. PASS.
+- **P-value distribution:** Raw p-value histogram shows spike near 0 with flat null distribution tail. PASS.
+- **Adjusted p-value ordering:** Confirmed adj_pvalue >= pvalue for all rows. PASS.
+- **Peptide count range:** n_peptides has no zeros (confirming all-zero edge case does not occur). Range consistent with expected values. PASS.
+- **Significance counts:** 778 / 8,403 (9.3%) significant at FDR 0.05, |log2FC| > 1.0. Biologically plausible for a CTX WT vs. KO genotype comparison.
+- **Direction consistency:** All "up" proteins have log2_fc > 0; all "down" have log2_fc < 0; all "ns" have significant = False. PASS.
+- **Gene symbol coverage:** gene_symbol populated for >99% of proteins. PASS.
+- **Full 12-run results:** Correct contrasts across all run types (KO_vs_WT for genotype runs, synap_vs_cyto for fraction runs, HIP_vs_CTX for region runs). Significance counts biologically sensible: genotype comparisons 0.4-9.3%; fraction comparisons ~50%; region comparisons ~5%. PASS.
+
+## 8.3 limma Fallback Test
+
+To test the limma-only path, temporarily set `differential_abundance.method: "limma"` in the CTXcyto params.yml and re-run. Verify:
+
+- DEqMS columns (deqms_t, deqms_pvalue, deqms_adj_pvalue) are all null.
+- n_peptides is null.
+- significant and direction are computed from limma_adj_pvalue.
+- Summary text file reports "Method: limma (user-specified)" and omits the peptide count section.
+
+*This path was implemented but not separately benchmarked as of 2026-03-30. [FOLLOW-UP NEEDED]*
+
+---
+
+# 9. Change History
+
+### 2026-03-23 -- Initial Stub
+
+**Change:** Module documentation created from content previously in Section 3.2 of the monolithic project documentation.
+**Reason:** Documentation restructured into master overview + module files.
+**Affected processes:** All (initial design capture).
+**Downstream effects:** None.
+
+### 2026-03-30 -- Full Design Specification
+
+**Change:** Complete rewrite of the module spec. Expanded from 134-line stub to full specification covering: process internals (limma + DEqMS pipeline via rpy2), peptide count summarization (min of nonzero), contrast parsing and validation (`numerator_vs_denominator` format, validated against metadata group column), output schema (14 columns with both limma and DEqMS statistics), summary text file format, volcano and MA plot specifications, method selection and fallback logic, 9 design decisions, 5 parameters, testing plan with spot-check criteria.
+**Reason:** Design session completed all architectural decisions for Module 04.
+**Affected processes:** DIFFERENTIAL_ABUNDANCE (new).
+**Downstream effects:** Module 05 (Enrichment) consumes the full results table. Module 06 (Database Queries) consumes the filtered results table. The output schema (Section 4.5) defines the data contract.
+
+### 2026-03-30 -- Implementation
+
+**Change:** Module implemented and tested. Files created: `bin/differential_abundance.py`, `modules/local/differential_abundance/main.nf`. Wired into `workflows/prosift.nf` as the 7th multiMap branch. `nextflow.config` conda profile updated to export `R_HOME` and `DYLD_LIBRARY_PATH` for rpy2. `conf/base.config` updated with `maxForks = 2` for DIFFERENTIAL_ABUNDANCE.
+
+**Design deviations from spec (corrections made in this document):**
+- *rpy2 API:* Spec described `pandas2ri.activate()` (deprecated in rpy2 3.5+). Implementation uses `localconverter(ro.default_converter + pandas2ri.converter)` context manager and passes data via `ro.globalenv`. Section 4.2 updated.
+- *Plot filename convention:* Spec said contrast identifier omitted from single-contrast runs. Implementation always includes contrast in plot filenames for consistent Nextflow glob matching. Section 2.2 updated.
+- *id_mapping join key:* The id_mapping parquet uses `input_id` as the protein identifier column, not `protein_id`. The script detects this at runtime: `id_col = "input_id" if "input_id" in id_mapping_df.columns else "protein_id"`.
+- *n_peptides dtype:* R returns integers as int32; DEqMS result required `.astype("Int64")` (pandas nullable Int64) to match the int64 schema.
+
+**Bugs encountered during implementation:** pandas2ri API change, rpy2 macOS segfault (R_HOME missing), id_mapping join key mismatch, int32 vs int64 dtype, stub hardcoded contrast name, kaleido/Chrome concurrency hang. All fixed. See handoff session log 2026-03-30 for details.
+
+**Test results:** CTXcyto standalone (778/8,403 significant, 9.3%). Full 12-run pipeline test passed. All spot-checks passed (Section 8.2).
+
+**Reason:** Phase 2 implementation milestone.
+**Affected processes:** DIFFERENTIAL_ABUNDANCE.
+**Downstream effects:** Module 04 outputs now available for Module 05 (Enrichment) design and implementation.

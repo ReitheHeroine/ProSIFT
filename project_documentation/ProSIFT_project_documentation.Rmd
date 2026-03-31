@@ -10,7 +10,7 @@ output:
     theme: default
 ---
 
-**Last Updated:** 2026-03-27
+**Last Updated:** 2026-03-30
 
 **Working Project Name:** ProSIFT (PROtein Statistical Integration and Filtering Tool)
 
@@ -155,7 +155,7 @@ The diagram below shows the directed acyclic graph (DAG) of the ProSIFT Nextflow
 
 ![ProSIFT Pipeline DAG](./figures/prosift_pipeline_dag.svg){width=100%}
 
-*Figure 1. ProSIFT pipeline DAG showing the dependency structure of all major processing steps. Dashed elements indicate future components (interactive frontend) or long-range dependencies (QC flags feeding into profile assembly). The horizontal dashed line marks the point where the differential abundance process emits a channel of significant protein IDs and downstream processes dynamically fan out. Updated 2026-03-21 to reflect Nextflow terminology and SQLite output.*
+*Figure 1. ProSIFT pipeline DAG showing the dependency structure of all major processing steps. Dashed elements indicate future components (interactive frontend) or long-range dependencies (QC flags feeding into profile assembly). The horizontal dashed line marks the point where the differential abundance process emits a channel of significant protein IDs and downstream processes dynamically fan out. Updated 2026-03-27 to reflect revised module architecture (8 modules, combined normalization/imputation, QC report assembly checkpoint).*
 
 ### DAG structure and dependency logic
 
@@ -163,7 +163,7 @@ The pipeline has a clear main spine running down the right side of the diagram: 
 
 Two major branching points structure the rest of the pipeline:
 
-**First fork (after validation):** *Updated 2026-03-27 to reflect revised module architecture.* The pre-normalization QC/EDA module (Module 02) branches off to the left and runs on the validated but un-normalized data. This is intentional -- the pre-normalization QC module needs to assess raw distributional properties (skewness, dynamic range, missingness patterns) before any transformation is applied. The main analytical path continues rightward through normalization (Module 03) and imputation (Module 04), each of which produces its own diagnostic outputs. A QC Report Assembly process then collects diagnostic outputs from Modules 02, 03, and 04 into a consolidated QC report, creating a checkpoint before differential abundance. QC flags from across these modules take a long-range path through the pipeline and are incorporated into protein profiles at the Results Assembly stage.
+**First fork (after validation):** *Updated 2026-03-27 to reflect revised module architecture.* The pre-normalization QC/EDA module (Module 02) branches off to the left and runs on the validated but un-normalized data. This is intentional -- the pre-normalization QC module needs to assess raw distributional properties (skewness, dynamic range, missingness patterns) before any transformation is applied. The main analytical path continues rightward through Module 03 (Normalization & Imputation), which contains two sequential processes: NORMALIZE and IMPUTE. A QC Report Assembly process then collects diagnostic outputs from Modules 02 and 03 into a consolidated QC report, creating a checkpoint before differential abundance. QC flags from across these modules take a long-range path through the pipeline and are incorporated into protein profiles at the Results Assembly stage.
 
 **Second fork (after differential abundance):** This is the pivot point of the entire pipeline. Everything above it is about producing statistically sound abundance estimates. Everything below it is about interpreting those results. The fork produces two parallel branches:
 
@@ -242,7 +242,7 @@ This file follows nf-core conventions where practical, making the pipeline recog
 - QC: missingness thresholds, CV thresholds, minimum samples per group, outlier detection settings
 - Normalization: method (median/quantile/vsn/none), log transformation toggle
 - Imputation: method (minprob/knn/left_censored/none), method-specific parameters, sensitivity analysis toggle
-- Differential abundance: method (deqms/limma), FDR threshold, fold change threshold, peptide count column
+- Differential abundance: method (deqms/limma), FDR threshold, fold change threshold. Peptide count columns auto-detected by prefix (no user configuration). Contrasts specified as explicit numerator_vs_denominator strings.
 - Enrichment: ORA/GSEA toggles, gene set libraries, background definition
 - Database queries: which databases to enable, API keys, PubMed search terms of interest, cache lifetime
 - Output: results directory path
@@ -314,38 +314,35 @@ Each subsection follows a consistent structure: purpose, inputs, outputs, tools/
 
 ## 3.1 Pre-Normalization QC/EDA Module (Module 02)
 
-*Updated 2026-03-27 to rescope from monolithic QC/EDA to pre-normalization QC only. See Decision Register entry 2026-03-27 for rationale.*
+*Updated 2026-03-27. Rescoped from monolithic QC/EDA to pre-normalization QC only. Fully designed and implemented. See `02_qc_eda.Rmd` (452 lines) for the detailed spec.*
 
-**Purpose:** Assess the quality of the validated, detection-filtered abundance data before any normalization or imputation is applied. Characterize missingness patterns, identify problematic samples, assess distributional properties, and produce diagnostic visualizations that inform downstream normalization and imputation decisions.
+**Purpose:** Characterize the distributional properties of the post-filter abundance data and the relationships between samples before any normalization or imputation. Produces the "before" picture; Module 03's NORMALIZE process produces the "after."
 
-**Inputs:** Filtered abundance matrix (Parquet, from Module 01 FILTER_PROTEINS), metadata file, ID mapping table (Parquet, from Module 01 UNIPROT_MAPPING).
+**Inputs:** Filtered abundance matrix (Parquet, from Module 01 FILTER_PROTEINS), validated metadata (Parquet, from Module 01 VALIDATE_INPUTS), ID mapping table (Parquet, from Module 01 UNIPROT_MAPPING).
 
-**Outputs:** Pre-normalization QC report (HTML with interactive plots), QC summary tables (Parquet + CSV), flagged samples list, flagged proteins list, PCA coordinates, sample correlation matrix. These outputs serve two purposes: (1) immediate user review, and (2) QC flags that travel long-range to the Results Assembly module for incorporation into protein profiles.
+**Outputs:** Per-sample summary table (Parquet + CSV: n_detected, median_intensity, total_intensity, mad_intensity, skewness, kurtosis), sample flag summary table (Parquet + CSV: 4 boolean flags + n_flags count), correlation matrix (Parquet), PCA results (Parquet), 5 plot types (PNG + interactive HTML), pre-normalization QC report (HTML).
 
-**Planned analyses:**
+**Implemented analyses (6 total):**
 
-- **Missingness analysis:** Per-protein and per-sample missing value counts and percentages. Distinguish between structured missingness (patterned by condition, which may be biologically meaningful) and sporadic missingness (data quality issue). This distinction matters because proteomics missing data is overwhelmingly "missing not at random" (MNAR) -- low-abundance proteins drop below the detection limit. A protein absent in treatment but present in control is potentially interesting biology, not a QC failure.
-- **Detection counts per sample:** Number of proteins detected in each sample. A sample with dramatically fewer detections than its replicates is suspect.
-- **Total intensity per sample:** Sum or median of all protein abundances per sample. Proxy for sample loading or injection amount. Large differences suggest technical artifacts that normalization should correct.
-- **Intensity distributions per sample:** Box plots and/or density plots of abundance values for each sample. Pre-normalization, these diagnose whether samples have shifted medians (loading differences) or different spreads. Identifies outlier samples with completely different distributional shapes.
-- **Distributional shape assessment:** Is the overall abundance distribution approximately normal after log2 transformation? Informs whether parametric statistical methods (limma, DEqMS) are appropriate downstream. If `abundance_type` is raw intensities, Module 02 applies log2 internally for this assessment (log2 transformation of raw intensities is a universally accepted preprocessing step in proteomics, not a contested analytical choice).
-- **PCA (pre-normalization):** Principal component analysis on the (log2-transformed if needed) abundance data. Shows the dominant sources of variation in the raw data. Ideally samples cluster by biological condition; if they cluster by batch or injection order, that signals normalization is critical.
-- **Sample-to-sample correlation heatmap (pre-normalization):** Pairwise Pearson or Spearman correlations between all samples. Replicates should correlate highly with each other. A replicate that correlates more with a different group than its own is a flag for possible sample swap, mislabel, or severe technical artifact.
+- **Per-sample intensity summaries:** Detection count, median intensity, total intensity (raw scale only), MAD, skewness, kurtosis per sample.
+- **Intensity distribution box plots:** One box per sample, colored by group, log2 scale.
+- **Q-Q plot:** Overlaid Q-Q plot for all samples against a theoretical normal distribution, colored by group.
+- **PCA (pre-normalization):** PC1 vs. PC2, complete cases only, centered and scaled, colored by group with variance explained in axis labels.
+- **Sample-to-sample correlation heatmap:** Pearson on log2 data, pairwise-complete, observed-range color scale, grouped by condition.
+- **Outlier detection (convergent evidence):** Four boolean flags per sample (low detection, extreme median, PCA distance, low within-group correlation) with n_flags count. Advisory only -- no samples excluded.
 
-**Analyses explicitly NOT in this module (moved to their analytically appropriate locations):**
+**Analyses explicitly NOT in this module:**
 
-- Missingness analysis and visualization: handled by Module 01 (new MISSINGNESS_REPORT process, added 2026-03-27). Module 01's detection filter removes proteins with the most informative missingness patterns; by the time Module 02 sees the data, residual per-protein missingness is limited to 0-2 values out of 6 (for default threshold with triplicate designs). See Module 01 documentation Section 4.10 for details.
-- CV within groups: moved to Module 04 (Imputation), computed post-normalization on observed values only.
-- Post-normalization PCA, correlation, distributions: produced as diagnostic outputs of Module 03 (Normalization).
-- Imputation diagnostics and sensitivity analysis: produced as diagnostic outputs of Module 04 (Imputation).
+- Missingness analysis and visualization: handled by Module 01 (MISSINGNESS_REPORT process, Process 4.10). Module 01's detection filter removes proteins with the most informative missingness patterns.
+- CV within groups: handled by Module 03 NORMALIZE process, computed post-normalization on observed values only.
+- Post-normalization PCA, correlation, distributions: produced as diagnostic outputs of Module 03 NORMALIZE process.
+- Imputation diagnostics: produced as diagnostic outputs of Module 03 IMPUTE process.
 
-**Handling of `abundance_type` parameter:** The module respects the `input.abundance_type` parameter from the run config. If `abundance_type` is `raw`, Module 02 applies log2(x+1) transformation internally for PCA, correlation, and distributional assessment (raw intensities span orders of magnitude and produce uninformative PCA plots without transformation). If `abundance_type` is `log2` or `normalized`, the data is used as-is for those analyses. This internal transformation is for visualization and diagnostic purposes only and is not passed downstream.
+**Implementation:** Single Nextflow process (PRENORM_QC) calling `bin/prenorm_qc.py`. No new parameters (reads `input.abundance_type` and `design.group_column` from existing params). If `abundance_type` is `raw`, applies log2(x+1) internally for visualization only.
 
-**Tools/Libraries:** pandas, numpy, scipy, matplotlib, seaborn, plotly, scikit-learn (for PCA).
+**CTXcyto benchmark results:** 8,403 proteins, 6 samples, medians ~23 log2, skewness near zero, PCA PC1 51.7% / PC2 29.6%, WT and KO separate on PC1, within-group correlations 0.99+, CTXcyto_KO-2 flagged on 2 criteria (extreme_median + pca_outlier).
 
-**Known limitations:** Automated outlier detection is advisory, not prescriptive -- the tool flags potential issues but does not automatically exclude samples or proteins without user confirmation. Pre-normalization PCA may show technical variation dominating biological variation; this is expected and is the reason normalization exists. Users should not be alarmed by imperfect clustering in the pre-normalization PCA.
-
-**Status:** Not yet implemented.
+**Status:** Design complete; implemented and tested as of 2026-03-27.
 
 ## 3.2 Normalization & Imputation Module (Module 03)
 
@@ -403,30 +400,41 @@ Each subsection follows a consistent structure: purpose, inputs, outputs, tools/
 
 ## 3.4 Differential Abundance Module (Module 04)
 
-*Renumbered 2026-03-27 from Section 3.5 / Module 05. Content unchanged except for module number references.*
+*Renumbered 2026-03-27 from Section 3.5 / Module 05. Updated 2026-03-30 with completed design specification.*
 
-**Purpose:** Identify differentially abundant proteins between conditions and provide robust statistical measures of significance and effect size.
+**Purpose:** Identify differentially abundant proteins between conditions and provide robust statistical measures of significance and effect size. This is the pivot point of the pipeline: everything upstream prepares the data; everything downstream interprets the results. The module emits the full results table for downstream consumption by both the enrichment module (GSEA needs the full ranked list, ORA filters to significant) and the database query module (filters to significant proteins or queries all, depending on configuration).
 
-**Inputs:** Imputed abundance matrix (Parquet, from Module 03 IMPUTE), metadata file, contrast specification from config.
+**Inputs:** Imputed abundance matrix (Parquet, from Module 03 IMPUTE, log2-scale, no NaN, includes peptide count columns), validated metadata (Parquet, from Module 01), ID mapping table (Parquet, from Module 01), contrast specification and parameters from params.yml.
 
-**Outputs:** Differential abundance results table (Parquet + CSV) with columns for protein ID, log2 fold change, p-value, adjusted p-value, and method-specific statistics. Volcano plots, MA plots (PNG + interactive HTML).
+**Outputs:** Differential abundance results table (Parquet + CSV, 14 columns: protein_id, gene_symbol, log2_fc, avg_abundance, limma_t, limma_pvalue, limma_adj_pvalue, deqms_t, deqms_pvalue, deqms_adj_pvalue, n_peptides, significant, direction, contrast). Volcano plots, MA plots (PNG + interactive Plotly HTML, one per contrast). Human-readable summary text file. All published to `results/{run_id}/differential_abundance/`.
 
-**Planned methods:**
+**Single Nextflow process:** DIFFERENTIAL_ABUNDANCE. Statistics and visualizations bundled together (consistent with NORMALIZE and IMPUTE). Implemented as `bin/differential_abundance.py` using rpy2 inline for the R statistical calls (consistent with Module 03's VSN approach).
 
-- **DEqMS** (preferred default): Specifically designed for MS proteomics data. Accounts for the relationship between the number of peptides/PSMs quantified for a protein and the variance of that protein's abundance estimate. This is a key advantage over generic methods like a standard t-test or even limma, because in proteomics, proteins quantified by more peptides have more reliable abundance estimates.
-- **limma** (alternative): The established standard for differential expression analysis, originally from microarray analysis. Well-suited to proteomics data when peptide count information is not available.
-- Both accessed via rpy2 (Python-to-R bridge) or subprocess calls to R scripts within the Nextflow pipeline.
+**Statistical pipeline (via rpy2):**
 
-**Multiple testing correction:** Benjamini-Hochberg FDR correction as default. Significance thresholds configurable in the YAML config.
+The R-side workflow is a four- or five-step chain depending on whether peptide counts are available:
 
-**Design decisions:**
+1. `model.matrix(~ 0 + group)` -- build a means-model design matrix from metadata
+2. `lmFit(abundance_matrix, design)` -- fit a linear model per protein
+3. `contrasts.fit(fit, contrast_matrix)` -- apply the user-specified contrast
+4. `eBayes(fit)` -- empirical Bayes variance shrinkage (limma's core contribution: borrows variance estimates across all proteins to stabilize per-protein estimates, particularly important with small n)
+5. `spectraCounteBayes(fit)` -- DEqMS peptide-count correction (conditions the variance prior on each protein's peptide count, so proteins measured by more peptides get less shrinkage and proteins measured by fewer get more)
 
-- DEqMS chosen over limma as the default because it explicitly models the peptide count-variance relationship, which is specific to MS proteomics. Limma is retained as an alternative for cases where peptide count information is unavailable.
-- Both methods use the empirical Bayes moderated t-statistic framework, which borrows information across proteins to stabilize variance estimates -- particularly important with small sample sizes (tens of samples).
+When peptide counts are unavailable (or `method = "limma"` is specified), step 5 is skipped and limma p-values become the primary significance measure. DEqMS-specific output columns are set to null.
 
-**Known limitations:** Statistical power is constrained by sample size (tens of samples). The tool cannot detect small effect sizes reliably. This is inherent to the data, not the method. Power limitations should be noted in result interpretation.
+**Peptide count handling:** Per-sample peptide count columns (`peptide_count_{sample_id}`, int64) are carried through from DIA-NN output through Modules 01-03. Values of 0 correspond to imputed positions. DEqMS requires a single integer per protein: the module computes the minimum of nonzero values across all samples for each protein. This captures worst-case real measurement precision. No protein can have all-zero counts because Module 01's detection filter removes ABSENT proteins. Auto-detected by scanning for columns matching the `peptide_count_` prefix (no user configuration needed).
 
-**Status:** Not yet implemented.
+**Contrast specification:** Contrasts use the `numerator_vs_denominator` format in params.yml (e.g., `"KO_vs_WT"`). The numerator is the group of interest: positive fold change means higher abundance in the numerator. Parsed by splitting on `_vs_`; both terms validated against the metadata group column at runtime. Multiple contrasts per run are supported. Group names (WT, KO, cyto, synap, CTX, HIP) are the short names from the metadata, not the full run-prefixed names.
+
+**Significance calling:** A protein is significant if its primary adjusted p-value (DEqMS-corrected when available, limma otherwise) falls below `fdr_threshold` (default 0.05) AND the absolute log2 fold change exceeds `fc_threshold` (default 1.0; set to 0 to disable). Direction is "up" (positive FC, significant), "down" (negative FC, significant), or "ns."
+
+**Visualizations:** Volcano plot (-log10 adjusted p-value vs. log2 fold change) and MA plot (log2 fold change vs. average abundance), both with three-color significance scheme (up, down, ns) and threshold lines. No labels on static PNG; hover text on interactive HTML shows protein_id, gene_symbol, fold change, and adjusted p-value.
+
+**Design decisions:** See Module 04 spec (04_differential_abundance.Rmd Section 5) for 9 documented decisions including: rpy2 inline over subprocess R script, peptide count summarization via min-of-nonzero, contrast format and validation, retention of both limma and DEqMS statistics, full results table emission, single process, and limma fallback built now.
+
+**Known limitations:** Statistical power constrained by small sample sizes (n=3 per group in benchmark). Imputed values treated as real measurements by limma/DEqMS, which inflates fold change estimates for proteins with heavy MNAR imputation. Multiple testing correction with ~8,000 proteins is conservative. See Module 04 spec Section 7 for full discussion.
+
+**Status:** Design complete (2026-03-30). Implementation next.
 
 ## 3.5 Enrichment Analysis Module (Module 05)
 
@@ -656,7 +664,7 @@ During development (before the Singularity container is finalized), a Conda envi
 
 ## 5.4 Directory Structure
 
-*Updated 2026-03-26 to reflect the established nf-core-convention directory structure.*
+*Updated 2026-03-27 to reflect implemented modules and combined normalization/imputation.*
 
 The project directory follows nf-core conventions:
 
@@ -668,7 +676,9 @@ The project directory follows nf-core conventions:
 - `bin/` -- Python scripts called by Nextflow processes (executable, on PATH during execution)
 - `scripts/` -- data preparation scripts (outside the pipeline, not called by Nextflow)
 - `prosift_inputs/` -- master abundance file, per-run metadata/params, samplesheet (not committed to git)
-- `results/{run_id}/validation/` -- Module 01 published outputs (6 files per run)
+- `results/{run_id}/validation/` -- Module 01 published outputs (6 files per run, plus missingness report when implemented)
+- `results/{run_id}/qc/` -- Module 02 published outputs (17 files per run: data parquets, plots, report)
+- `results/{run_id}/normalization_imputation/` -- Module 03 published outputs (not yet implemented)
 - `results/pipeline_info/` -- Nextflow execution trace, timeline, and report
 - `project_documentation/` -- master doc, handoff, module docs in `modules/` subdirectory
 
@@ -680,7 +690,7 @@ See the Handoff File (Section 7) for the current detailed file system map.
 
 ## 6.1 Phase 1 -- Core Pipeline Skeleton and Pre-Normalization QC
 
-*Updated 2026-03-27 to reflect rescoped QC/EDA module. Module 02 is now pre-normalization QC only; CV, imputation diagnostics, and post-normalization QC are Phase 2 deliverables in their respective modules.*
+*Updated 2026-03-27 to reflect rescoped QC/EDA module and implementation progress.*
 
 **Goal:** Establish the Nextflow workflow structure, input format specification, ID mapping layer, and pre-normalization QC module. Produce a working pipeline that takes an abundance matrix + metadata, runs validation, maps IDs, and produces a pre-normalization QC report characterizing data quality before any analytical transformations.
 
@@ -691,38 +701,32 @@ See the Handoff File (Section 7) for the current detailed file system map.
 - params.yml for scientific parameters (contrasts, thresholds, database settings)
 - Input validation process (Nextflow process)
 - UniProt ID mapping module (bulk API call + local cache)
-- Pre-normalization QC/EDA module (Module 02) with: missingness analysis, detection count summaries, total intensity per sample, intensity distribution plots, distributional shape assessment, pre-normalization PCA, sample-to-sample correlation heatmap
+- Pre-normalization QC/EDA module (Module 02) with: per-sample intensity summaries, intensity distribution box plots, Q-Q plot, pre-normalization PCA, sample-to-sample correlation heatmap, convergent-evidence outlier detection
 - Pre-normalization QC report generation (HTML with interactive plots)
+- Missingness report visualizations (Module 01 Process 4.10): filter category bar chart, per-sample detection bar chart, missingness heatmap for filtered-out proteins, missingness rate histogram
 - Conda environment.yml
 - Singularity definition file (initial version)
 
-**Key decisions to finalize during this phase:**
-
-- Nextflow config and params schema
-- Directory structure conventions (aligning with nf-core standards)
-- Channel design for the main pipeline flow
-- QC flag schema (what triggers each flag, what values they take)
-- Outlier detection method for sample flagging
-
-**Status:** In progress. Module 01 (Input Validation & ID Mapping) complete as of 2026-03-26. All three Nextflow processes (VALIDATE_INPUTS, FILTER_PROTEINS, UNIPROT_MAPPING) implemented, wired, and tested end-to-end on CTX benchmark data. Deliverables completed: project directory structure, nextflow.config with PBS/local/conda/singularity profiles, per-run params.yml schema, input validation processes, UniProt ID mapping with bulk API and local cache, Conda environment.yml. Remaining: Module 02 (pre-normalization QC/EDA), Singularity definition file.
+**Status:** Complete as of 2026-03-27. All Module 01 processes (4.1-4.10) implemented and tested. Module 02 (Pre-Normalization QC/EDA) implemented and tested. Full pipeline verified on all 12 CTX/Synaptosome runs. Remaining from original deliverables: Singularity definition file (deferred, low priority; dependency list established).
 
 ## 6.2 Phase 2 -- Normalization, Imputation, Statistical Analysis, and Enrichment
 
-*Updated 2026-03-27 to reflect revised module architecture. Normalization and imputation are now separate modules (03 and 04), each with their own diagnostic outputs. QC Report Assembly process added as a checkpoint between imputation and differential abundance.*
+*Updated 2026-03-27. Normalization and imputation are combined in Module 03 (two processes: NORMALIZE, IMPUTE) with DEP-style mixed imputation, CV computation between them, and diagnostic outputs for both. QC Report Assembly compiles all diagnostics into a checkpoint report.*
 
-**Goal:** Build the full analytical workflow from normalization through enrichment. Each analytical module produces its own diagnostic outputs. A consolidated QC report is assembled after imputation as a checkpoint before statistical testing.
+**Goal:** Build the full analytical workflow from normalization through enrichment. Module 03 handles normalization, CV, and imputation in two sequential processes. A consolidated QC report is assembled after Module 03 as a checkpoint before statistical testing.
 
 **Deliverables:**
 
-- Normalization module (Module 03): median/quantile/VSN methods, log2 transformation handling, post-normalization diagnostic plots (distribution alignment, PCA, sample correlation)
-- Imputation module (Module 04): MinProb/KNN/left-censored methods, imputation diagnostics (observed vs. imputed distributions, imputation fraction), CV computation on normalized pre-imputation data, optional imputation sensitivity analysis
-- QC Report Assembly process: collects diagnostic outputs from Modules 02-04, compiles consolidated HTML QC report as pre-statistical-analysis checkpoint
-- Differential abundance module (Module 05): DEqMS via rpy2 (with limma as alternative), volcano plots, MA plots
-- Enrichment module (Module 06): ORA and GSEA via gseapy, enrichment dot plots, GSEA running score plots
+- Module 03: Normalization & Imputation
+  - NORMALIZE process: method-aware log2 + median/quantile/VSN/none normalization, post-normalization diagnostic plots (box plots, PCA, correlation heatmap via shared plot utilities), CV computation on back-transformed linear scale
+  - IMPUTE process: DEP-style mixed imputation (MNAR via MinProb, MAR via KNN, classification from Module 01 detection_filter_table.csv), imputation diagnostics (observed vs. imputed distributions, imputation fractions), single-method override available
+- QC Report Assembly: collects diagnostic outputs from Modules 02 and 03, compiles consolidated HTML QC report as pre-statistical-analysis checkpoint
+- Module 04: Differential Abundance (DEqMS via rpy2, with limma as alternative), volcano plots, MA plots
+- Module 05: Enrichment (ORA and GSEA via gseapy), enrichment dot plots, GSEA running score plots
 
 **At end of phase:** A pipeline that goes from abundance matrix to differentially abundant proteins with enrichment results, with a consolidated QC report at the midpoint. Useful as a standalone analytical tool.
 
-**Status:** Not yet started.
+**Status:** In progress. Module 03 (Normalization & Imputation) complete as of 2026-03-30: both NORMALIZE and IMPUTE processes implemented, standalone-tested, and verified on all 12 runs in a full end-to-end pipeline test (Modules 01-03). Module 04 (Differential Abundance) design complete as of 2026-03-30: full spec written (04_differential_abundance.Rmd). Implementation next. QC Report Assembly and Module 05 (Enrichment) not yet started.
 
 ## 6.3 Phase 3 -- Database Integration Layer
 
@@ -1285,6 +1289,56 @@ Also resolved: log2(x) not log2(x+1) for the permanent transformation (the +1 bi
 
 **Next steps identified:** Implement MISSINGNESS_REPORT (Module 01 Process 4.10). Implement NORMALIZE and IMPUTE (Module 03). Design Module 04 (Differential Abundance). Verify `vsn` Bioconductor package availability in conda environment. Renumber downstream module documentation files to match combined Module 03.
 
+### 2026-03-27 -- Module 02 Implemented by Claude Code
+
+**Work performed:** Claude Code implemented the PRENORM_QC Nextflow process and `bin/prenorm_qc.py` based on the Module 02 spec (02_qc_eda.Rmd). All 6 analyses implemented: per-sample intensity summaries, box plots, Q-Q plot, PCA, correlation heatmap, outlier detection. 17 output files per run. Added `python-kaleido` to environment.yml for static PNG export from Plotly.
+
+**CTXcyto benchmark results:** 8,403 proteins, 6 samples. Medians ~23 log2 (expected). Skewness -0.06 to -0.11 (near zero, well-behaved). PCA: 7,818 complete-case proteins used (585 dropped), PC1 51.7%, PC2 29.6%; WT and KO separate clearly on PC1. Within-group correlations 0.99+, between-group 0.977-0.980. CTXcyto_KO-2 flagged on 2 criteria (flag_extreme_median + flag_pca_outlier). Stub run verified all 12 runs produce 17 outputs without errors.
+
+**Outputs:** `bin/prenorm_qc.py`, `modules/local/prenorm_qc/main.nf`, updated `workflows/prosift.nf`, updated `environment.yml`. Results in `results/{run_id}/qc/`.
+
+**Next steps identified:** Implement MISSINGNESS_REPORT. Implement Module 03 (NORMALIZE + IMPUTE).
+
+### 2026-03-27 -- Module 03 Recombined as Normalization & Imputation; Imputation Fully Designed
+
+**Work performed:** Revisited the normalization/imputation split from earlier in the session. The split added Nextflow wiring complexity without meaningful benefit since the two operations always run sequentially and CV (the only analysis between them) is a few lines of code. Recombined into Module 03 (Normalization & Imputation) with two Nextflow processes (NORMALIZE, IMPUTE). Downstream modules renumbered: Differential Abundance becomes Module 04, Enrichment becomes Module 05, Database Queries Module 06, Results Assembly Module 07, Frontend Module 08.
+
+Designed imputation in full: DEP-style mixed imputation as default (MNAR values from SINGLE-GROUP proteins get MinProb, MAR values from sporadic missingness in PASSED proteins get KNN). Classification uses Module 01's detection_filter_table.csv directly, promoting it from diagnostic artifact to primary analytical input. User can override with single-method mode (uniform MinProb, KNN, or left-censored/Perseus-style). CV computed on back-transformed linear scale (2^log2_value). Sensitivity analysis deferred.
+
+VSN simplified from earlier design: now refuses non-raw data with a clear error instead of attempting back-transformation.
+
+**Decisions made:** See Decision Register entries 2026-03-27 (Module 03 recombined, VSN/log2 design) for full rationale.
+
+**Outputs:** `03_normalization_imputation.Rmd` (572 lines, replaces earlier `03_normalization.Rmd`). Updated Project Documentation Sections 3.2-3.6 (renumbered). Updated handoff: module status, process table, data contracts, file system map, pending tasks.
+
+**Next steps identified:** Implement MISSINGNESS_REPORT (Module 01 Process 4.10). Implement NORMALIZE and IMPUTE (Module 03). Design Module 04 (Differential Abundance).
+
+### 2026-03-30 -- Module 03 Implemented: NORMALIZE and IMPUTE Complete; Full Pipeline Test (Modules 01-03)
+
+**Work performed:** Claude Code implemented both Module 03 processes and ran the first full end-to-end pipeline test across all 12 CTX/Synaptosome runs.
+
+NORMALIZE process (bin/normalize.py): method-aware log2 + median/quantile/VSN/none normalization. VSN implemented via vsn2() + predict() (not justvsn()) to handle NaN values correctly: NaN mask saved before R call, restored after. Post-normalization diagnostic plots (box plots, PCA, correlation heatmap) use shared prosift_plot_utils.py. CV computed on back-transformed linear scale (2^log2, sample std with ddof=1). Correlation heatmap color scale fix: zmin floored to nearest 0.05 below minimum off-diagonal value, annotations at 3dp.
+
+IMPUTE process (bin/impute.py): DEP-style mixed imputation. MNAR/MAR classification from detection_filter_table.csv (SINGLE-GROUP = MNAR, PASSED-with-missing = MAR). MinProb for MNAR (per-sample random draws from low-end Gaussian via np.random.default_rng with configurable seed for determinism). KNN for MAR (sklearn KNNImputer, protein-wise, k=10). Single-method override mode available. Two diagnostic plots: KDE distribution overlay (observed/MNAR/MAR), per-sample imputation fraction bar chart.
+
+Full pipeline test: all 7 processes (VALIDATE_INPUTS, FILTER_PROTEINS, UNIPROT_MAPPING, MISSINGNESS_REPORT, PRENORM_QC, NORMALIZE, IMPUTE) ran successfully on all 12 runs. 44 output files per run. Zero NaN remaining in all 12 imputed matrices. Genotype runs: 95-235 MNAR proteins (same-tissue comparisons, most proteins shared). Fraction/region runs: 141-633 MNAR proteins (compartment-specific proteins expected).
+
+Bug fixes during implementation: (1) Execute bit missing on new bin/ scripts (chmod +x required; Nextflow calls scripts as executables). (2) impute.py txt summary overcounted MAR proteins (used n_mar_imputed > 0, which included SINGLE-GROUP proteins with sporadic NaN in detected group; fixed to use imputation_class column).
+
+**Decisions made:** VSN implementation via vsn2()+predict() and random seed parameter for MinProb reproducibility (both documented in Module 03 spec).
+
+**Outputs:** bin/normalize.py, bin/impute.py, modules/local/normalize/main.nf, modules/local/impute/main.nf, updated workflows/prosift.nf. All 12 per-run params.yml files updated with normalization and imputation parameter blocks.
+
+### 2026-03-30 -- Module 04 Differential Abundance: Design Complete
+
+**Work performed:** Design session (Claude.ai) produced the complete Module 04 specification covering the limma + DEqMS statistical pipeline via rpy2, peptide count summarization, contrast parsing and validation, output schema, visualization specifications, and method fallback logic.
+
+Key design decisions (9 total, documented in Module 04 spec Section 5): rpy2 inline over subprocess R script (consistent with Module 03 VSN); peptide count summarization via min of nonzero across samples (zeros = imputed positions, not low precision); contrast format numerator_vs_denominator parsed on _vs_ and validated against metadata; 14-column output retaining both limma and DEqMS statistics; emit full results table for downstream (GSEA needs full ranked list); single DIFFERENTIAL_ABUNDANCE process; build limma fallback now (near-zero cost).
+
+**Outputs:** 04_differential_abundance.Rmd (complete rewrite from 134-line stub to full specification).
+
+**Next steps identified:** Implement DIFFERENTIAL_ABUNDANCE (Claude Code). Test on CTXcyto benchmark. Validate against Wistar core results.
+
 ---
 
 # 11. References and Resources
@@ -1299,7 +1353,7 @@ Also resolved: log2(x) not log2(x+1) for the permanent transformation (the +1 bi
 - Imputation methods for proteomics (MNAR-aware approaches)
 - DisGeNET, DGIdb, CTD database publications
 - Arias-Hidalgo et al. (2023) "LFQ-Based Peptide and Protein Intensity Differential Expression Analysis" J. Proteome Res. 22:2114-2123 -- benchmarking study comparing Perseus, LFQ-Analyst, ProVision, msqrob2, ProStaR, Proteus, prolfqua, and Eatomics. Referenced in Section 1.4.
-- Lazar et al. (2016) "Accounting for the Multiple Natures of Missing Values in Label-Free Quantitative Proteomics Data Sets to Compare Imputation Strategies" J. Proteome Res. -- foundational paper on MNAR/MAR imputation strategies. Referenced in Module 02 missingness design.
+- Lazar et al. (2016) "Accounting for the Multiple Natures of Missing Values in Label-Free Quantitative Proteomics Data Sets to Compare Imputation Strategies" J. Proteome Res. -- foundational paper on MNAR/MAR imputation strategies. Referenced in Module 03 imputation design (DEP-style mixed imputation).
 
 ## 11.2 Databases and Tools
 
