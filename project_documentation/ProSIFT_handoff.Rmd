@@ -146,13 +146,13 @@ Step [X] complete.
 | Phase | Description | Status | Notes |
 |---|---|---|---|
 | Phase 1 | Core pipeline skeleton + pre-normalization QC | Complete | All Module 01 processes + Module 02 implemented and tested |
-| Phase 2 | Normalization, imputation, statistical analysis, enrichment + QC report assembly | In progress | Modules 03 and 04 complete. Module 05 (enrichment) next. |
+| Phase 2 | Normalization, imputation, statistical analysis, enrichment + QC report assembly | In progress | Modules 03, 04, and 05 complete. Module 06 (database queries) next. |
 | Phase 3 | Database integration layer | Not started | [See Project Documentation Section 6.3] |
 | Phase 4 | Interactive frontend | Not started | [See Project Documentation Section 6.4] |
 
 **Current phase:** Phase 2 in progress.
 
-**Current focus:** Module 04 (Differential Abundance) complete (2026-03-30). Module 05 (ORA/GSEA Enrichment) design and implementation next.
+**Current focus:** Module 05 (ORA/GSEA Enrichment) complete (2026-03-31). Module 06 (Database Queries) design and implementation next.
 
 ## 2.2 Module Status
 
@@ -169,7 +169,7 @@ Tracks implementation status of individual modules within and across phases. A m
 | Module 03: Normalization & Imputation | 2 | Complete | 2026-03-30 | NORMALIZE + IMPUTE both implemented and tested. Full pipeline test all 12 runs, 0 NaN remaining. |
 | QC Report Assembly | 2 | Not started | -- | Collects diagnostics from Modules 02-03 into consolidated HTML report |
 | Module 04: Differential Abundance (DEqMS) | 2 | Complete | 2026-03-30 | bin/differential_abundance.py; limma+DEqMS via rpy2; 7 outputs; tested all 12 runs. |
-| Module 05: ORA / GSEA enrichment | 2 | Not started | -- | -- |
+| Module 05: ORA / GSEA enrichment | 2 | Complete | 2026-03-31 | bin/enrichment.py; gseapy ORA + preranked GSEA; GO_BP + Reactome; lollipop + running score plots; standalone tested. |
 | Module 06: Database queries (all 5 databases) | 3 | Not started | -- | -- |
 | Module 07: Results assembly (SQLite) | 3 | Not started | -- | -- |
 | Module 08: Interactive frontend | 4 | Not started | -- | Tech selection deferred |
@@ -189,6 +189,7 @@ Tracks which Nextflow processes exist and whether they are functional. Populated
 | NORMALIZE | 03 | Functional | bin/normalize.py; 12 emit channels; tested all 12 runs (2026-03-30) |
 | IMPUTE | 03 | Functional | bin/impute.py; 8 emit channels; tested all 12 runs (2026-03-30) |
 | DIFFERENTIAL_ABUNDANCE | 04 | Functional | bin/differential_abundance.py; limma + DEqMS via rpy2; volcano + MA plots; 7 named emit channels; tested all 12 runs (2026-03-30) |
+| ENRICHMENT | 05 | Functional | bin/enrichment.py; gseapy ORA + preranked GSEA; lollipop plots (Plotly PNG+HTML) + GSEA running score plots; 9 named emit channels; standalone tested (2026-03-31) |
 
 ---
 
@@ -204,6 +205,42 @@ Maintained by Claude Code. Claude.ai reads these entries to understand what work
 > - [Tests run and outcomes]
 > - [Decisions made -- flag for promotion to Project Documentation Decision Register if significant]
 > - [Issues encountered or flagged]
+
+### 2026-03-31 (Claude Code) -- Module 05 Enrichment Implemented and Tested
+
+- **bin/enrichment.py implemented (Module 05 ENRICHMENT process):**
+  - Gene symbol preparation: drops unmapped proteins (null gene_symbol), deduplicates by keeping most significant protein per gene symbol (lowest primary adj_pvalue). Counts logged and reported in summary.
+  - GMT path resolution: paths in params.yml resolved relative to the params.yml file's directory, not the working directory. Ensures relative paths work in both standalone and Nextflow execution contexts.
+  - ORA: `gseapy.enrich()` per contrast per library. Background = all detected gene symbols in the run (not genome). Returns gseapy's BH-corrected p-values per call, giving automatic per-library correction.
+  - GSEA: `gseapy.prerank()` per contrast per library. `threads=1` for determinism. Ranking metric: `deqms_t` by default (configurable). GSEA FDR is permutation-based -- can legitimately be less than nominal p-value; this is expected, not a bug.
+  - Lollipop plots: custom Plotly figures with stem shapes layer (PNG via kaleido + interactive HTML). ORA: x = combined score, color = adj_pvalue, size = overlap. GSEA: x = NES, color = FDR, size = leading edge. Top 20 significant terms per plot.
+  - GSEA running score plots: `gseapy.gseaplot()` (matplotlib PNG) for top 10 significant terms per library per contrast.
+  - Protein-term mapping: built by parsing GMT files for tested terms, cross-referenced with significant gene set and GSEA leading edge data. One row per protein-term-contrast triple.
+  - 9 output types: enrichment_results.parquet/.csv, protein_term_mapping.parquet, enrichment_summary.txt, and 4 plot types (ORA lollipop PNG/HTML, GSEA lollipop PNG/HTML, GSEA running score PNG).
+
+- **modules/local/enrichment/main.nf created:**
+  - 9 named emit channels: enrichment_results, enrichment_results_csv, protein_term_mapping, summary_txt, ora_lollipop_png, ora_lollipop_html, gsea_lollipop_png, gsea_lollipop_html, gsea_running_score_png.
+  - Stub block extracts contrast from params.yml (same grep/sed approach as Module 04) and hardcodes `GO_BP` as placeholder library name for plot filenames.
+
+- **workflows/prosift.nf updated:**
+  - `ch_input` multiMap expanded to 8 branches: `enrich_params` added.
+  - ENRICHMENT wired: `DIFFERENTIAL_ABUNDANCE.out.results_table.join(ch_input.enrich_params)` → `ch_enrich_input` → `ENRICHMENT(ch_enrich_input)`.
+  - Module import added.
+
+- **Design deviations from spec:**
+  - Libraries: GO_BP + Reactome used (not KEGG -- KEGG GMT file not available; Reactome was on hand).
+  - `term_id`: MSigDB gene set name format (e.g., `GOBP_APOPTOTIC_PROCESS`) used for both `term_id` and `term_name`. Numeric GO IDs not parsed. Accepted as-is.
+
+- **Standalone test on CTXcyto benchmark:**
+  - 8,403 proteins, 20 unmapped dropped, 249 duplicates collapsed, 8,134 unique gene symbols.
+  - GO_BP ORA: 71 significant / 4,028 tested. Top term: GOBP_AMINO_ACID_METABOLIC_PROCESS (adj_p=1.2e-15).
+  - GO_BP GSEA: 409 significant / 2,934 tested. Top by |NES|: GOBP_MRNA_PROCESSING (NES=-3.21).
+  - REACTOME ORA: 28 significant / 612 tested.
+  - REACTOME GSEA: 281 significant / 590 tested. Top: REACTOME_EUKARYOTIC_TRANSLATION_INITIATION.
+  - Protein-term mapping: 353,688 rows.
+  - All 25+ output files produced. All spot-checks passed.
+
+- **Open: stub-run test not yet done** -- enrichment module wired and standalone-tested but not stub-tested across all 12 runs. [FOLLOW-UP NEEDED]
 
 ### 2026-03-30 (Claude Code) -- Module 04 Differential Abundance Implemented, Tested, and Wired
 
@@ -415,6 +452,7 @@ None currently.
 
 - Module 04 design spec completed -- 2026-03-30 -- project_documentation/modules/04_differential_abundance.Rmd. 9 design decisions, 5 parameters, 14-column output schema, spot-check plan.
 - Module 04 (Differential Abundance) implemented and tested -- 2026-03-30 -- bin/differential_abundance.py, modules/local/differential_abundance/main.nf, wired in workflows/prosift.nf. Full 12-run pipeline test passed. See session log entry 2026-03-30 for details.
+- Module 05 (ORA/GSEA Enrichment) implemented and tested -- 2026-03-31 -- bin/enrichment.py, modules/local/enrichment/main.nf, wired in workflows/prosift.nf. CTXcyto standalone test passed. See session log entry 2026-03-31 for details.
 
 ---
 
@@ -517,11 +555,19 @@ No data contracts defined yet. Populate as modules are implemented.
 
 ### Module 04 (Differential Abundance) --> Module 05 (Enrichment)
 - **Producer:** DIFFERENTIAL_ABUNDANCE (functional, 2026-03-30)
-- **Consumer:** Module 05 Enrichment (not yet designed)
+- **Consumer:** ENRICHMENT (functional, 2026-03-31)
 - **Primary data artifact:**
   - `{run_id}.diff_abundance_results.parquet` -- 14-column results table (see Module 04 spec Section 4.5). One row per protein per contrast. All proteins included regardless of significance.
-- **Consumer usage:** GSEA uses the full ranked list (rank by signed -log10 p-value or logFC). ORA filters to significant proteins (significant == True).
+- **Consumer usage:** GSEA uses the full ranked list ranked by `deqms_t` (default). ORA filters to proteins where `significant == True`. Gene symbols come from the `gene_symbol` column already present in this table.
 - **Join key:** `protein_id`.
+
+### Module 05 (Enrichment) --> Module 07 (Results Assembly)
+- **Producer:** ENRICHMENT (functional, 2026-03-31)
+- **Consumer:** Module 07 Results Assembly (not yet designed)
+- **Primary data artifacts:**
+  - `{run_id}.enrichment_results.parquet` -- 13-column unified results table (one row per term per analysis type per contrast). Schema: term_id, term_name, library, analysis_type, contrast, pvalue, adj_pvalue, enrichment_score, odds_ratio, combined_score, gene_set_size, overlap_size, overlap_genes.
+  - `{run_id}.protein_term_mapping.parquet` -- 8-column many-to-many protein-term table. Schema: gene_symbol, protein_id, term_id, term_name, library, in_significant_set, is_leading_edge, contrast.
+- **Join key:** `protein_id` (protein_term_mapping back to all other tables); `term_id` (enrichment_results to protein_term_mapping).
 
 ### Module 04 (Differential Abundance) --> Module 06 (Database Queries)
 - **Producer:** DIFFERENTIAL_ABUNDANCE (functional, 2026-03-30)
@@ -555,7 +601,7 @@ No data contracts defined yet. Populate as modules are implemented.
 
 ## 7.1 Directory Structure
 
-**Last updated by Claude Code:** 2026-03-30 (Module 04 implementation complete)
+**Last updated by Claude Code:** 2026-03-31 (Module 05 implementation complete)
 
 ```
 ProSIFT/
@@ -581,7 +627,8 @@ ProSIFT/
 │       ├── missingness_report/main.nf       # Process: MISSINGNESS_REPORT (functional)
 │       ├── normalize/main.nf               # Process: NORMALIZE (functional, 2026-03-30)
 │       ├── impute/main.nf                  # Process: IMPUTE (functional, 2026-03-30)
-│       └── differential_abundance/main.nf  # Process: DIFFERENTIAL_ABUNDANCE (functional, 2026-03-30)
+│       ├── differential_abundance/main.nf  # Process: DIFFERENTIAL_ABUNDANCE (functional, 2026-03-30)
+│       └── enrichment/main.nf              # Process: ENRICHMENT (functional, 2026-03-31)
 │
 ├── bin/                                     # Python scripts called from Nextflow processes (executable, shebangs set)
 │   ├── validate_inputs.py                   # Processes 4.1-4.3: matrix/metadata/cross-validation
@@ -592,7 +639,8 @@ ProSIFT/
 │   ├── prosift_plot_utils.py               # Shared plotting utilities for Modules 02-03 (functional, 2026-03-27)
 │   ├── normalize.py                         # Module 03 NORMALIZE: log2 + normalization + diagnostics + CV (functional, 2026-03-30)
 │   ├── impute.py                            # Module 03 IMPUTE: MNAR/MAR classification + imputation + diagnostics (functional, 2026-03-30)
-│   └── differential_abundance.py            # Module 04: limma + DEqMS via rpy2; volcano + MA plots; 14-column results (functional, 2026-03-30)
+│   ├── differential_abundance.py            # Module 04: limma + DEqMS via rpy2; volcano + MA plots; 14-column results (functional, 2026-03-30)
+│   └── enrichment.py                        # Module 05: gseapy ORA + preranked GSEA; lollipop + running score plots; enrichment + protein-term mapping tables (functional, 2026-03-31)
 │
 ├── project_documentation/
 │   ├── ProSIFT_project_documentation.Rmd    # Architectural reference (Project Documentation)
@@ -607,7 +655,7 @@ ProSIFT/
 │       ├── 03_normalization_imputation.Rmd  # Module 03: Normalization & Imputation (design complete, implemented, tested)
 │       ├── 03b_qc_report_assembly.Rmd       # QC Report Assembly checkpoint (stub; sits after Module 03, before Module 04)
 │       ├── 04_differential_abundance.Rmd    # Module 04: Differential Abundance (design complete 2026-03-30)
-│       ├── 05_enrichment.Rmd                # Module 05: ORA/GSEA Enrichment (stub)
+│       ├── 05_enrichment.Rmd                # Module 05: ORA/GSEA Enrichment (design complete, implemented, tested)
 │       ├── 06_database_queries.Rmd          # Module 06: Database Queries (stub)
 │       ├── 07_results_assembly.Rmd          # Module 07: Results Assembly / SQLite (stub)
 │       └── 08_frontend.Rmd                  # Module 08: Interactive Frontend (stub)
@@ -676,12 +724,20 @@ ProSIFT/
             ├── {run_id}.imputation_summary.txt
             ├── {run_id}.imputation_distributions.png/.html
             └── {run_id}.imputation_fractions.png/.html
-        └── differential_abundance/             # Module 04 outputs per run (functional, full pipeline tested 2026-03-30)
-            ├── {run_id}.diff_abundance_results.parquet           # Full results table (14 cols, all proteins)
-            ├── {run_id}.diff_abundance_results.csv
-            ├── {run_id}.diff_abundance_summary.txt
-            ├── {run_id}.{contrast}.volcano_plot.png/.html        # One pair per contrast
-            └── {run_id}.{contrast}.ma_plot.png/.html             # One pair per contrast
+        ├── differential_abundance/             # Module 04 outputs per run (functional, full pipeline tested 2026-03-30)
+        │   ├── {run_id}.diff_abundance_results.parquet           # Full results table (14 cols, all proteins)
+        │   ├── {run_id}.diff_abundance_results.csv
+        │   ├── {run_id}.diff_abundance_summary.txt
+        │   ├── {run_id}.{contrast}.volcano_plot.png/.html        # One pair per contrast
+        │   └── {run_id}.{contrast}.ma_plot.png/.html             # One pair per contrast
+        └── enrichment/                         # Module 05 outputs per run (functional, standalone tested 2026-03-31)
+            ├── {run_id}.enrichment_results.parquet               # Unified results (13 cols; all contrasts, libraries, analysis types)
+            ├── {run_id}.enrichment_results.csv
+            ├── {run_id}.protein_term_mapping.parquet             # Many-to-many protein-term pairs (8 cols)
+            ├── {run_id}.enrichment_summary.txt
+            ├── {run_id}.{contrast}.{library}.ora_lollipop.png/.html   # One pair per contrast per library
+            ├── {run_id}.{contrast}.{library}.gsea_lollipop.png/.html  # One pair per contrast per library
+            └── {run_id}.{contrast}.{library}.gsea_running_score.{term}.png  # Top N terms per library
 ```
 
 ## 7.2 Scripts Reference
@@ -700,6 +756,7 @@ ProSIFT/
 | bin/normalize.py | Module 03 | NORMALIZE process: method-aware log2 + median/quantile/VSN/none + post-norm diagnostics (via prosift_plot_utils.py) + CV on back-transformed linear scale. VSN uses vsn2()+predict() via rpy2. | 2026-03-30 |
 | bin/impute.py | Module 03 | IMPUTE process: DEP-style MNAR/MAR classification from detection_filter_table.csv; MinProb (np.random.default_rng, per-sample low-end draws) for MNAR; KNN (sklearn KNNImputer, protein-wise, no transpose) for MAR; left_censored available in single mode. 2 diagnostic plot types (KDE distributions, imputation fraction bar chart). 8 output files. | 2026-03-30 |
 | bin/differential_abundance.py | Module 04 | DIFFERENTIAL_ABUNDANCE process: contrast parsing + validation, peptide count summarization (min of nonzero), limma + DEqMS via rpy2 (localconverter API), 14-column results table, volcano + MA plots per contrast (PNG + HTML). R_HOME required for rpy2 on macOS. | 2026-03-30 |
+| bin/enrichment.py | Module 05 | ENRICHMENT process: gene symbol preparation (unmapped drop, duplicate collapse), ORA via gseapy.enrich() with detected-proteins background, preranked GSEA via gseapy.prerank() (t-statistic default ranking, threads=1 for determinism), per-library FDR correction, lollipop plots (Plotly PNG+HTML), GSEA running score plots (gseapy built-in PNG). GMT paths resolved relative to params.yml directory. | 2026-03-31 |
 
 ## 7.3 File System Update Instructions
 

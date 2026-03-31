@@ -23,6 +23,9 @@ include { IMPUTE             } from '../modules/local/impute/main'
 // Module 04: Differential Abundance
 include { DIFFERENTIAL_ABUNDANCE } from '../modules/local/differential_abundance/main'
 
+// Module 05: Enrichment Analysis
+include { ENRICHMENT             } from '../modules/local/enrichment/main'
+
 workflow PROSIFT {
 
     // --- Build per-run input channel from samplesheet ---
@@ -66,6 +69,8 @@ workflow PROSIFT {
             impute_params:    [ meta, params_yml ]
             // da_params: params_yml for the DIFFERENTIAL_ABUNDANCE join
             da_params:        [ meta, params_yml ]
+            // enrich_params: params_yml for the ENRICHMENT join
+            enrich_params:    [ meta, params_yml ]
         }
         .set { ch_input }
 
@@ -140,5 +145,15 @@ workflow PROSIFT {
         .set { ch_da_input }
 
     DIFFERENTIAL_ABUNDANCE(ch_da_input)
+
+    // --- Module 05: Enrichment Analysis ---
+    // Joins: diff_abundance_results (DIFFERENTIAL_ABUNDANCE) + params_yml
+    // GMT library paths are resolved from params.yml (not Nextflow file() staging)
+    // so no additional path inputs are needed in the channel.
+    DIFFERENTIAL_ABUNDANCE.out.results_table
+        .join(ch_input.enrich_params)
+        .set { ch_enrich_input }
+
+    ENRICHMENT(ch_enrich_input)
 
 }
