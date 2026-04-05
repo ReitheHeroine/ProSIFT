@@ -4,14 +4,17 @@
 # author: Reina Hastings
 # contact: reinahastings13@gmail.com
 # date created: 2026-03-26
-# last modified: 2026-03-26
+# last modified: 2026-04-02
 #
 # purpose:
 #   Processes 4.5-4.9 of Module 01 (Input Validation). Takes the
 #   detection-filtered protein list, queries the UniProt bulk ID mapping
 #   API to retrieve gene symbols, Entrez IDs, and Ensembl gene IDs, handles
 #   edge cases (unmapped, isoform-level accessions, multiple mappings), and
-#   caches results to avoid redundant API calls across re-runs.
+#   caches results to avoid redundant API calls across re-runs. When
+#   project.organism is 'mouse', also performs Layer 2 ortholog mapping
+#   (mouse to human) via Ensembl BioMart to populate the three ortholog
+#   columns in the mapping table.
 #
 # inputs:
 #   - {run_id}.filtered_matrix.parquet  (from filter_proteins.py)
@@ -37,6 +40,7 @@ import re
 import sys
 import time
 from datetime import datetime, timezone
+from io import StringIO
 from typing import Optional
 
 try:
@@ -67,6 +71,56 @@ RETRY_DELAYS   = [5, 15, 45]   # seconds between job-submission retries
 POLL_INTERVAL  = 5             # seconds between status polls
 MAX_POLLS      = 120           # give up after 10 minutes (120 * 5s)
 
+# --- BioMart constants (Layer 2: mouse -> human ortholog mapping) ---
+# BioMart is queried via requests POST (no additional library dependency;
+# the XML REST endpoint is simple enough to drive directly).
+# Mirror list: retry attempts cycle through mirrors in order so a persistent
+# outage on one server automatically falls over to the next.
+BIOMART_MIRRORS = [
+    'https://www.ensembl.org/biomart/martservice',
+    'https://useast.ensembl.org/biomart/martservice',
+]
+BIOMART_RETRY_DELAYS = [10, 30, 90]   # seconds between BioMart retries
+BIOMART_CHUNK_SIZE   = 500            # IDs per BioMart request
+
+# BioMart XML attributes for mouse-to-human ortholog query (mmusculus_gene_ensembl).
+# Column ORDER in the returned TSV matches attribute order; renamed to
+# _MOUSE_ORTHOLOG_COLS after parsing (positional rename, not by display name,
+# so it is stable across Ensembl release display-name changes).
+_MOUSE_ORTHOLOG_ATTRS = [
+    'ensembl_gene_id',
+    'external_gene_name',
+    'hsapiens_homolog_ensembl_gene',
+    'hsapiens_homolog_associated_gene_name',
+    'hsapiens_homolog_orthology_type',
+    'hsapiens_homolog_perc_id',
+    'hsapiens_homolog_orthology_confidence',
+]
+_MOUSE_ORTHOLOG_COLS = [
+    'ensembl_gene_mouse',
+    'gene_symbol_mouse_bm',
+    'human_ensembl_gene',
+    'human_gene_name',
+    'homology_type',
+    'perc_id',
+    'confidence',
+]
+
+# BioMart XML attributes for human Entrez ID lookup (hsapiens_gene_ensembl).
+# The mmusculus homolog attributes do not include the human Entrez ID directly,
+# so a second query is needed to get it.
+_HUMAN_ENTREZ_ATTRS = ['ensembl_gene_id', 'entrezgene_id']
+_HUMAN_ENTREZ_COLS  = ['human_ensembl_gene', 'entrez_id']
+
+# --- Cache schema version ---
+# Increment whenever the mapping table structure changes in a way that makes
+# old cached files incompatible. On load, a version mismatch triggers
+# regeneration (treat as expired). This resolves the open question logged
+# 2026-03-26 about silent stale-cache serving after code changes.
+#   1 = original (null ortholog columns, Phase 1-2)
+#   2 = BioMart ortholog columns populated (2026-04-02)
+CURRENT_SCHEMA_VERSION = 2
+
 # Output column schema (Process 4.8)
 SCHEMA_COLS = [
     'input_id',
@@ -74,9 +128,9 @@ SCHEMA_COLS = [
     'gene_symbol_mouse',
     'entrez_id_mouse',
     'ensembl_gene_mouse',
-    'human_ortholog_symbol',       # null: Phase 3
-    'human_ortholog_entrez',       # null: Phase 3
-    'ortholog_mapping_status',     # null: Phase 3
+    'human_ortholog_symbol',
+    'human_ortholog_entrez',
+    'ortholog_mapping_status',
     'mapping_status',
     'mapping_notes',
 ]
@@ -153,12 +207,24 @@ def compute_cache_key(protein_ids: list[str], organism: str) -> str:
 
 
 def load_cache(cachedir: str, cache_key: str, cache_days: int) -> Optional[pd.DataFrame]:
-    '''Return cached DataFrame if valid (exists and not expired), else None.'''
+    '''
+    Return cached DataFrame if valid: exists, not expired, and schema version
+    matches CURRENT_SCHEMA_VERSION. Returns None on any failure condition so
+    the caller falls through to a full regeneration.
+    '''
     parquet_path, meta_path = _cache_paths(cachedir, cache_key)
     if not os.path.isfile(parquet_path) or not os.path.isfile(meta_path):
         return None
     with open(meta_path, 'r') as f:
         meta = json.load(f)
+    # Schema version check: caches from before ortholog mapping (version 1 or
+    # missing) must be regenerated so the ortholog columns are populated.
+    cached_version = meta.get('schema_version', 1)
+    if cached_version != CURRENT_SCHEMA_VERSION:
+        print(f'  Cache schema version mismatch '
+              f'(cached: {cached_version}, current: {CURRENT_SCHEMA_VERSION}). '
+              f'Regenerating.')
+        return None
     age_days = (datetime.now(timezone.utc).timestamp() - meta['timestamp']) / 86400
     if age_days > cache_days:
         print(f'  Cache expired ({age_days:.1f} days old, limit {cache_days} days).')
@@ -176,6 +242,7 @@ def save_cache(cachedir: str, cache_key: str, df: pd.DataFrame) -> None:
         'timestamp': datetime.now(timezone.utc).timestamp(),
         'n_proteins': len(df),
         'cache_key': cache_key,
+        'schema_version': CURRENT_SCHEMA_VERSION,
     }
     with open(meta_path, 'w') as f:
         json.dump(meta, f, indent=2)
@@ -362,7 +429,7 @@ def parse_json_results(api_results: list[dict], input_ids: list[str]) -> pd.Data
     1. Group API results by input ID.
     2. Classify mapping_status: mapped, unmapped, isoform_collapsed,
        accession_redirected, multiple_mappings.
-    3. Add null ortholog columns (Phase 3).
+    3. Leave ortholog columns null (populated later by map_orthologs()).
     4. Build one row per input ID preserving input order.
     '''
     # Build a lookup: input_id -> list of "to" entry dicts
@@ -455,6 +522,461 @@ def parse_json_results(api_results: list[dict], input_ids: list[str]) -> pd.Data
 
 
 # ============================================================
+# BioMart ortholog mapping (Layer 2: mouse -> human)
+# ============================================================
+
+def _biomart_post(xml: str) -> pd.DataFrame:
+    '''
+    POST an XML query to Ensembl BioMart and return results as a DataFrame.
+
+    BioMart returns TSV with a header line. Uses requests directly, consistent
+    with the UniProt Layer 1 pattern (no additional library dependency needed).
+
+    BioMart-level errors come back with HTTP 200 but error text in the body
+    (typically starting with "ERROR" or "Query ERROR"). These are detected and
+    raised as RuntimeError so the retry loop can handle them.
+
+    Retry attempts cycle through BIOMART_MIRRORS in round-robin order so a
+    persistent outage on the primary server falls over to the next mirror.
+    '''
+    last_exc: Optional[Exception] = None
+    for attempt, delay in enumerate([0] + BIOMART_RETRY_DELAYS):
+        if delay:
+            mirror = BIOMART_MIRRORS[attempt % len(BIOMART_MIRRORS)]
+            print(f'  BioMart: retrying in {delay}s on {mirror} '
+                  f'(attempt {attempt + 1})...')
+            time.sleep(delay)
+        else:
+            mirror = BIOMART_MIRRORS[0]
+        try:
+            resp = requests.post(
+                mirror,
+                data={'query': xml},
+                timeout=120,
+            )
+            resp.raise_for_status()
+            text = resp.text.strip()
+            if not text:
+                # Empty body = no records matched the filter (valid, not an error)
+                return pd.DataFrame()
+            first_line = text.splitlines()[0]
+            if first_line.upper().startswith('ERROR') or 'Query ERROR' in text:
+                raise RuntimeError(
+                    f'BioMart returned error in response body: {text[:300]}'
+                )
+            df = pd.read_csv(StringIO(text), sep='\t', header=0)
+            return df
+        except (requests.RequestException, RuntimeError) as exc:
+            last_exc = exc
+            print(f'  BioMart: attempt {attempt + 1} failed -- {exc}')
+    raise RuntimeError(
+        f'BioMart query failed after {len(BIOMART_RETRY_DELAYS) + 1} attempts. '
+        f'Last error: {last_exc}'
+    )
+
+
+def _build_ortholog_xml(ids: list[str], filter_name: str) -> str:
+    '''
+    Build a BioMart XML query for mouse-to-human ortholog attributes.
+    filter_name: 'ensembl_gene_id'     for primary Ensembl ID lookup
+                 'external_gene_name'  for gene symbol fallback
+    '''
+    attrs_xml = ''.join(
+        f'<Attribute name="{attr}"/>' for attr in _MOUSE_ORTHOLOG_ATTRS
+    )
+    id_values = ','.join(ids)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<!DOCTYPE Query>'
+        '<Query virtualSchemaName="default" formatter="TSV" header="1" '
+        'uniqueRows="0" count="">'
+        '<Dataset name="mmusculus_gene_ensembl" interface="default">'
+        f'<Filter name="{filter_name}" value="{id_values}"/>'
+        f'{attrs_xml}'
+        '</Dataset>'
+        '</Query>'
+    )
+
+
+def _query_orthologs_by_ensembl(ensembl_ids: list[str]) -> pd.DataFrame:
+    '''
+    Query BioMart for mouse-to-human orthologs using mouse Ensembl gene IDs
+    (primary join key from UniProt Layer 1 mapping).
+
+    Returns a DataFrame with columns _MOUSE_ORTHOLOG_COLS. Multiple rows per
+    mouse gene are expected when one-to-many orthologs exist. Rows where
+    human_ensembl_gene is empty/null indicate no human ortholog for that gene.
+    Processed in chunks of BIOMART_CHUNK_SIZE to keep POST bodies manageable.
+    '''
+    if not ensembl_ids:
+        return pd.DataFrame(columns=_MOUSE_ORTHOLOG_COLS)
+
+    all_chunks: list[pd.DataFrame] = []
+    n_chunks = (len(ensembl_ids) + BIOMART_CHUNK_SIZE - 1) // BIOMART_CHUNK_SIZE
+    for i in range(0, len(ensembl_ids), BIOMART_CHUNK_SIZE):
+        chunk     = ensembl_ids[i:i + BIOMART_CHUNK_SIZE]
+        chunk_num = i // BIOMART_CHUNK_SIZE + 1
+        print(f'  BioMart (Ensembl ID): chunk {chunk_num}/{n_chunks}, '
+              f'{len(chunk)} IDs...')
+        xml      = _build_ortholog_xml(chunk, filter_name='ensembl_gene_id')
+        chunk_df = _biomart_post(xml)
+        if not chunk_df.empty:
+            if len(chunk_df.columns) == len(_MOUSE_ORTHOLOG_COLS):
+                chunk_df.columns = _MOUSE_ORTHOLOG_COLS
+            else:
+                print(f'  Warning: unexpected BioMart column count '
+                      f'(expected {len(_MOUSE_ORTHOLOG_COLS)}, '
+                      f'got {len(chunk_df.columns)}). Skipping chunk.')
+                chunk_df = pd.DataFrame(columns=_MOUSE_ORTHOLOG_COLS)
+        else:
+            chunk_df = pd.DataFrame(columns=_MOUSE_ORTHOLOG_COLS)
+        all_chunks.append(chunk_df)
+
+    return pd.concat(all_chunks, ignore_index=True)
+
+
+def _query_orthologs_by_symbol(gene_symbols: list[str]) -> pd.DataFrame:
+    '''
+    Fallback: query BioMart using mouse gene symbols for proteins where
+    ensembl_gene_mouse is null (~3.4% from the CTXcyto benchmark, typically
+    minor isoforms or poorly annotated UniProt entries).
+
+    A symbol can map to multiple Ensembl gene IDs (gene family members with
+    shared names). _resolve_orthologs() groups by gene_symbol_mouse_bm and
+    selects the highest-confidence ortholog from any resulting rows.
+    '''
+    if not gene_symbols:
+        return pd.DataFrame(columns=_MOUSE_ORTHOLOG_COLS)
+
+    all_chunks: list[pd.DataFrame] = []
+    n_chunks = (len(gene_symbols) + BIOMART_CHUNK_SIZE - 1) // BIOMART_CHUNK_SIZE
+    for i in range(0, len(gene_symbols), BIOMART_CHUNK_SIZE):
+        chunk     = gene_symbols[i:i + BIOMART_CHUNK_SIZE]
+        chunk_num = i // BIOMART_CHUNK_SIZE + 1
+        print(f'  BioMart (gene symbol fallback): chunk {chunk_num}/{n_chunks}, '
+              f'{len(chunk)} symbols...')
+        xml      = _build_ortholog_xml(chunk, filter_name='external_gene_name')
+        chunk_df = _biomart_post(xml)
+        if not chunk_df.empty:
+            if len(chunk_df.columns) == len(_MOUSE_ORTHOLOG_COLS):
+                chunk_df.columns = _MOUSE_ORTHOLOG_COLS
+            else:
+                print(f'  Warning: unexpected BioMart column count '
+                      f'(expected {len(_MOUSE_ORTHOLOG_COLS)}, '
+                      f'got {len(chunk_df.columns)}). Skipping chunk.')
+                chunk_df = pd.DataFrame(columns=_MOUSE_ORTHOLOG_COLS)
+        else:
+            chunk_df = pd.DataFrame(columns=_MOUSE_ORTHOLOG_COLS)
+        all_chunks.append(chunk_df)
+
+    return pd.concat(all_chunks, ignore_index=True)
+
+
+def _query_human_entrez(human_ensembl_ids: list[str]) -> dict[str, Optional[str]]:
+    '''
+    Query BioMart hsapiens_gene_ensembl to map human Ensembl gene IDs to NCBI
+    Entrez gene IDs. Returns dict: human_ensembl_id -> entrez_id (str) or None.
+
+    A second BioMart call is required because the mmusculus_gene_ensembl homolog
+    attributes do not include the human Entrez gene ID directly -- only the
+    human Ensembl gene ID and gene symbol are available from that dataset.
+    BioMart returns Entrez IDs as floats (e.g. 7157.0); these are converted to
+    integer strings ('7157').
+    '''
+    if not human_ensembl_ids:
+        return {}
+
+    attrs_xml = ''.join(
+        f'<Attribute name="{attr}"/>' for attr in _HUMAN_ENTREZ_ATTRS
+    )
+    all_chunks: list[pd.DataFrame] = []
+    n_chunks = (len(human_ensembl_ids) + BIOMART_CHUNK_SIZE - 1) // BIOMART_CHUNK_SIZE
+
+    for i in range(0, len(human_ensembl_ids), BIOMART_CHUNK_SIZE):
+        chunk     = human_ensembl_ids[i:i + BIOMART_CHUNK_SIZE]
+        chunk_num = i // BIOMART_CHUNK_SIZE + 1
+        print(f'  BioMart (human Entrez): chunk {chunk_num}/{n_chunks}, '
+              f'{len(chunk)} IDs...')
+        id_values = ','.join(chunk)
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<!DOCTYPE Query>'
+            '<Query virtualSchemaName="default" formatter="TSV" header="1" '
+            'uniqueRows="1" count="">'
+            '<Dataset name="hsapiens_gene_ensembl" interface="default">'
+            f'<Filter name="ensembl_gene_id" value="{id_values}"/>'
+            f'{attrs_xml}'
+            '</Dataset>'
+            '</Query>'
+        )
+        chunk_df = _biomart_post(xml)
+        if not chunk_df.empty:
+            if len(chunk_df.columns) == len(_HUMAN_ENTREZ_COLS):
+                chunk_df.columns = _HUMAN_ENTREZ_COLS
+                all_chunks.append(chunk_df)
+            else:
+                print(f'  Warning: unexpected column count from human Entrez query '
+                      f'(expected {len(_HUMAN_ENTREZ_COLS)}, '
+                      f'got {len(chunk_df.columns)}). Skipping chunk.')
+
+    if not all_chunks:
+        return {}
+
+    df = pd.concat(all_chunks, ignore_index=True)
+
+    result: dict[str, Optional[str]] = {}
+    for _, row in df.iterrows():
+        eid = row['human_ensembl_gene']
+        if pd.isna(eid):
+            continue
+        eid = str(eid)
+        entrez_val = row['entrez_id']
+        if pd.notna(entrez_val):
+            try:
+                # BioMart returns Entrez IDs as floats (e.g. 7157.0)
+                result[eid] = str(int(float(entrez_val)))
+            except (ValueError, TypeError):
+                result[eid] = str(entrez_val)
+        else:
+            result.setdefault(eid, None)
+
+    return result
+
+
+def _resolve_orthologs(
+    ortholog_df: pd.DataFrame,
+    entrez_map: dict[str, Optional[str]],
+    join_key: str,
+) -> dict[str, dict]:
+    '''
+    For each unique value of join_key in ortholog_df, select the primary human
+    ortholog and build a result record.
+
+    Selection rule for one-to-many cases (multiple human rows per mouse gene):
+      1. Prefer confidence == 1 (high confidence per Ensembl's classifier).
+      2. Among ties, prefer highest perc_id (% sequence identity, query gene).
+      3. The top-ranked ortholog is stored in human_ortholog_symbol/entrez.
+      4. All orthologs are listed in the notes field for downstream consumers
+         (e.g. PubMed module can optionally query all ortholog symbols).
+
+    ortholog_mapping_status values assigned here:
+      one_to_one  -- exactly one non-null human gene row for this mouse gene
+      one_to_many -- multiple non-null human gene rows for this mouse gene
+
+    'no_ortholog' is assigned in map_orthologs() for mouse genes present in
+    the filter input but returning zero human rows from BioMart.
+
+    Returns: dict mapping str(join_key_value) -> {symbol, entrez, status, notes}
+    '''
+    result: dict[str, dict] = {}
+
+    # Keep only rows that have an actual human ortholog (non-null, non-empty)
+    has_orth = ortholog_df[
+        ortholog_df['human_ensembl_gene'].notna() &
+        (ortholog_df['human_ensembl_gene'].astype(str).str.strip() != '')
+    ].copy()
+
+    if has_orth.empty:
+        return result
+
+    # Coerce numeric columns; fill NaN with 0 so sort order is well-defined
+    has_orth['confidence'] = (
+        pd.to_numeric(has_orth['confidence'], errors='coerce').fillna(0)
+    )
+    has_orth['perc_id'] = (
+        pd.to_numeric(has_orth['perc_id'], errors='coerce').fillna(0.0)
+    )
+
+    for key_val, group in has_orth.groupby(join_key):
+        group   = group.sort_values(['confidence', 'perc_id'], ascending=[False, False])
+        n       = len(group)
+        primary = group.iloc[0]
+
+        primary_symbol  = primary['human_gene_name']
+        primary_symbol  = str(primary_symbol) if pd.notna(primary_symbol) else None
+        primary_ensembl = str(primary['human_ensembl_gene'])
+        primary_entrez  = entrez_map.get(primary_ensembl)
+
+        if n == 1:
+            status = 'one_to_one'
+            notes  = ''
+        else:
+            status = 'one_to_many'
+            # Enumerate all orthologs so downstream consumers can use them
+            orth_info: list[str] = []
+            for _, r in group.iterrows():
+                sym        = str(r['human_gene_name']) if pd.notna(r['human_gene_name']) else 'unknown'
+                h_eid      = str(r['human_ensembl_gene'])
+                entrez_str = entrez_map.get(h_eid) or 'NA'
+                conf       = int(r['confidence'])
+                pct        = f"{r['perc_id']:.1f}"
+                orth_info.append(f'{sym} (Entrez:{entrez_str}, {pct}% id, conf={conf})')
+            notes = 'All human orthologs: ' + '; '.join(orth_info) + '.'
+
+        result[str(key_val)] = {
+            'symbol': primary_symbol,
+            'entrez': primary_entrez,
+            'status': status,
+            'notes':  notes,
+        }
+
+    return result
+
+
+def map_orthologs(mapping_df: pd.DataFrame) -> pd.DataFrame:
+    '''
+    Layer 2 ortholog mapping: populate human_ortholog_symbol,
+    human_ortholog_entrez, and ortholog_mapping_status using Ensembl BioMart.
+    Called only when project.organism == 'mouse'.
+
+    Strategy:
+      Primary lookup: join on ensembl_gene_mouse (stable, unambiguous ID from
+        UniProt Layer 1). Covers ~96.6% of proteins in the CTXcyto benchmark.
+      Fallback: for proteins with null ensembl_gene_mouse, query BioMart by
+        gene_symbol_mouse. Noted in mapping_notes.
+      Truly unmapped proteins (mapping_status == 'unmapped') have no gene
+        symbol or Ensembl ID; their ortholog columns remain null rather than
+        'no_ortholog', which would be misleading for proteins that couldn't
+        even be mapped to UniProt.
+    '''
+    df = mapping_df.copy()
+
+    # ----------------------------------------------------------------
+    # Step 1: Primary lookup by ensembl_gene_mouse
+    # ----------------------------------------------------------------
+    # UniProt returns versioned Ensembl IDs (e.g., ENSMUSG00000043154.16).
+    # BioMart requires unversioned IDs (ENSMUSG00000043154); the suffix is
+    # stripped here. The versioned form is preserved in the mapping table.
+    ensembl_ids_versioned = (
+        df['ensembl_gene_mouse']
+        .dropna()
+        .unique()
+        .tolist()
+    )
+    # Build a deduped unversioned list, and a lookup from unversioned -> versioned
+    # so BioMart results can be mapped back to the original IDs in the table.
+    versioned_to_base: dict[str, str] = {}
+    for vid in ensembl_ids_versioned:
+        base = vid.split('.')[0]
+        versioned_to_base[vid] = base
+
+    ensembl_ids = list({vid.split('.')[0] for vid in ensembl_ids_versioned})
+    print(f'  BioMart: primary lookup for {len(ensembl_ids)} unique Ensembl IDs '
+          f'(version suffixes stripped)...')
+    ensembl_ortholog_df = _query_orthologs_by_ensembl(ensembl_ids)
+
+    # ----------------------------------------------------------------
+    # Step 2: Fetch human Entrez IDs for all human Ensembl IDs found
+    # ----------------------------------------------------------------
+    human_ensembl_all = (
+        ensembl_ortholog_df['human_ensembl_gene']
+        .dropna()
+        .astype(str)
+        .str.strip()
+    )
+    human_ensembl_all = human_ensembl_all[human_ensembl_all != ''].unique().tolist()
+    print(f'  BioMart: fetching Entrez IDs for {len(human_ensembl_all)} '
+          f'unique human Ensembl IDs...')
+    entrez_map = _query_human_entrez(human_ensembl_all)
+
+    # ----------------------------------------------------------------
+    # Step 3: Resolve primary ortholog per mouse Ensembl gene
+    # ----------------------------------------------------------------
+    ensembl_orth_map = _resolve_orthologs(
+        ensembl_ortholog_df, entrez_map, join_key='ensembl_gene_mouse'
+    )
+
+    # ----------------------------------------------------------------
+    # Step 4: Apply results to the mapping table
+    # ----------------------------------------------------------------
+    for idx, row in df.iterrows():
+        e_id = row['ensembl_gene_mouse']
+        if pd.isna(e_id):
+            continue  # no Ensembl ID -- handled in symbol fallback below
+        # Strip version suffix to match keys in ensembl_orth_map
+        key = str(e_id).split('.')[0]
+        if key in ensembl_orth_map:
+            orth = ensembl_orth_map[key]
+            df.at[idx, 'human_ortholog_symbol']   = orth['symbol']
+            df.at[idx, 'human_ortholog_entrez']   = orth['entrez']
+            df.at[idx, 'ortholog_mapping_status'] = orth['status']
+            if orth['notes']:
+                existing = df.at[idx, 'mapping_notes'] or ''
+                sep = ' ' if existing else ''
+                df.at[idx, 'mapping_notes'] = existing + sep + orth['notes']
+        else:
+            # Gene found in UniProt but BioMart returned no rows for it
+            df.at[idx, 'ortholog_mapping_status'] = 'no_ortholog'
+
+    # ----------------------------------------------------------------
+    # Step 5: Gene symbol fallback for proteins with null ensembl_gene_mouse
+    # ----------------------------------------------------------------
+    # Excludes unmapped proteins (no gene symbol available for those).
+    null_ensembl_mask = (
+        df['ensembl_gene_mouse'].isna() &
+        df['gene_symbol_mouse'].notna() &
+        (df['mapping_status'] != 'unmapped')
+    )
+    null_ensembl_df = df[null_ensembl_mask]
+
+    if not null_ensembl_df.empty:
+        symbols = null_ensembl_df['gene_symbol_mouse'].dropna().unique().tolist()
+        print(f'  BioMart (gene symbol fallback): {len(null_ensembl_df)} proteins '
+              f'with null Ensembl ID, {len(symbols)} unique symbols...')
+        sym_ortholog_df = _query_orthologs_by_symbol(symbols)
+
+        # Fetch Entrez IDs only for human Ensembl IDs not already in entrez_map
+        sym_human_ensembl = (
+            sym_ortholog_df['human_ensembl_gene']
+            .dropna()
+            .astype(str)
+            .str.strip()
+        )
+        sym_human_ensembl = sym_human_ensembl[sym_human_ensembl != ''].unique().tolist()
+        new_ids = [x for x in sym_human_ensembl if x not in entrez_map]
+        if new_ids:
+            new_entrez = _query_human_entrez(new_ids)
+            entrez_map.update(new_entrez)
+
+        sym_orth_map = _resolve_orthologs(
+            sym_ortholog_df, entrez_map, join_key='gene_symbol_mouse_bm'
+        )
+
+        for idx, row in null_ensembl_df.iterrows():
+            sym = row['gene_symbol_mouse']
+            if sym and sym in sym_orth_map:
+                orth = sym_orth_map[sym]
+                df.at[idx, 'human_ortholog_symbol']   = orth['symbol']
+                df.at[idx, 'human_ortholog_entrez']   = orth['entrez']
+                df.at[idx, 'ortholog_mapping_status'] = orth['status']
+                fallback_note = (
+                    'Ortholog mapped via gene symbol fallback '
+                    '(Ensembl ID unavailable from UniProt).'
+                )
+                if orth['notes']:
+                    fallback_note += ' ' + orth['notes']
+                existing = df.at[idx, 'mapping_notes'] or ''
+                sep = ' ' if existing else ''
+                df.at[idx, 'mapping_notes'] = existing + sep + fallback_note
+            else:
+                df.at[idx, 'ortholog_mapping_status'] = 'no_ortholog'
+
+    # --- Cleanup: any remaining null ortholog statuses for non-unmapped proteins ---
+    # Rare edge case: a protein was UniProt-mapped but has neither an Ensembl ID
+    # nor a gene symbol (no lookup possible). Set to 'no_ortholog' so downstream
+    # consumers see a defined status rather than null.
+    can_lookup_mask = (
+        (df['mapping_status'] != 'unmapped') &
+        df['ortholog_mapping_status'].isna()
+    )
+    if can_lookup_mask.any():
+        df.loc[can_lookup_mask, 'ortholog_mapping_status'] = 'no_ortholog'
+        print(f'  {can_lookup_mask.sum()} protein(s) with no usable ID set to no_ortholog.')
+
+    return df
+
+
+# ============================================================
 # Validation report (part 3)
 # ============================================================
 
@@ -466,6 +988,7 @@ def write_report(
     cache_hit: bool,
     cache_key: str,
     cache_days: int,
+    organism: str,
 ) -> None:
     '''Write validation_report_part3.txt summarizing ID mapping results.'''
 
@@ -493,7 +1016,7 @@ def write_report(
 
     lines = [
         '=' * 70,
-        f'  ProSIFT Validation Report -- Part 3: UniProt ID Mapping',
+        '  ProSIFT Validation Report -- Part 3: UniProt ID Mapping',
         f'  Run: {run_id}',
         f'  Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
         '=' * 70,
@@ -519,9 +1042,40 @@ def write_report(
         f'  Ensembl gene (mouse):             {n_ensembl} / {n_input - n_unmapped}',
         f'  (Denominator excludes {n_unmapped} unmapped protein(s) with no annotation.)',
         '',
-        '  Ortholog columns:                 null (Phase 3 -- not yet implemented)',
-        '',
     ]
+
+    # --- Ortholog mapping section ---
+    if organism == 'mouse':
+        orth_counts  = df['ortholog_mapping_status'].value_counts()
+        n_121        = int(orth_counts.get('one_to_one',  0))
+        n_12m        = int(orth_counts.get('one_to_many', 0))
+        n_none       = int(orth_counts.get('no_ortholog', 0))
+        n_null       = int(df['ortholog_mapping_status'].isna().sum())
+        n_mappable   = n_input - n_unmapped
+        n_sym_fb     = int(
+            df['mapping_notes']
+            .fillna('')
+            .str.contains('gene symbol fallback', case=False)
+            .sum()
+        )
+        lines += [
+            '--- Ortholog Mapping (Mouse -> Human, Ensembl BioMart) ---',
+            '',
+            f'  One-to-one:                       {n_121} ({_pct(n_121)})',
+            f'  One-to-many:                      {n_12m} ({_pct(n_12m)})',
+            f'  No ortholog:                      {n_none} ({_pct(n_none)})',
+            f'  Null (UniProt-unmapped, skipped): {n_null} ({_pct(n_null)})',
+            f'  Total with ortholog:              {n_121 + n_12m} / {n_mappable}',
+            f'  Gene symbol fallback used:        {n_sym_fb} proteins',
+            '',
+        ]
+    else:
+        lines += [
+            '--- Ortholog Mapping ---',
+            '',
+            f'  Organism: {organism} -- ortholog mapping not applicable.',
+            '',
+        ]
 
     if n_unmapped > 0:
         lines += [
@@ -572,15 +1126,8 @@ def write_report(
         '',
         f'  Cache lifetime:                   {cache_days} days',
         f'  Cache key:                        {cache_key}',
+        f'  Schema version:                   {CURRENT_SCHEMA_VERSION}',
         '',
-        '--- Notes ---',
-        '',
-        '  The ortholog mapping columns (human_ortholog_symbol,',
-        '  human_ortholog_entrez, ortholog_mapping_status) are reserved',
-        '  for Phase 3. All values are null in this run.',
-        '',
-        '  Downstream modules that use human-centric databases (DGIdb,',
-        '  DisGeNET) will require ortholog mapping to be implemented.',
         '=' * 70,
     ]
 
@@ -641,7 +1188,18 @@ def main() -> None:
         mapping_df = parse_json_results(api_results, protein_ids)
 
         # ----------------------------------------------------------
-        # 5. Cache the result
+        # 5. Layer 2 ortholog mapping (mouse only)
+        #    Runs after UniProt mapping and before caching so that
+        #    the cached Parquet contains the complete table.
+        # ----------------------------------------------------------
+        if organism == 'mouse':
+            print(f'[{run_id}] Running Layer 2 ortholog mapping via Ensembl BioMart...')
+            mapping_df = map_orthologs(mapping_df)
+        else:
+            print(f'[{run_id}] Organism is "{organism}" -- skipping ortholog mapping.')
+
+        # ----------------------------------------------------------
+        # 6. Cache the completed mapping table (includes ortholog data)
         # ----------------------------------------------------------
         print(f'[{run_id}] Saving mapping table to cache...')
         save_cache(cachedir, cache_key, mapping_df)
@@ -654,7 +1212,7 @@ def main() -> None:
         mapping_df = mapping_df.sort_values('_order').drop(columns='_order')
 
     # ----------------------------------------------------------
-    # 6. Write outputs
+    # 7. Write outputs
     # ----------------------------------------------------------
     mapping_out = os.path.join(outdir, f'{run_id}.id_mapping.parquet')
     report_out  = os.path.join(outdir, f'{run_id}.validation_report_part3.txt')
@@ -670,6 +1228,7 @@ def main() -> None:
         cache_hit=cache_hit,
         cache_key=cache_key,
         cache_days=cache_days,
+        organism=organism,
     )
     print(f'[{run_id}] Written: {report_out}')
 
@@ -678,6 +1237,12 @@ def main() -> None:
     print(f'\n[{run_id}] Mapping complete:')
     for status, count in status_counts.items():
         print(f'  {status}: {count} ({100 * count / len(protein_ids):.1f}%)')
+
+    if organism == 'mouse':
+        orth_counts = mapping_df['ortholog_mapping_status'].value_counts()
+        print(f'\n[{run_id}] Ortholog mapping:')
+        for status, count in orth_counts.items():
+            print(f'  {status}: {count} ({100 * count / len(protein_ids):.1f}%)')
 
     print(f'\n[{run_id}] Done.')
 

@@ -165,11 +165,16 @@ def classify_missingness(
     detection filter table (DEP-style rule):
 
       SINGLE-GROUP proteins:
-        - Missing values in the ABSENT group (0 detections) → MNAR
-        - Any sporadic missing values in the DETECTED group → MAR
+        - Missing values in the ABSENT group (0 detections) -> MNAR
+        - Any sporadic missing values in the DETECTED group -> MAR
+
+      PARTIAL proteins:
+        - Missing values in the sub-threshold group -> MNAR (likely below
+          detection limit, similar to SINGLE-GROUP but with some signal)
+        - Any sporadic missing values in the passing group -> MAR
 
       PASSED proteins:
-        - Any missing values → MAR (sporadic technical dropout)
+        - Any missing values -> MAR (sporadic technical dropout)
 
       SPARSE / ABSENT proteins should not appear in the normalized matrix.
       If they do (unexpected), their missing values are left unclassified.
@@ -177,7 +182,7 @@ def classify_missingness(
     Returns:
         mnar_mask    -- bool DataFrame, same shape as norm_df; True = impute MNAR
         mar_mask     -- bool DataFrame, same shape as norm_df; True = impute MAR
-        protein_class -- per-protein Series: "MNAR", "MAR", or "none"
+        protein_class -- per-protein Series: "MNAR", "MAR", "mixed", or "none"
     """
     groups  = sorted(set(group_map.values()))
     grp_samples: dict[str, list[str]] = {
@@ -212,11 +217,11 @@ def classify_missingness(
                     break
 
             if absent_grp is not None:
-                # Absent group missing values → MNAR
+                # Absent group missing values -> MNAR
                 for s in grp_samples[absent_grp]:
                     if prot_missing[s]:
                         mnar_mask.loc[protein_id, s] = True
-                # Detected group sporadic missing values → MAR
+                # Detected group sporadic missing values -> MAR
                 for g in groups:
                     if g == absent_grp:
                         continue
@@ -228,8 +233,53 @@ def classify_missingness(
                 mnar_mask.loc[protein_id] = prot_missing
             protein_class.loc[protein_id] = "MNAR"
 
+        elif status == "PARTIAL":
+            # Sub-threshold group has some detections but below min_detections.
+            # The missing values in that group are likely below detection limit
+            # (MNAR), while sporadic gaps in the passing group are MAR.
+            # Identify the sub-threshold group: has missing values but is NOT
+            # completely absent (that would be SINGLE-GROUP).
+            has_mnar = False
+            has_mar = False
+            for g in groups:
+                g_missing = prot_missing[grp_samples[g]]
+                g_all_missing = g_missing.all()
+                g_any_missing = g_missing.any()
+
+                if g_any_missing and not g_all_missing:
+                    # Group has a mix of detected and missing values.
+                    # Count how many are detected in this group.
+                    n_detected = (~g_missing).sum()
+                    n_total = len(grp_samples[g])
+                    # For the sub-threshold group (minority detections),
+                    # missing values are MNAR. For the passing group
+                    # (majority detections), missing values are MAR.
+                    # Heuristic: if fewer than half are detected, treat
+                    # as the sub-threshold group (MNAR); otherwise MAR.
+                    if n_detected < n_total / 2:
+                        for s in grp_samples[g]:
+                            if prot_missing[s]:
+                                mnar_mask.loc[protein_id, s] = True
+                        has_mnar = True
+                    else:
+                        for s in grp_samples[g]:
+                            if prot_missing[s]:
+                                mar_mask.loc[protein_id, s] = True
+                        has_mar = True
+                elif g_all_missing:
+                    # Entire group missing -- MNAR (should not happen for
+                    # PARTIAL, but handle defensively)
+                    for s in grp_samples[g]:
+                        mnar_mask.loc[protein_id, s] = True
+                    has_mnar = True
+                # else: no missing values in this group, nothing to classify
+
+            protein_class.loc[protein_id] = "mixed" if (has_mnar and has_mar) else (
+                "MNAR" if has_mnar else "MAR"
+            )
+
         elif status == "PASSED":
-            # Sporadic missingness → all MAR
+            # Sporadic missingness -> all MAR
             mar_mask.loc[protein_id] = prot_missing
             protein_class.loc[protein_id] = "MAR"
 

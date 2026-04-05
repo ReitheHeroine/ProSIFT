@@ -8,7 +8,7 @@ output:
     theme: default
 ---
 
-**Last Updated:** 2026-03-30
+**Last Updated:** 2026-04-01
 **Module Status:** Implemented and tested (2026-03-30)
 **Pipeline Position:** [Module 03: Normalization & Imputation] --> **Module 04: Differential Abundance** --> [Module 05: Enrichment, Module 06: Database Queries]
 
@@ -393,6 +393,8 @@ When multiple contrasts are present, the block from CONTRAST through TOP 10 is r
 
 # 5. Design Decisions
 
+*This section documents module-internal design decisions. Cross-cutting decisions that affect multiple modules (e.g., pipeline architecture, module numbering, ID mapping strategy) are in the project history (`proSIFT_project_history.Rmd`) Decision Register (Section 1). Where a decision has both pipeline-level and module-level implications, each document covers its own level and cross-references the other.*
+
 ### 2026-03-23 -- DEqMS as Default Over limma
 
 **Decision:** DEqMS is the default method; limma is the fallback when peptide count information is unavailable.
@@ -597,3 +599,13 @@ To test the limma-only path, temporarily set `differential_abundance.method: "li
 **Reason:** Phase 2 implementation milestone.
 **Affected processes:** DIFFERENTIAL_ABUNDANCE.
 **Downstream effects:** Module 04 outputs now available for Module 05 (Enrichment) design and implementation.
+
+### 2026-04-01 -- Documentation Restructuring: Tiered Decision Registers and Cross-References
+
+**Change:** Applied the documentation restructuring pattern to this module spec:
+
+1. **Section 5 (Design Decisions)** intro added explaining the tiered Decision Register approach (module-internal decisions here, cross-cutting decisions in `proSIFT_project_history.Rmd`).
+
+**Reason:** Consistency with the three-tier documentation structure (master doc, project history, module specs) established on 2026-04-01.
+**Affected sections:** Section 5 (intro added), Section 9 (this entry).
+**Downstream effects:** None (documentation restructuring only).

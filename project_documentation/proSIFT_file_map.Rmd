@@ -1,0 +1,199 @@
+---
+title: "ProSIFT -- File System Map"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+    toc_depth: 3
+    theme: default
+---
+
+**Purpose:** Reference for project directory structure, script locations, and output file layout. Read on demand when creating or locating files. Updated by Claude Code at session end when files are created, moved, or deleted.
+
+**Last Updated:** 2026-04-01 (Documentation restructure; .claude/ directory added)
+
+---
+
+# 1. Directory Structure
+
+```
+ProSIFT/
+│
+├── .gitignore
+├── CLAUDE.md                                # Project-level Claude Code instructions
+├── environment.yml                          # Conda environment spec (Python 3.12, all Phase 1+ deps)
+├── main.nf                                  # Nextflow entry point
+├── nextflow.config                          # Pipeline config (params, profiles: local/pbs/conda/singularity)
+│
+├── .claude/
+│   ├── settings.json                        # Claude Code permission settings
+│   ├── agents/
+│   │   └── prosift-docs.md                  # prosift-docs subagent: locates sections in .Rmd documentation files
+│   └── templates/
+│       └── script_header.txt                # Standard script header template (Python, R, Bash)
+│
+├── conf/
+│   └── base.config                          # Default resource allocations per process
+│
+├── workflows/
+│   └── prosift.nf                           # Top-level PROSIFT workflow (all Phase 1 processes wired; multiMap cleanup 2026-03-27)
+│
+├── modules/
+│   └── local/
+│       ├── validate_inputs/main.nf          # Process: VALIDATE_INPUTS (functional)
+│       ├── filter_proteins/main.nf          # Process: FILTER_PROTEINS (functional)
+│       ├── uniprot_mapping/main.nf          # Process: UNIPROT_MAPPING (functional)
+│       ├── prenorm_qc/main.nf              # Process: PRENORM_QC (functional)
+│       ├── missingness_report/main.nf       # Process: MISSINGNESS_REPORT (functional)
+│       ├── normalize/main.nf               # Process: NORMALIZE (functional, 2026-03-30)
+│       ├── impute/main.nf                  # Process: IMPUTE (functional, 2026-03-30)
+│       ├── differential_abundance/main.nf  # Process: DIFFERENTIAL_ABUNDANCE (functional, 2026-03-30)
+│       └── enrichment/main.nf              # Process: ENRICHMENT (functional, 2026-03-31)
+│
+├── bin/                                     # Python scripts called from Nextflow processes (executable, shebangs set)
+│   ├── validate_inputs.py                   # Processes 4.1-4.3: matrix/metadata/cross-validation
+│   ├── filter_proteins.py                   # Process 4.4: detection filter + missingness overview
+│   ├── uniprot_mapping.py                   # Processes 4.5-4.9: UniProt bulk ID mapping + cache
+│   ├── prenorm_qc.py                       # Module 02: pre-normalization QC/EDA (functional)
+│   ├── missingness_report.py               # Process 4.10: missingness visualizations (functional, 2026-03-27)
+│   ├── prosift_plot_utils.py               # Shared plotting utilities for Modules 02-03 (functional, 2026-03-27)
+│   ├── normalize.py                         # Module 03 NORMALIZE: log2 + normalization + diagnostics + CV (functional, 2026-03-30)
+│   ├── impute.py                            # Module 03 IMPUTE: MNAR/MAR classification + imputation + diagnostics (functional, 2026-03-30)
+│   ├── differential_abundance.py            # Module 04: limma + DEqMS via rpy2; volcano + MA plots; 14-column results (functional, 2026-03-30)
+│   └── enrichment.py                        # Module 05: gseapy ORA + preranked GSEA; lollipop + running score plots; enrichment + protein-term mapping tables (functional, 2026-03-31)
+│
+├── project_documentation/
+│   ├── proSIFT_master_doc.Rmd               # Current-state reference: architecture, module summaries, infrastructure, roadmap
+│   ├── proSIFT_project_history.Rmd          # Append-only: Decision Register and Development Log
+│   ├── proSIFT_handoff.Rmd                  # Operational coordination (core handoff)
+│   ├── proSIFT_session_log.Rmd              # Append-only session history
+│   ├── proSIFT_environment.Rmd              # Platform, rsync, conda, git, code style
+│   ├── proSIFT_file_map.Rmd                 # THIS FILE - directory structure and scripts reference
+│   ├── proSIFT_handoff.html                 # Rendered handoff (auto-generated; gitignored)
+│   ├── figures/
+│   │   ├── prosift_pipeline_dag.svg         # Pipeline DAG diagram
+│   │   └── prosift_input_validation_workflow.svg
+│   └── modules/
+│       ├── 01_input_validation.Rmd          # Module 01: Input Validation & ID Mapping (design complete, implemented)
+│       ├── 02_qc_eda.Rmd                    # Module 02: Pre-Normalization QC/EDA (design complete, implemented)
+│       ├── 03a_normalization_imputation.Rmd  # Module 03: Normalization & Imputation (design complete, implemented, tested)
+│       ├── 03b_qc_report_assembly.Rmd       # QC Report Assembly checkpoint (stub; sits after Module 03, before Module 04)
+│       ├── 04_differential_abundance.Rmd    # Module 04: Differential Abundance (implemented and tested 2026-03-30)
+│       ├── 05_enrichment.Rmd                # Module 05: ORA/GSEA Enrichment (design complete, implemented, tested)
+│       ├── 06_database_queries.Rmd          # Module 06: Database Queries (stub)
+│       ├── 07_results_assembly.Rmd          # Module 07: Results Assembly / SQLite (stub)
+│       └── 08_frontend.Rmd                  # Module 08: Interactive Frontend (stub)
+│
+├── CTX_synaptosome_project_data/
+│   └── Filtered Proteins-Table 1.csv        # Raw DIA-NN output (source data, not committed)
+│
+├── scripts/                                 # Data preparation scripts (not part of pipeline)
+│   ├── prepare_ctx_data.py                  # CTX-specific: raw DIA-NN -> master ProSIFT files
+│   ├── generate_run_config.py               # Interactive: master files -> run_config.yml
+│   └── prepare_prosift_input.py             # run_config.yml -> per-run input directories + samplesheet.csv
+│
+├── prosift_inputs/                          # Pre-pipeline inputs (generated by data prep scripts)
+│   ├── CTX_synaptosome_abundance.csv        # Master abundance (8,948 proteins x 49 cols; shared by all runs)
+│   ├── CTX_synaptosome_metadata.csv         # Master metadata (24 samples)
+│   ├── CTX_synaptosome_protein_reference.csv # Protein reference (gene symbols, descriptions)
+│   ├── run_config.yml                       # 12 run definitions (generated by generate_run_config.py)
+│   ├── samplesheet.csv                      # Nextflow input: one row per run (run_id, abundance, metadata, params)
+│   ├── CTXcyto_WT_vs_CTXcyto_KO/           # Per-run directories (12 total, 2 files each)
+│   │   ├── CTXcyto_WT_vs_CTXcyto_KO_metadata.csv   # sample_id + group column for this run's 6 samples
+│   │   └── CTXcyto_WT_vs_CTXcyto_KO_params.yml     # Run params; abundance_matrix -> ../CTX_synaptosome_abundance.csv
+│   └── [11 more run directories, same structure]
+│
+├── work/                                    # Nextflow work directory (not committed; auto-generated on run)
+│
+└── results/                                 # Pipeline outputs (not committed; populated on run)
+    ├── cache/
+    │   └── id_mapping/                      # UniProt API response cache (persists across runs; key = MD5 hash)
+    ├── pipeline_info/                       # Nextflow execution trace, timeline, report
+    └── {run_id}/
+        ├── validation/                      # Module 01 outputs per run
+        │   ├── {run_id}.filtered_matrix.parquet        # Proteins passing detection filter (input to Modules 02, 03)
+        │   ├── {run_id}.detection_filter_table.csv     # Per-protein filter status and detection counts
+        │   ├── {run_id}.id_mapping.parquet             # UniProt mapping table (10 cols; input to all downstream modules)
+        │   ├── {run_id}.validation_report_part1.txt    # Processes 4.1-4.3 report
+        │   ├── {run_id}.validation_report_part2.txt    # Process 4.4 report (filter summary + missingness)
+        │   ├── {run_id}.validation_report_part3.txt    # Processes 4.5-4.9 report (mapping summary + coverage)
+        │   ├── {run_id}.missingness_report.html        # Process 4.10: interactive missingness report (HTML with 4 Plotly plots)
+        │   └── {run_id}.missingness_plots/             # Process 4.10: static PNGs (4 files: filter_categories, per_sample_detection, missingness_heatmap, missingness_histogram)
+        ├── qc/                              # Module 02 outputs per run (functional)
+        │   ├── {run_id}.sample_summary.parquet          # Per-sample metrics
+        │   ├── {run_id}.sample_summary.csv
+        │   ├── {run_id}.sample_flags.parquet             # Per-sample outlier flags
+        │   ├── {run_id}.sample_flags.csv
+        │   ├── {run_id}.correlation_matrix.parquet       # Sample-by-sample Pearson correlation
+        │   ├── {run_id}.pca_results.parquet              # PCA coordinates + variance explained
+        │   ├── {run_id}.prenorm_qc_report.html           # Consolidated QC report with all plots
+        │   ├── {run_id}.sample_intensity_summary.png/.html
+        │   ├── {run_id}.intensity_boxplots.png/.html
+        │   ├── {run_id}.qq_plot.png/.html
+        │   ├── {run_id}.pca_scatter.png/.html
+        │   └── {run_id}.correlation_heatmap.png/.html
+        ├── normalization/                     # Module 03 NORMALIZE + IMPUTE outputs per run (both functional, full pipeline tested 2026-03-30)
+            ├── {run_id}.normalized_matrix.parquet        # Normalized data (approx log2; input to IMPUTE)
+            ├── {run_id}.normalization_summary.txt        # Method used, log2 applied, warnings
+            ├── {run_id}.cv_summary.parquet               # Per-protein per-group CV (linear scale)
+            ├── {run_id}.cv_summary.csv
+            ├── {run_id}.postnorm_pca_results.parquet
+            ├── {run_id}.postnorm_correlation_matrix.parquet
+            ├── {run_id}.postnorm_boxplots.png/.html
+            ├── {run_id}.postnorm_pca_scatter.png/.html
+            ├── {run_id}.postnorm_correlation_heatmap.png/.html
+            ├── {run_id}.imputed_matrix.parquet           # Fully imputed data (no NaN; input to Module 04)
+            ├── {run_id}.imputation_summary.parquet       # Per-protein imputation class and counts
+            ├── {run_id}.imputation_summary.csv
+            ├── {run_id}.imputation_summary.txt
+            ├── {run_id}.imputation_distributions.png/.html
+            └── {run_id}.imputation_fractions.png/.html
+        ├── differential_abundance/             # Module 04 outputs per run (functional, full pipeline tested 2026-03-30)
+        │   ├── {run_id}.diff_abundance_results.parquet           # Full results table (14 cols, all proteins)
+        │   ├── {run_id}.diff_abundance_results.csv
+        │   ├── {run_id}.diff_abundance_summary.txt
+        │   ├── {run_id}.{contrast}.volcano_plot.png/.html        # One pair per contrast
+        │   └── {run_id}.{contrast}.ma_plot.png/.html             # One pair per contrast
+        └── enrichment/                         # Module 05 outputs per run (functional, standalone tested 2026-03-31)
+            ├── {run_id}.enrichment_results.parquet               # Unified results (13 cols; all contrasts, libraries, analysis types)
+            ├── {run_id}.enrichment_results.csv
+            ├── {run_id}.protein_term_mapping.parquet             # Many-to-many protein-term pairs (8 cols)
+            ├── {run_id}.enrichment_summary.txt
+            ├── {run_id}.{contrast}.{library}.ora_lollipop.png/.html   # One pair per contrast per library
+            ├── {run_id}.{contrast}.{library}.gsea_lollipop.png/.html  # One pair per contrast per library
+            └── {run_id}.{contrast}.{library}.gsea_running_score.{term}.png  # Top N terms per library
+```
+
+---
+
+# 2. Scripts Reference
+
+| Script | Module | Description | Last Updated |
+|---|---|---|---|
+| scripts/prepare_ctx_data.py | Data prep | Converts raw DIA-NN CTX output to master ProSIFT-format files | 2026-03-25 |
+| scripts/generate_run_config.py | Data prep | Interactive tool: define pairwise runs from master files, outputs run_config.yml | 2026-03-25 |
+| scripts/prepare_prosift_input.py | Data prep | Splits master files into per-run input directories using run_config.yml; generates samplesheet.csv | 2026-03-26 |
+| bin/validate_inputs.py | Module 01 | Processes 4.1-4.3: validates abundance matrix, metadata, cross-validates samples; outputs validated Parquets + report part 1 | 2026-03-26 |
+| bin/filter_proteins.py | Module 01 | Process 4.4: detection filter; classifies proteins PASSED/SINGLE-GROUP/SPARSE/ABSENT; outputs filtered Parquet, filter table, report part 2 | 2026-03-26 |
+| bin/uniprot_mapping.py | Module 01 | Processes 4.5-4.9: UniProt bulk ID mapping via paginated JSON results endpoint; MD5-keyed file cache; ortholog columns null (Phase 3); outputs id_mapping.parquet + report part 3 | 2026-03-26 |
+| bin/missingness_report.py | Module 01 | Process 4.10: 4 missingness plots (filter categories, per-sample detection, heatmap, histogram); HTML report + static PNGs via kaleido | 2026-03-27 |
+| bin/prenorm_qc.py | Module 02 | Pre-normalization QC/EDA: per-sample summaries, box plots, Q-Q plot, PCA, correlation heatmap, outlier flagging; outputs 4 data files + 5 plot types + HTML report. Imports shared plot functions from prosift_plot_utils.py. | 2026-03-27 |
+| bin/prosift_plot_utils.py | Shared | Shared plotting utilities for Modules 02 and 03: plot_intensity_boxplots, compute_and_plot_pca, compute_and_plot_correlation, make_color_map, save_plot. label and note parameters allow phase-specific titles and annotations. | 2026-03-27 |
+| bin/normalize.py | Module 03 | NORMALIZE process: method-aware log2 + median/quantile/VSN/none + post-norm diagnostics (via prosift_plot_utils.py) + CV on back-transformed linear scale. VSN uses vsn2()+predict() via rpy2. | 2026-03-30 |
+| bin/impute.py | Module 03 | IMPUTE process: DEP-style MNAR/MAR classification from detection_filter_table.csv; MinProb (np.random.default_rng, per-sample low-end draws) for MNAR; KNN (sklearn KNNImputer, protein-wise, no transpose) for MAR; left_censored available in single mode. 2 diagnostic plot types (KDE distributions, imputation fraction bar chart). 8 output files. | 2026-03-30 |
+| bin/differential_abundance.py | Module 04 | DIFFERENTIAL_ABUNDANCE process: contrast parsing + validation, peptide count summarization (min of nonzero), limma + DEqMS via rpy2 (localconverter API), 14-column results table, volcano + MA plots per contrast (PNG + HTML). R_HOME required for rpy2 on macOS. | 2026-03-30 |
+| bin/enrichment.py | Module 05 | ENRICHMENT process: gene symbol preparation (unmapped drop, duplicate collapse), ORA via gseapy.enrich() with detected-proteins background, preranked GSEA via gseapy.prerank() (t-statistic default ranking, threads=1 for determinism), per-library FDR correction, lollipop plots (Plotly PNG+HTML), GSEA running score plots (gseapy built-in PNG). GMT paths resolved relative to params.yml directory. | 2026-03-31 |
+
+---
+
+# 3. File System Update Instructions
+
+When creating, moving, or deleting files:
+
+1. Update the directory tree above
+2. Update the "Last updated" date
+3. Add notes for new directories or significant files
+4. Update Scripts Reference table if new scripts created
+5. Check if new files need GitHub inclusion/exclusion (see Environment Reference Section 4)

@@ -8,7 +8,7 @@ output:
     theme: default
 ---
 
-**Last Updated:** 2026-03-30
+**Last Updated:** 2026-04-01
 
 **Module Status:** Both processes implemented and tested (2026-03-30). Module 03 complete.
 
@@ -49,7 +49,7 @@ Operations 1-3 are handled by the NORMALIZE process. Operations 4-5 are handled 
 - Differential abundance testing (Module 04)
 - Remove or exclude any samples or proteins
 
-See master overview (Section 2.2, main spine) for how this module sits in the analytical path.
+See master project documentation (`proSIFT_master_doc.Rmd`) Section 2.2 (main spine) for how this module sits in the analytical path.
 
 ---
 
@@ -247,17 +247,18 @@ Script: `bin/impute.py`
 
 **What it does:** Classifies each protein's missing values as MNAR (missing not at random, below detection limit) or MAR (missing at random, sporadic technical dropout) to determine the appropriate imputation method.
 
-**Classification rule (from DEP):**
+**Classification rule (from DEP, extended for PARTIAL):**
 
 - **MNAR:** Protein is classified SINGLE-GROUP by Module 01's detection filter (detected in >= `min_detections_per_group` replicates in one group, zero detections in the other). All missing values in the absent group are classified MNAR. Any sporadic missing values in the detected group (if the protein has e.g., 2/3 detection) are classified MAR.
+- **Mixed (MNAR + MAR):** Protein is classified PARTIAL by Module 01's detection filter (detected in >= `min_detections_per_group` replicates in one group, sub-threshold non-zero detections in the other). Missing values in the sub-threshold group are classified MNAR (likely below detection limit, similar to SINGLE-GROUP but with some signal). Sporadic missing values in the passing group are classified MAR. The protein-level `imputation_class` is "mixed" when both MNAR and MAR values are present.
 - **MAR:** Protein is classified PASSED by Module 01's detection filter (detected in both groups) and has sporadic missing values (1-2 missing out of 6). These missing values are classified MAR.
 - **None:** Protein has no missing values. No imputation needed.
 
-**Input:** The classification uses the `filter_status` column from `detection_filter_table.csv` (from Module 01). Proteins with `filter_status == "SINGLE-GROUP"` have MNAR missingness in their absent group. Proteins with `filter_status == "PASSED"` and any remaining NaN values have MAR missingness.
+**Input:** The classification uses the `filter_status` column from `detection_filter_table.csv` (from Module 01). Proteins with `filter_status == "SINGLE-GROUP"` have MNAR missingness in their absent group. Proteins with `filter_status == "PARTIAL"` have MNAR missingness in their sub-threshold group and MAR in their passing group. Proteins with `filter_status == "PASSED"` and any remaining NaN values have MAR missingness.
 
-**Output:** The classification is recorded in the imputation summary table (`imputation_class` column: MNAR, MAR, or none) and used to route each protein to the appropriate imputation method.
+**Output:** The classification is recorded in the imputation summary table (`imputation_class` column: MNAR, MAR, mixed, or none) and used to route each protein to the appropriate imputation method.
 
-**Why this works with our data:** Module 01's detection filter already did the structural classification. SINGLE-GROUP proteins are the classic MNAR case (biologically absent from one condition). PASSED proteins with sporadic missing values are the classic MAR case (random technical dropout from otherwise well-detected proteins). The classification is deterministic and rule-based, with no statistical testing, so sample size is not a concern.
+**Why this works with our data:** Module 01's detection filter already did the structural classification. SINGLE-GROUP proteins are the classic MNAR case (biologically absent from one condition). PARTIAL proteins are an intermediate case: the sub-threshold group has some signal but not enough for reliable estimates, so its missing values are treated as MNAR while the passing group's gaps are MAR. PASSED proteins with sporadic missing values are the classic MAR case (random technical dropout from otherwise well-detected proteins). The classification is deterministic and rule-based, with no statistical testing, so sample size is not a concern.
 
 ### 4.8 MinProb Imputation (for MNAR Values)
 
@@ -330,6 +331,8 @@ Script: `bin/impute.py`
 
 # 5. Design Decisions
 
+*This section documents module-internal design decisions. Cross-cutting decisions that affect multiple modules (e.g., the decision to combine normalization and imputation into one module, module renumbering) are in the project history (`proSIFT_project_history.Rmd`) Decision Register (Section 1). Where a decision has both pipeline-level and module-level implications, each document covers its own level and cross-references the other.*
+
 ### 2026-03-27 -- Combined Normalization and Imputation Module
 
 **Decision:** Normalization and imputation are combined into a single module (Module 03) with two Nextflow processes (NORMALIZE and IMPUTE), rather than being separate modules.
@@ -338,7 +341,7 @@ Script: `bin/impute.py`
 
 **Alternatives considered:** (1) Separate modules (Module 03 Normalization, Module 04 Imputation) -- the previous design from earlier in this session. Rejected as over-granular: the separation added wiring complexity without meaningful benefit. (2) Single process for both -- rejected because the CV computation sits between them and benefits from the process boundary (NORMALIZE outputs can be inspected before imputation runs).
 
-**Impact:** Module numbering changes. What was Module 05 (Differential Abundance) becomes Module 04. Downstream modules shift accordingly. The module documentation file is `03_normalization_imputation.Rmd`.
+**Impact:** Module numbering changes. What was Module 05 (Differential Abundance) becomes Module 04. Downstream modules shift accordingly. The module documentation file is `03a_normalization_imputation.Rmd`. See also project history (`proSIFT_project_history.Rmd`) Decision Register entry 2026-03-27 "Module 03 Recombined: Normalization & Imputation in One Module" for the pipeline-level renumbering impact.
 
 ### 2026-03-27 -- Method-Aware Log2 Handling (Option B)
 
@@ -430,7 +433,7 @@ Script: `bin/impute.py`
 
 **Rationale:** The SINGLE-GROUP vs. PASSED classification in the filter table is exactly the information needed for DEP-style mixed imputation. Creating a separate classification step would duplicate information already computed by Module 01.
 
-**Impact:** The IMPUTE process needs the detection filter table in its Nextflow input channel. The data contract between Module 01 and Module 03 is updated to include this file as a primary artifact.
+**Impact:** The IMPUTE process needs the detection filter table in its Nextflow input channel. The data contract between Module 01 and Module 03 is updated to include this file as a primary artifact. See also project history (`proSIFT_project_history.Rmd`) Decision Register entry 2026-03-23 "Per-Run Detection Filter in Validation Module" for the cross-module impact of this data flow.
 
 ---
 
@@ -605,7 +608,7 @@ End-to-end Nextflow run (`results_fulltest/`) on all 12 CTX/Synaptosome pairwise
 
 **Status change:** NORMALIZE Functional. IMPUTE Not started.
 
-### 2026-03-27 -- Split from 03_normalization_imputation.Rmd
+### 2026-03-27 -- Split from 03a_normalization_imputation.Rmd
 
 **Change:** Module file created by splitting the combined normalization/imputation stub into separate files.
 **Reason:** Initial architecture decision to separate normalization and imputation.
@@ -643,3 +646,16 @@ End-to-end Nextflow run (`results_fulltest/`) on all 12 CTX/Synaptosome pairwise
 
 **Affected processes:** Module 04 (Imputation) absorbed into Module 03. Downstream modules renumber: old Module 05 (Differential Abundance) becomes Module 04, etc.
 **Downstream effects:** Detection filter table is now a primary input (not diagnostic-only). Module renumbering affects all downstream module documentation, the project overview, and the handoff. QC Report Assembly sits after the combined Module 03.
+
+### 2026-04-01 -- Documentation Restructuring: Tiered Decision Registers and Cross-References
+
+**Change:** Applied the documentation restructuring pattern to this module spec:
+
+1. **Section 5 (Design Decisions)** intro added explaining the tiered Decision Register approach.
+2. **"Combined Normalization and Imputation Module" entry** updated with cross-reference to the project history's pipeline-level renumbering impact.
+3. **"Detection Filter Table Promoted" entry** updated with cross-reference to the project history's per-run detection filter entry (cross-module data flow).
+4. **"Master overview" reference** updated to specify `proSIFT_master_doc.Rmd` explicitly.
+
+**Reason:** Consistency with the three-tier documentation structure (master doc, project history, module specs) established on 2026-04-01.
+**Affected sections:** Section 1 (scope reference), Section 5 (intro and two entries), Section 9 (this entry).
+**Downstream effects:** None (documentation restructuring only).

@@ -187,20 +187,20 @@ Gene set libraries are provided as local GMT (Gene Matrix Transposed) files down
 **Default libraries (mouse-specific MSigDB collections):**
 
 - GO Biological Process: `m5.go.bp.v*.Mm.symbols.gmt`
-- KEGG pathways: `m2.cp.kegg_medicus.v*.Mm.symbols.gmt`
+- Reactome pathways: `m2.cp.reactome.v*.Mm.symbols.gmt`
 
 Additional libraries can be added by the user in params.yml. Recommended optional libraries (not enabled by default):
 
 - GO Molecular Function: `m5.go.mf.v*.Mm.symbols.gmt`
 - GO Cellular Component: `m5.go.cc.v*.Mm.symbols.gmt`
-- Reactome pathways: `m2.cp.reactome.v*.Mm.symbols.gmt`
+- KEGG pathways: `m2.cp.kegg_medicus.v*.Mm.symbols.gmt`
 - Hallmark gene sets: `mh.all.v*.Mm.symbols.gmt`
 
 **Why local GMT files over Enrichr online libraries:** Local files eliminate the network dependency during pipeline execution (important for cluster jobs where network access may be unreliable). MSigDB provides well-curated, versioned, mouse-specific collections that are the community standard for enrichment analysis. GMT files can be version-tracked alongside the pipeline, ensuring reproducibility. gseapy accepts GMT file paths directly in both `enrich()` and `prerank()`.
 
 **Practical workflow:** The user downloads desired GMT files from MSigDB (one-time setup, documented in the README). GMT file paths are specified in params.yml under `enrichment.gene_set_libraries` as a list of file paths. Version numbers (e.g., `v2024.1`) are pinned by the specific files downloaded.
 
-**Library short names:** For output file naming and the `library` column in the results table, each GMT file is mapped to a short identifier. The mapping is derived from the filename: `m5.go.bp.*.gmt` maps to `GO_BP`, `m2.cp.kegg_medicus.*.gmt` maps to `KEGG`, etc. A lookup table in the script handles this mapping, with a fallback to the filename stem for unrecognized GMT files.
+**Library short names:** For output file naming and the `library` column in the results table, each GMT file is mapped to a short identifier. The mapping is derived from the filename: `m5.go.bp.*.gmt` maps to `GO_BP`, `m2.cp.reactome.*.gmt` maps to `REACTOME`, `m2.cp.kegg_medicus.*.gmt` maps to `KEGG`, etc. A lookup table in the script handles this mapping, with a fallback to the filename stem for unrecognized GMT files.
 
 ## 4.5 Gene Set Size Filters
 
@@ -228,9 +228,9 @@ One row per tested term per analysis type per contrast. This is the primary resu
 
 | Column | Type | Description |
 |---|---|---|
-| `term_id` | string | Gene set identifier (e.g., `GO:0006915`, `KEGG_APOPTOSIS`) |
-| `term_name` | string | Human-readable name (e.g., "apoptotic process") |
-| `library` | string | Short name of the collection (e.g., `GO_BP`, `KEGG`) |
+| `term_id` | string | Gene set identifier from GMT file (e.g., `GOBP_APOPTOTIC_PROCESS`, `REACTOME_APOPTOSIS`). MSigDB GMT files use descriptive names, not numeric GO IDs. |
+| `term_name` | string | Same as `term_id` for MSigDB GMT files (no separate numeric ID is parsed). Retained as a distinct column for compatibility with gene set sources that separate IDs from names. |
+| `library` | string | Short name of the collection (e.g., `GO_BP`, `REACTOME`) |
 | `analysis_type` | string | `"ORA"` or `"GSEA"` |
 | `contrast` | string | Which contrast (e.g., `"KO_vs_WT"`) |
 | `pvalue` | float64 | Raw p-value |
@@ -611,3 +611,10 @@ GSEA results:
 **Reason:** Phase 2 implementation milestone.
 **Affected processes:** ENRICHMENT (new).
 **Downstream effects:** Module 05 outputs now available for Module 06 (Database Queries) and Module 07 (Results Assembly) design.
+
+### 2026-04-01 -- Spec Body Corrected to Match Implementation
+
+**Change:** Updated spec body to resolve design deviations documented in the 2026-03-31 implementation entry. Three corrections: (1) Section 4.4 default libraries changed from GO_BP + KEGG to GO_BP + Reactome (KEGG moved to optional list). (2) Section 4.4 library short name example updated to include REACTOME. (3) Section 4.7 `term_id` and `term_name` descriptions corrected to reflect MSigDB GMT naming convention (`GOBP_APOPTOTIC_PROCESS` style, not `GO:0006915` numeric IDs); `library` example changed from `KEGG` to `REACTOME`.
+**Reason:** Spec body was inconsistent with implementation; the change history documented the deviations but the spec text was never corrected.
+**Affected processes:** None (documentation only).
+**Downstream effects:** None.

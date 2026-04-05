@@ -173,16 +173,18 @@ def classify_proteins(
     min_detections: int
 ) -> pd.Series:
     '''
-    Classify each protein into PASSED, SINGLE-GROUP, SPARSE, or ABSENT.
+    Classify each protein into PASSED, SINGLE-GROUP, PARTIAL, SPARSE, or ABSENT.
 
     Rules (applied in order):
       ABSENT       -- zero detections in ALL groups
       PASSED       -- >= min_detections in ALL groups
+      PARTIAL      -- >= min_detections in at least one group AND
+                      sub-threshold but non-zero detections in at least
+                      one other group (e.g., 2/3 WT, 1/3 KO with min=2)
       SINGLE-GROUP -- >= min_detections in exactly one group AND
                       zero detections in all other groups
       SPARSE       -- everything else (detections exist but no group meets
-                      the threshold, or threshold met in one group but other
-                      groups have some-but-nonzero detections)
+                      the threshold)
     '''
     total_detections = detection_counts.sum(axis=1)
     meets_threshold = detection_counts >= min_detections
@@ -204,6 +206,14 @@ def classify_proteins(
     #               and all other groups have zero detections
     single_group = (n_meeting == 1) & (n_zero == n_groups - 1)
     status[single_group] = 'SINGLE-GROUP'
+
+    # PARTIAL: meets threshold in at least one group, but at least one
+    #          other group has sub-threshold non-zero detections.
+    #          This covers the gap between SINGLE-GROUP (zero in other
+    #          groups) and PASSED (all groups meet threshold).
+    partial = (n_meeting >= 1) & (n_meeting < n_groups) & (n_zero < n_groups - n_meeting)
+    # Only apply to proteins still labeled SPARSE (not already SINGLE-GROUP)
+    status[(status == 'SPARSE') & partial] = 'PARTIAL'
 
     # SPARSE: anything remaining (already set as default)
 
@@ -227,9 +237,10 @@ def write_detection_filter_block(
     counts = status.value_counts()
     n_passed = counts.get('PASSED', 0)
     n_single = counts.get('SINGLE-GROUP', 0)
+    n_partial = counts.get('PARTIAL', 0)
     n_sparse = counts.get('SPARSE', 0)
     n_absent = counts.get('ABSENT', 0)
-    n_retained = n_passed + n_single
+    n_retained = n_passed + n_single + n_partial
     n_removed = n_sparse + n_absent
 
     report.section('DETECTION FILTER SUMMARY')
@@ -243,6 +254,13 @@ def write_detection_filter_block(
     report.line(f'  PASSED           - Detected in >= {min_detections} replicates '
                 f'in both groups.')
     report.line(f'                     Sufficient data for reliable statistical testing.')
+    report.line(f'  PARTIAL          - Detected in >= {min_detections} replicates '
+                f'in one group')
+    report.line(f'                     but below threshold (1 to {min_detections - 1} '
+                f'detections) in the other.')
+    report.line(f'                     Retained: the sub-threshold group has some data')
+    report.line(f'                     but not enough for reliable group-level estimates.')
+    report.line(f'                     Missing values imputed as a mix of MNAR and MAR.')
     report.line(f'  SINGLE-GROUP     - Detected in >= {min_detections} replicates '
                 f'in one group')
     report.line(f'                     but completely absent (0 detections) in the other.')
@@ -261,6 +279,7 @@ def write_detection_filter_block(
     report.line('Results:')
     report.line(f'  Input proteins:    {n_input:>6,}')
     report.line(f'  Passed:            {n_passed:>6,}  ({format_pct(n_passed, n_input)})')
+    report.line(f'  Partial:           {n_partial:>6,}  ({format_pct(n_partial, n_input)})  [flagged]')
     report.line(f'  Single-group:      {n_single:>6,}  ({format_pct(n_single, n_input)})  [flagged]')
     report.line(f'  Sparse (removed):  {n_sparse:>6,}  ({format_pct(n_sparse, n_input)})')
     report.line(f'  Absent (removed):  {n_absent:>6,}  ({format_pct(n_absent, n_input)})')

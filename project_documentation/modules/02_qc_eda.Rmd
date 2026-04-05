@@ -8,13 +8,13 @@ output:
     theme: default
 ---
 
-**Last Updated:** 2026-03-27
+**Last Updated:** 2026-04-01
 
 **Module Status:** Complete. Design and implementation both done. `bin/prenorm_qc.py` and `PRENORM_QC` Nextflow process implemented, tested standalone on CTXcyto benchmark, stub-verified on all 12 runs.
 
 **Pipeline Position:** [Module 01: Input Validation & ID Mapping] --> **Module 02: Pre-Normalization QC/EDA** --> [Module 03: Normalization]
 
-**Scope note:** Pre-normalization only. This module operates on the validated, detection-filtered abundance data before any normalization or imputation. Analyses that require normalized or imputed data are handled elsewhere: CV analysis in Module 04 (Imputation), post-normalization QC diagnostics in Module 03 (Normalization), imputation diagnostics in Module 04, volcano and MA plots in Module 05 (Differential Abundance). Missingness analysis and visualization are handled by Module 01 (MISSINGNESS_REPORT process, Process 4.10). The QC Report Assembly process (Phase 2) compiles diagnostic outputs from Modules 02-04 into a consolidated HTML report.
+**Scope note:** Pre-normalization only. This module operates on the validated, detection-filtered abundance data before any normalization or imputation. Analyses that require normalized or imputed data are handled elsewhere: CV analysis in Module 03 (computed between NORMALIZE and IMPUTE processes), post-normalization QC diagnostics in Module 03 (NORMALIZE process diagnostic outputs), imputation diagnostics in Module 03 (IMPUTE process diagnostic outputs), volcano and MA plots in Module 04 (Differential Abundance). Missingness analysis and visualization are handled by Module 01 (MISSINGNESS_REPORT process, Process 4.10). The QC Report Assembly process (Phase 2) compiles diagnostic outputs from Modules 02 and 03 into a consolidated HTML report.
 
 ---
 
@@ -36,13 +36,13 @@ This module does not modify the data. It observes, summarizes, and flags. Decisi
 **What this module does NOT do:**
 
 - Missingness analysis (Module 01, Process 4.10)
-- Coefficient of variation within groups (Module 04, requires normalized data)
-- Post-normalization PCA, correlation, or distribution plots (Module 03 diagnostic outputs)
-- Imputation diagnostics (Module 04)
-- Volcano plots, MA plots (Module 05, requires differential abundance results)
+- Coefficient of variation within groups (Module 03, computed between NORMALIZE and IMPUTE on normalized observed values)
+- Post-normalization PCA, correlation, or distribution plots (Module 03 NORMALIZE diagnostic outputs)
+- Imputation diagnostics (Module 03 IMPUTE diagnostic outputs)
+- Volcano plots, MA plots (Module 04, requires differential abundance results)
 - Remove or exclude any data
 
-See master overview (Section 2.2, first fork) for how this module branches off the main analytical path.
+See master project documentation (`proSIFT_master_doc.Rmd`) Section 2.2 (first fork) for how this module branches off the main analytical path.
 
 ---
 
@@ -244,6 +244,8 @@ The log2(x+1) transformation (rather than log2(x)) handles any zero values witho
 
 # 5. Design Decisions
 
+*This section documents module-internal design decisions. Cross-cutting decisions that affect multiple modules (e.g., module architecture and numbering, QC analysis distribution across modules, missingness scope assignment) are in the project history (`proSIFT_project_history.Rmd`) Decision Register (Section 1). Where a decision has both pipeline-level and module-level implications, each document covers its own level and cross-references the other.*
+
 ### 2026-03-27 -- Single Nextflow Process for Module 02
 
 **Decision:** Module 02 is implemented as a single Nextflow process (PRENORM_QC) calling one Python script (`bin/prenorm_qc.py`). All QC analyses run within this single script.
@@ -262,13 +264,13 @@ The log2(x+1) transformation (rather than log2(x)) handles any zero values witho
 
 **Alternatives considered:** Missingness analysis in Module 02 -- rejected because post-filter missingness is too mild to warrant a dedicated analysis.
 
-**Impact:** Module 02 does not produce any missingness-related outputs. The QC Report Assembly (Phase 2) will incorporate Module 01's missingness report alongside Module 02's outputs.
+**Impact:** Module 02 does not produce any missingness-related outputs. The QC Report Assembly (Phase 2) will incorporate Module 01's missingness report alongside Module 02's outputs. See also project history (`proSIFT_project_history.Rmd`) Decision Register entry 2026-03-27 "Missingness Visualizations Assigned to Module 01 (Not Module 02)" for the pipeline-level scope assignment rationale.
 
 ### 2026-03-27 -- CV Excluded from Module 02
 
-**Decision:** Coefficient of variation (CV) within groups is computed in Module 04 (Imputation), not Module 02.
+**Decision:** Coefficient of variation (CV) within groups is computed in Module 03 (between the NORMALIZE and IMPUTE processes), not Module 02.
 
-**Rationale:** CV (SD/mean on linear scale, or SD on log2 scale) measures replicate variability for each protein within a condition. It should be computed on normalized data because pre-normalization CV conflates normalization-correctable technical variation (loading differences) with genuine replicate variability. It should also use observed values only (imputed values from methods like MinProb cluster tightly, artificially reducing CV). This places CV after normalization (Module 03) but before imputation's values are mixed in, which is Module 04's territory.
+**Rationale:** CV (SD/mean on linear scale, or SD on log2 scale) measures replicate variability for each protein within a condition. It should be computed on normalized data because pre-normalization CV conflates normalization-correctable technical variation (loading differences) with genuine replicate variability. It should also use observed values only (imputed values from methods like MinProb cluster tightly, artificially reducing CV). This places CV after normalization but before imputation's values are mixed in, which is the boundary between Module 03's NORMALIZE and IMPUTE processes.
 
 **Alternatives considered:** CV in Module 02 on raw data -- rejected because it would measure technical + biological variability conflated, which is not useful for flagging genuinely variable proteins.
 
@@ -357,7 +359,7 @@ Module 02 introduces no new parameters. It reads the following existing paramete
 - **Correlation heatmap with missing values:** Pairwise-complete correlation means different pairs may use slightly different protein subsets. With post-filter missingness of at most 1-2 values per protein, this difference is negligible. If a future dataset has higher missingness, this assumption should be revisited.
 - **PCA on complete cases only:** Dropping proteins with any missing value means PCA uses fewer proteins than the full dataset. The number dropped is recorded. If a dataset has unusually high residual missingness (many proteins with 1-2 missing values), this could exclude a meaningful fraction of proteins from PCA. The alternative (row-mean imputation) trades transparency for coverage.
 - **Outlier flags with unbalanced groups:** The current flag definitions assume roughly equal group sizes (they compare "within group" metrics). If groups have very different sizes (e.g., 2 vs. 4), the flags may behave differently than intended. The current design targets the common case of equal replicates.
-- **Module does not produce protein-level QC flags.** The `qc_flag_missingness`, `qc_flag_cv`, and `qc_flag_outlier` columns in the SQLite proteins table (Section 4.7 of the master overview) are populated by Module 04 (CV) and the Results Assembly module, not Module 02. Module 02's flags are sample-level only.
+- **Module does not produce protein-level QC flags.** The `qc_flag_missingness`, `qc_flag_cv`, and `qc_flag_outlier` columns in the SQLite proteins table (Section 4.7 of the master project documentation) are populated by Module 03 (CV) and the Results Assembly module, not Module 02. Module 02's flags are sample-level only.
 
 ---
 
@@ -453,4 +455,17 @@ CTXcyto_KO-2 flagged on 2 criteria: flag_extreme_median (median is the most extr
 **Reason:** Systematic inventory of QC/EDA analyses during Module 02 design session revealed that the original monolithic QC/EDA concept conflated analyses belonging at different pipeline stages. The redesign assigns each analysis to its analytically appropriate location and defines Module 02's scope precisely.
 
 **Affected processes:** Entire module rewritten. Old processes 4.1-4.5 (missingness, CV, sample QC, distributional assessment, report assembly) replaced with new processes 4.0-4.6.
-**Downstream effects:** Module 02 no longer produces missingness or CV outputs. These are produced by Module 01 and Module 04 respectively. The QC Report Assembly process (Phase 2) collects outputs from all three modules. The Module 02 output schema (sample_summary, sample_flags, correlation_matrix, pca_results) constitutes the data contract with downstream consumers.
+**Downstream effects:** Module 02 no longer produces missingness or CV outputs. These are produced by Module 01 and Module 03 respectively. The QC Report Assembly process (Phase 2) collects outputs from Modules 02 and 03. The Module 02 output schema (sample_summary, sample_flags, correlation_matrix, pca_results) constitutes the data contract with downstream consumers.
+
+### 2026-04-01 -- Documentation Restructuring: Tiered Decision Registers, Cross-References, and Module Number Corrections
+
+**Change:** Applied the documentation restructuring pattern established with Module 01 to this module spec:
+
+1. **Section 5 (Design Decisions)** intro added explaining the tiered Decision Register approach (module-internal decisions here, cross-cutting decisions in `proSIFT_project_history.Rmd`).
+2. **"Missingness Excluded" entry** updated with cross-reference to the project history's pipeline-level scope assignment decision.
+3. **Stale module numbers corrected throughout.** References to "Module 04 (Imputation)" updated to "Module 03" (imputation is now part of Module 03, between NORMALIZE and IMPUTE processes). References to "Module 05 (Differential Abundance)" updated to "Module 04." Affected locations: scope note, "What this module does NOT do" list, "CV Excluded" decision entry, final Change History entry.
+4. **"Master overview" reference** updated to specify the document name (`proSIFT_master_doc.Rmd`).
+
+**Reason:** Consistency with the three-tier documentation structure (master doc, project history, module specs) established on 2026-04-01. Stale module numbers dated from the 2026-03-27 design session, before the Module 03 recombination that renumbered downstream modules.
+**Affected sections:** Scope note, Section 1, Section 5 (intro and two entries), Section 9 (this entry and one prior entry corrected).
+**Downstream effects:** None (documentation restructuring and corrections only).

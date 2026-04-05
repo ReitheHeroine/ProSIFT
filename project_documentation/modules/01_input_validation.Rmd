@@ -8,9 +8,9 @@ output:
     theme: default
 ---
 
-**Last Updated:** 2026-03-27
+**Last Updated:** 2026-04-01
 
-**Module Status:** Design complete; implementation complete for Processes 4.1-4.9; Process 4.10 (MISSINGNESS_REPORT) design complete, not yet implemented.
+**Module Status:** Design complete.
 
 **Pipeline Position:** [Input files] --> **Input validation & ID mapping** --> [Pre-normalization QC/EDA (Module 02), Normalization (Module 03)]
 
@@ -19,10 +19,6 @@ output:
 # 1. Purpose and Scope
 
 This module is the entry point of the ProSIFT pipeline. It validates the user's input files (abundance matrix and metadata), cross-validates them against each other, maps all protein IDs to a standardized set of identifiers via UniProt, handles mapping edge cases (isoforms, unmapped IDs), and optionally performs mouse-to-human ortholog mapping for downstream database queries.
-
-The module does not perform any statistical analysis or data transformation. Its sole responsibility is ensuring the data is valid, consistently identified, and ready for downstream processing.
-
-See master overview (Section 2.1-2.2) for architectural context.
 
 ---
 
@@ -132,8 +128,9 @@ See master overview (Section 2.1-2.2) for architectural context.
 
 **Categories reported in validation summary:**
 
-- **Passed:** detected in >= `min_detections_per_group` replicates in at least one group. Retained for downstream analysis.
-- **Single-group detection (passed):** detected adequately in one group but completely absent in the other. These are potential presence/absence candidates. Retained, but flagged for the QC module to assess further.
+- **Passed:** detected in >= `min_detections_per_group` replicates in all groups. Retained for downstream analysis.
+- **Partial (passed):** detected adequately in one group but below threshold (non-zero but < `min_detections_per_group`) in the other. Retained because the passing group provides reliable data. The sub-threshold group has some signal but not enough for reliable group-level estimates; its missing values are imputed as MNAR. See Decision Register entry 2026-04-02 "Add PARTIAL Detection Filter Category".
+- **Single-group detection (passed):** detected adequately in one group but completely absent (0 detections) in the other. These are potential presence/absence candidates. Retained, but flagged for the QC module to assess further.
 - **Sparse (removed):** detected in fewer than `min_detections_per_group` replicates in all groups. Insufficient data for reliable statistical testing.
 - **Absent (removed):** zero detections across all samples in the run. Completely uninformative for this comparison.
 
@@ -141,7 +138,7 @@ See master overview (Section 2.1-2.2) for architectural context.
 
 1. **Filtered abundance matrix** (Parquet): proteins passing the detection filter, ready for downstream processing.
 
-2. **Detection filter summary table** (CSV): one row per input protein with columns for per-group detection counts and filter status (PASSED, SINGLE-GROUP, SPARSE, ABSENT). Retained as a diagnostic artifact so users can verify what was removed and why.
+2. **Detection filter summary table** (CSV): one row per input protein with columns for per-group detection counts and filter status (PASSED, PARTIAL, SINGLE-GROUP, SPARSE, ABSENT). Retained as a diagnostic artifact so users can verify what was removed and why.
 
 The Process 4.4 section of the **validation report** includes two blocks. The report is designed to be self-contained -- readers should not need to consult the module documentation to interpret the output.
 
@@ -157,6 +154,11 @@ Filter threshold: min_detections_per_group = 2
 Category definitions:
   PASSED           - Detected in >= 2 replicates in both groups.
                      Sufficient data for reliable statistical testing.
+  PARTIAL          - Detected in >= 2 replicates in one group
+                     but below threshold (1 detection) in the other.
+                     Retained: the sub-threshold group has some data
+                     but not enough for reliable group-level estimates.
+                     Missing values imputed as a mix of MNAR and MAR.
   SINGLE-GROUP     - Detected in >= 2 replicates in one group
                      but completely absent (0 detections) in the other.
                      Retained as potential presence/absence candidates.
@@ -173,7 +175,8 @@ Category definitions:
 Results:
   Input proteins:    8,948
   Passed:            8,542  (95.5%)
-  Single-group:        237  ( 2.6%)  [flagged]
+  Partial:              32  ( 0.4%)  [flagged]
+  Single-group:        205  ( 2.3%)  [flagged]
   Sparse (removed):     55  ( 0.6%)
   Absent (removed):    114  ( 1.3%)
   --------------------------------
@@ -316,6 +319,8 @@ Every downstream module reads this table and joins it with its input data to get
 
 # 5. Design Decisions
 
+*This section documents module-internal design decisions. Cross-cutting decisions that affect multiple modules (e.g., separate runs for factorial designs, ortholog tracking strategy, module architecture and numbering) are in the project history (`proSIFT_project_history.Rmd`) Decision Register (Section 1). Where a decision has both pipeline-level and module-level implications, each document covers its own level and cross-references the other.*
+
 ### 2026-03-23 -- Parallel Validation of Matrix and Metadata
 
 **Decision:** Matrix validation and metadata validation run as separate parallel Nextflow processes rather than sequentially.
@@ -374,21 +379,9 @@ Every downstream module reads this table and joins it with its input data to get
 
 **Decision:** For datasets with factorial designs (e.g., the CTX/Synaptosome 2x2x2 design: genotype x region x fraction), the recommended approach is separate ProSIFT runs per comparison context rather than a single combined run. For the CTX dataset, this means 4 runs (CTXcyto, CTXsynap, HIPcyto, HIPsynap), each a simple two-group KO vs WT comparison with 6 samples.
 
-**Rationale:** The decision involves a genuine statistical tradeoff between cleaner assumptions (separate runs) and greater statistical power (combined run), analyzed in detail below.
+**Rationale:** The decision involves a genuine statistical tradeoff between cleaner assumptions (separate runs) and greater statistical power (combined run), with implications across normalization, imputation, differential abundance, and enrichment. See project history (`proSIFT_project_history.Rmd`) Decision Register entry 2026-03-23 "Separate Runs for Factorial Designs" for the full tradeoff analysis.
 
-*Normalization:* Separate runs normalize within biologically comparable samples (e.g., all cortex synaptosomes), which is more defensible than forcing cortex and hippocampus, synaptosomes and cytosol onto the same reference distribution. The Wistar core's VSN normalization attempt revealed a 0.375 log2 unit offset between fractions that quantile normalization suppressed -- evidence that cross-fraction normalization can mask real biology.
-
-*Imputation:* Separate runs avoid biologically inappropriate imputation. In a combined run, a protein detected in all cytosol samples but absent from all synaptosome samples would have its "missing" synaptosome values estimated from cytosol abundance information, which is biologically nonsensical. Separate runs keep imputation within the relevant biological context.
-
-*Differential abundance (the main tradeoff):* A combined run using a multi-group model (e.g., `~ 0 + group` with 8 levels) would give 16 residual degrees of freedom vs. 4 for separate runs. More degrees of freedom means better variance estimation and more statistical power to detect real effects. However, the combined model assumes homogeneous residual variance across all 8 groups (homoscedasticity), which is likely violated given that missingness ranges from ~5% (CTXcyto) to ~11% (HIPcyto) -- proteins at the detection boundary will have different measurement precision across conditions. The empirical Bayes framework (DEqMS/limma) substantially mitigates the small-sample problem by borrowing information across thousands of proteins.
-
-*Enrichment analysis:* Separate runs produce more appropriate ORA background sets (only proteins detectable in that context) without manual per-contrast background specification.
-
-*A middle path was considered:* two runs within-fraction (all synaptosomes together, all cytosol together) giving 8 residual df. This is statistically stronger than 4 separate runs while avoiding cross-fraction normalization and imputation issues. Deferred for potential future implementation because it requires ProSIFT to support multi-group designs with contrast extraction, which is not in the Phase 1 scope.
-
-**Alternatives considered:** (1) Single combined run (24 samples, 8 groups) -- maximum power but most assumptions about homoscedasticity and normalization appropriateness. (2) Two within-fraction runs (12 samples each) -- good compromise but requires multi-group model support not yet in scope. (3) Four separate runs -- simplest, cleanest assumptions, maps to ProSIFT's current two-group design.
-
-**Impact:** The CTX test dataset will be prepared as 4 separate runs. ProSIFT's current two-group input design is sufficient for Phase 1. Multi-group support is noted as a future enhancement (Phase 2+). The Wistar core's combined-analysis results provide a comparison baseline for validating ProSIFT's separate-run results.
+**Module 01 impact:** The data preparation scripts (Section 9) implement this strategy by allowing users to define multiple runs from a single source file. Each run produces its own abundance matrix, metadata, and params.yml. The detection filter (Process 4.4) operates per-run, which is why subsetting reveals proteins that are absent or sparse within a run's samples despite passing a global filter. ProSIFT's current two-group input design is sufficient for separate runs; multi-group support is deferred to Phase 2+.
 
 ### 2026-03-23 -- Two-Script Data Preparation Architecture
 
@@ -420,7 +413,7 @@ The filter belongs in the validation module rather than in an external preproces
 
 **Alternatives considered:** (1) Pre-filter in an extraction script -- quicker to implement but creates a preprocessing step outside the pipeline that is not documented or reproducible within the pipeline's own audit trail. (2) Feed all proteins and rely on downstream QC flagging -- the QC module would flag these proteins, but they would still flow through normalization and imputation, potentially influencing those steps (e.g., proteins with extreme missingness can affect quantile normalization reference distributions). (3) Hybrid approach (unfiltered test runs + filtered production runs) -- useful for pipeline validation but not a general-purpose solution.
 
-**Impact:** New process (4.4) added to the workflow between cross-validation and ID mapping. New parameter: `qc.min_detections_per_group` (default 2). Workflow diagram updated. Detection filter summary included in validation report output.
+**Impact:** New process (4.4) added to the workflow between cross-validation and ID mapping. New parameter: `qc.min_detections_per_group` (default 2). Workflow diagram updated. Detection filter summary included in validation report output. The detection_filter_table.csv output is also consumed by Module 03 (Imputation) for MNAR/MAR classification; see project history (`proSIFT_project_history.Rmd`) Decision Register entry 2026-03-23 "Per-Run Detection Filter in Validation Module" for the cross-module impact.
 
 ### 2026-03-23 -- Peptide Counts Included in Abundance Matrix File
 
@@ -466,7 +459,7 @@ The missingness heatmap uses Option A (filtered-out proteins only, ~400-500 prot
 
 **Alternatives considered:** (1) Add missingness visualizations to Module 02 (QC/EDA) -- rejected because Module 02 operates on post-filter data where the dramatic missingness patterns have already been removed, making the analysis largely redundant. (2) Add plots directly to `filter_proteins.py` -- rejected because it would add matplotlib/seaborn/plotly as dependencies to a script that currently needs only pandas/numpy, and would mix data transformation with reporting. (3) Full-dataset missingness heatmap -- rejected because ~8,900 rows is unreadable; the filtered-out proteins are where the structure is. (4) Group-specific detection scatter/bubble chart (per-protein detections in group A vs. group B) -- considered but deferred as lower priority; the heatmap conveys the same structural information more directly.
 
-**Impact:** New process added to Module 01 workflow (MISSINGNESS_REPORT). New script: `bin/missingness_report.py`. New outputs: `{run_id}.missingness_report.html` and `{run_id}.missingness_plots/` directory with static PNGs. No new parameters (all visualization choices are hardcoded; the plots use data already produced by FILTER_PROTEINS). Module 02 (QC/EDA) scope confirmed as excluding missingness analysis.
+**Impact:** New process added to Module 01 workflow (MISSINGNESS_REPORT). New script: `bin/missingness_report.py`. New outputs: `{run_id}.missingness_report.html` and `{run_id}.missingness_plots/` directory with static PNGs. No new parameters (all visualization choices are hardcoded; the plots use data already produced by FILTER_PROTEINS). Module 02 (QC/EDA) scope confirmed as excluding missingness analysis. See also project history (`proSIFT_project_history.Rmd`) Decision Register entry 2026-03-27 "Missingness Visualizations Assigned to Module 01 (Not Module 02)" for the pipeline-level scope assignment rationale.
 
 ---
 
@@ -901,3 +894,40 @@ databases:
 
 **Affected sections:** 2.2 (Outputs), 4.10 (new process), 5 (new decision register entry), 10 (this entry).
 **Downstream effects:** Module 02 (QC/EDA) scope confirmed as excluding missingness analysis. MISSINGNESS_REPORT needs to be wired as a new Nextflow process in `workflows/prosift.nf`. The process receives outputs from both VALIDATE_INPUTS (validated_matrix.parquet, validated_metadata.parquet) and FILTER_PROTEINS (detection_filter_table.csv).
+
+### 2026-04-01 -- Documentation Restructuring: Tiered Decision Registers and Cross-References
+
+**Change:** Restructured documentation to establish a clear division of labor between the master project documentation and this module spec. The master doc provides the project-level overview (what each module does and why, with key process steps named), while this spec provides the implementation-level detail (process specifications, output schemas, parameter tables, edge cases). A tiered Decision Register approach was adopted: the master doc holds cross-cutting and architectural decisions, this spec holds module-internal decisions, and each cross-references the other where a decision has both levels of impact.
+
+Specific changes to this file:
+
+1. **Section 5 (Design Decisions)** now has an introductory note explaining the tiered approach.
+2. **"Separate Runs for Factorial Designs"** entry condensed to focus on Module 01 impact (data prep, run configuration), with cross-reference to master doc for the full statistical tradeoff analysis.
+3. **"Per-Run Detection Filtering"** entry updated to note cross-module impact (detection_filter_table consumed by Module 03) with cross-reference to master doc.
+4. **"Missingness Visualizations"** entry updated with cross-reference to master doc's pipeline-level scope assignment decision.
+
+**Reason:** Content overlap between the master doc and module specs was growing, with some decisions duplicated in both without a clear principle for which version was authoritative. The restructuring establishes that principle and will template the approach for Modules 02-08.
+**Affected sections:** 5 (Design Decisions introductory note and three updated entries), 10 (this entry).
+**Downstream effects:** None (documentation restructuring only). The same pattern should be applied to Modules 02-05 specs and will be used going forward for Modules 06-08.
+
+### 2026-04-01 -- Cross-References Updated: Decision Register Moved to Project History Document
+
+**Change:** All cross-references from this module spec to the master project documentation's Decision Register have been updated to point to the new dedicated project history document (`proSIFT_project_history.Rmd`). The Decision Register and Development Log were extracted from the master doc into this separate file.
+
+**Affected sections:** 5 (Design Decisions introductory note and three entries with cross-references updated).
+**Downstream effects:** None (cross-reference update only).
+
+### 2026-04-02 -- Add PARTIAL Detection Filter Category
+
+**Decision:** Add a fifth detection filter category, PARTIAL, to cover proteins that meet the detection threshold in at least one group but have sub-threshold non-zero detections in at least one other group (e.g., 2/3 WT, 1/3 KO with min_detections_per_group=2). Previously, these proteins were incorrectly classified as SPARSE and removed, despite having adequate data in one group.
+
+**Alternatives considered:**
+- *Option A (expand SINGLE-GROUP):* Redefine SINGLE-GROUP to include sub-threshold non-zero cases. Rejected because SINGLE-GROUP has a clear semantic meaning ("detected in one group, completely absent in the other") that is useful for interpreting presence/absence biology. Mixing in partial-detection cases would dilute this signal.
+- *Option B (add PARTIAL category):* Add a new category that explicitly captures the intermediate case. Chosen because it preserves clean SINGLE-GROUP semantics and gives users a distinct label to identify these proteins.
+
+**Rationale:** The four original categories (PASSED, SINGLE-GROUP, SPARSE, ABSENT) left a gap in the partition space. A protein detected in 2/3 WT and 1/3 KO passes the filter (2 >= min_detections in the WT group) but does not fit PASSED (KO below threshold), SINGLE-GROUP (KO is not zero), or SPARSE (WT meets threshold). These proteins were silently classified as SPARSE and removed. The PARTIAL category closes this gap so the five categories form a complete, non-overlapping partition of all possible detection patterns.
+
+**Imputation routing:** PARTIAL proteins are routed through mixed MNAR/MAR imputation. Missing values in the sub-threshold group are classified MNAR (below detection limit); sporadic gaps in the passing group are classified MAR. The protein-level imputation_class is "mixed" when both types are present.
+
+**Affected sections:** 4.4 (category definitions, validation report format block, filter table schema description). Module 03a Section 4.7 (MNAR/MAR classification rules updated to include PARTIAL).
+**Downstream effects:** `filter_proteins.py` (category assignment), `missingness_report.py` (category order, colors, heatmap inclusion), `impute.py` (MNAR/MAR routing for PARTIAL proteins).

@@ -10,17 +10,17 @@ output:
 
 **Last Updated:** 2026-03-27
 **Module Status:** Stub -- not yet designed
-**Pipeline Position:** [Module 04: Imputation] --> **Module 04b: QC Report Assembly** --> [Module 05: Differential Abundance]
+**Pipeline Position:** [Module 03: Normalization & Imputation] --> **Module 03b: QC Report Assembly** --> [Module 04: Differential Abundance]
 
 ---
 
 # 1. Purpose and Scope
 
-This is a lightweight assembly process that compiles diagnostic outputs from Modules 02-04 into a single consolidated HTML QC report. It serves as the formal checkpoint between the data preparation stages (QC, normalization, imputation) and the analytical stages (differential abundance, enrichment).
+This is a lightweight assembly process that compiles diagnostic outputs from Modules 01-03 into a single consolidated HTML QC report. It serves as the formal checkpoint between the data preparation stages (QC, normalization, imputation) and the analytical stages (differential abundance, enrichment).
 
 The report is designed to be reviewed by the analyst before differential abundance proceeds. It does not modify any data -- it only collects and renders existing outputs.
 
-**[FOLLOW-UP NEEDED]** Full design pending. Report sections, plot layout, and pass/warn/fail flag thresholds need to be defined once Modules 02-04 are designed.
+**[FOLLOW-UP NEEDED]** Full design pending. Report sections, plot layout, and pass/warn/fail flag thresholds need to be defined.
 
 ---
 
@@ -28,15 +28,16 @@ The report is designed to be reviewed by the analyst before differential abundan
 
 ## 2.1 Inputs
 
+- Missingness report plots (from Module 01 MISSINGNESS_REPORT)
 - Pre-normalization QC diagnostics (from Module 02)
-- Post-normalization diagnostics (from Module 03)
-- CV summary table and imputation diagnostics (from Module 04)
+- Post-normalization diagnostics and CV summary (from Module 03 NORMALIZE)
+- Imputation diagnostics (from Module 03 IMPUTE)
 - params.yml (for threshold values used in flag evaluation)
 
 ## 2.2 Outputs
 
 - Consolidated QC report (HTML, interactive Plotly plots)
-- QC flag summary table (Parquet + CSV): per-sample and per-protein flags aggregated across Modules 02-04
+- QC flag summary table (Parquet + CSV): per-sample and per-protein flags aggregated across Modules 01-03
 
 ---
 
@@ -50,7 +51,7 @@ The report is designed to be reviewed by the analyst before differential abundan
 
 *[To be designed. Will cover:]*
 
-- Report section layout (pre-norm QC, normalization diagnostics, imputation summary, CV distributions)
+- Report section layout (missingness overview, pre-norm QC, normalization diagnostics, imputation summary, CV distributions)
 - QC flag schema: per-sample flags (outlier, low detection rate) and per-protein flags (high CV, high missingness)
 - Pass/warn/fail thresholds for each flag type
 
@@ -58,19 +59,21 @@ The report is designed to be reviewed by the analyst before differential abundan
 
 # 5. Design Decisions
 
+*This section documents module-internal design decisions. Cross-cutting decisions that affect multiple modules are in the project history (`proSIFT_project_history.Rmd`) Decision Register (Section 1).*
+
 ### 2026-03-27 -- QC Report Assembly as Separate Process
 
-**Decision:** QC Report Assembly is a distinct Nextflow process (Module 04b) rather than a section of Module 04 (Imputation) or Module 05 (Differential Abundance).
+**Decision:** QC Report Assembly is a distinct Nextflow process (Module 03b) rather than a section of Module 03 (Normalization & Imputation) or Module 04 (Differential Abundance).
 
-**Rationale:** The report draws on outputs from three upstream modules (02, 03, 04). Making it a section of any one of them would create an awkward dependency chain or require passing diagnostic outputs forward for no analytical reason. A dedicated assembly process with explicit inputs from all three upstream modules is cleaner and makes the checkpoint intent explicit.
+**Rationale:** The report draws on outputs from three upstream modules (01, 02, 03). Making it a section of any one of them would create an awkward dependency chain or require passing diagnostic outputs forward for no analytical reason. A dedicated assembly process with explicit inputs from all upstream diagnostic modules is cleaner and makes the checkpoint intent explicit.
 
-**Alternatives considered:** Include report assembly in Module 04 as a final step -- rejected because it would require Module 04 to depend on Module 02 and 03 diagnostic outputs, complicating the DAG. Include it in Module 05 as a pre-analysis check -- rejected because it would couple the checkpoint to the analytical module.
+**Alternatives considered:** Include report assembly in Module 03 IMPUTE as a final step -- rejected because it would require IMPUTE to depend on Module 01 and 02 diagnostic outputs, complicating the DAG. Include it in Module 04 as a pre-analysis check -- rejected because it would couple the checkpoint to the analytical module.
 
 ---
 
 # 6. Parameters
 
-*[To be defined when Modules 02-04 are designed. Will include flag thresholds referenced during report assembly.]*
+*[To be defined. Will include flag thresholds referenced during report assembly.]*
 
 ---
 
@@ -92,5 +95,19 @@ The report is designed to be reviewed by the analyst before differential abundan
 ### 2026-03-27 -- Created
 
 **Change:** New module stub created as part of the pipeline architecture revision (2026-03-27 session).
-**Reason:** QC Report Assembly identified as a dedicated checkpoint process between the data preparation stages (Modules 02-04) and the analytical stages (Modules 05+). Using "04b" numbering to indicate it follows Module 04 but precedes Module 05 without disrupting the module numbering of analytical stages.
+**Reason:** QC Report Assembly identified as a dedicated checkpoint process between the data preparation stages (Modules 01-03) and the analytical stages (Modules 04+). Using "03b" numbering to indicate it follows Module 03 but precedes Module 04 without disrupting the module numbering of analytical stages.
 **Affected processes:** N/A (stub only).
+
+### 2026-04-01 -- Module Numbering Corrected
+
+**Change:** Updated all module references from pre-recombination numbering (Module 04: Imputation, Module 04b: QC Report Assembly, Module 05: Differential Abundance) to current numbering (Module 03: Normalization & Imputation, Module 03b: QC Report Assembly, Module 04: Differential Abundance). Added Module 01 MISSINGNESS_REPORT to input list. Updated report section layout placeholder to include missingness overview.
+**Reason:** The module renumbering from the 2026-03-27 recombination was not applied to this file when it was created.
+**Affected processes:** None (documentation only).
+**Downstream effects:** None.
+
+### 2026-04-01 -- Documentation Restructuring: Tiered Decision Register Reference Added
+
+**Change:** Section 5 (Design Decisions) intro added pointing to `proSIFT_project_history.Rmd` for cross-cutting decisions.
+**Reason:** Consistency with the three-tier documentation structure established on 2026-04-01.
+**Affected sections:** Section 5 (intro added), Section 9 (this entry).
+**Downstream effects:** None.

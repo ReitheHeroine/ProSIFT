@@ -17,6 +17,8 @@ dependencies:
   - pyyaml
 
   # --- HTTP / API (Phase 1 UniProt mapping, Phase 3 databases) ---
+  # requests also drives BioMart ortholog mapping (Phase 3, Module 01 Layer 2)
+  # via the Ensembl BioMart XML REST endpoint -- no additional library needed.
   - requests
   - tqdm                              # Progress bars for bulk API calls
 

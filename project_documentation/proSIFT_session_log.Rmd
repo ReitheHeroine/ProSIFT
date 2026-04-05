@@ -1,0 +1,267 @@
+---
+title: "ProSIFT -- Session Log"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+    toc_depth: 3
+    theme: default
+---
+
+# ProSIFT -- Session Log
+
+**Purpose:** Append-only record of work done in each Claude session. New entries go at the top (reverse chronological), immediately after the `# Active Session Log` header. Claude Code prepends entries at session end via the flush procedure in the handoff file.
+
+**When to read this file:** When catching up on recent implementation work, reviewing what changed, or looking for detailed test results and bug fix context. Claude Code reads only the first ~35 lines when appending a new entry.
+
+**File rotation:** When this file grows large, start a new file with a date or phase suffix (e.g., `proSIFT_session_log_phase3.Rmd`). Do not delete old session log files.
+
+---
+
+### Entry Template
+
+> ### [DATE] ([Claude Code / Claude.ai])
+> - [What was done]
+> - [Key outputs generated with file paths]
+> - [Tests run and outcomes]
+> - [Decisions made -- flag for promotion to Project History Decision Register (`proSIFT_project_history.Rmd`) if significant]
+> - [Issues encountered or flagged]
+
+---
+
+# Active Session Log
+
+### 2026-04-04 (Claude Code)
+- Handoff maintenance: updated UNIPROT_MAPPING process notes and Module 01 last-touched date to reflect 2026-04-02 ortholog mapping implementation. Pushed all changes to GitHub.
+
+### 2026-04-02 (Claude Code)
+- Implemented Process 4.7 (Layer 2 ortholog mapping) in `bin/uniprot_mapping.py`. BioMart XML REST API queried via `requests` POST (no new library dependency). Two-step query: (1) mmusculus_gene_ensembl -> human Ensembl IDs + ortholog type + % identity, (2) hsapiens_gene_ensembl -> human Entrez IDs. Gene symbol fallback for proteins with null ensembl_gene_mouse.
+- Bug caught and fixed during testing: UniProt returns versioned Ensembl IDs (e.g., ENSMUSG00000043154.16); BioMart requires unversioned IDs. Version suffix now stripped before querying BioMart; lookup key also strips suffix. Without this fix, primary Ensembl ID lookup returned nearly no results (all mapped to useast mirror but BioMart couldn't match versioned IDs).
+- Added BioMart mirror fallback: `BIOMART_MIRRORS = [www.ensembl.org, useast.ensembl.org]`. Retry attempts cycle through mirrors in round-robin order. Triggered by a database outage on www.ensembl.org during testing; useast mirror successfully served all chunks.
+- Added cache schema version (CURRENT_SCHEMA_VERSION = 2) to cache metadata JSON. Old version-1 caches are auto-detected on load and regenerated. Resolves open question from 2026-03-26.
+- Updated `write_report()` to accept organism param and add ortholog summary section (counts by status, gene symbol fallback count).
+- CTXcyto benchmark test results: 8403 proteins; one_to_one 8153 (97.0%), one_to_many 90 (1.1%), no_ortholog 160 (1.9%). Entrez populated for 8151/8153 one_to_one proteins. Symbol fallback used for 263 proteins (those without ensembl_gene_mouse from UniProt). Cache-hit path verified (instant, no API calls).
+- **Decisions flagged for Decision Register promotion:**
+  - Ensembl BioMart selected as ortholog mapping resource (resolves [FOLLOW-UP NEEDED] in Module 01 spec Section 4.7 and master doc Section 2.6). Decision pre-recorded in handoff 2026-04-02 by Claude.ai.
+  - Ensembl ID version suffix stripping: UniProt cross-references include a version suffix not recognized by BioMart; strip at query time, preserve original in the mapping table.
+  - BioMart mirror fallback: primary www.ensembl.org, fallback useast.ensembl.org; round-robin on retry.
+
+
+### 2026-03-31 (Claude Code) -- Module 05 Enrichment Implemented and Tested
+
+- **bin/enrichment.py implemented (Module 05 ENRICHMENT process):**
+  - Gene symbol preparation: drops unmapped proteins (null gene_symbol), deduplicates by keeping most significant protein per gene symbol (lowest primary adj_pvalue). Counts logged and reported in summary.
+  - GMT path resolution: paths in params.yml resolved relative to the params.yml file's directory, not the working directory. Ensures relative paths work in both standalone and Nextflow execution contexts.
+  - ORA: `gseapy.enrich()` per contrast per library. Background = all detected gene symbols in the run (not genome). Returns gseapy's BH-corrected p-values per call, giving automatic per-library correction.
+  - GSEA: `gseapy.prerank()` per contrast per library. `threads=1` for determinism. Ranking metric: `deqms_t` by default (configurable). GSEA FDR is permutation-based -- can legitimately be less than nominal p-value; this is expected, not a bug.
+  - Lollipop plots: custom Plotly figures with stem shapes layer (PNG via kaleido + interactive HTML). ORA: x = combined score, color = adj_pvalue, size = overlap. GSEA: x = NES, color = FDR, size = leading edge. Top 20 significant terms per plot.
+  - GSEA running score plots: `gseapy.gseaplot()` (matplotlib PNG) for top 10 significant terms per library per contrast.
+  - Protein-term mapping: built by parsing GMT files for tested terms, cross-referenced with significant gene set and GSEA leading edge data. One row per protein-term-contrast triple.
+  - 9 output types: enrichment_results.parquet/.csv, protein_term_mapping.parquet, enrichment_summary.txt, and 4 plot types (ORA lollipop PNG/HTML, GSEA lollipop PNG/HTML, GSEA running score PNG).
+
+- **modules/local/enrichment/main.nf created:**
+  - 9 named emit channels: enrichment_results, enrichment_results_csv, protein_term_mapping, summary_txt, ora_lollipop_png, ora_lollipop_html, gsea_lollipop_png, gsea_lollipop_html, gsea_running_score_png.
+  - Stub block extracts contrast from params.yml (same grep/sed approach as Module 04) and hardcodes `GO_BP` as placeholder library name for plot filenames.
+
+- **workflows/prosift.nf updated:**
+  - `ch_input` multiMap expanded to 8 branches: `enrich_params` added.
+  - ENRICHMENT wired: `DIFFERENTIAL_ABUNDANCE.out.results_table.join(ch_input.enrich_params)` → `ch_enrich_input` → `ENRICHMENT(ch_enrich_input)`.
+  - Module import added.
+
+- **Design deviations from spec:**
+  - Libraries: GO_BP + Reactome used (not KEGG -- KEGG GMT file not available; Reactome was on hand).
+  - `term_id`: MSigDB gene set name format (e.g., `GOBP_APOPTOTIC_PROCESS`) used for both `term_id` and `term_name`. Numeric GO IDs not parsed. Accepted as-is.
+
+- **Standalone test on CTXcyto benchmark:**
+  - 8,403 proteins, 20 unmapped dropped, 249 duplicates collapsed, 8,134 unique gene symbols.
+  - GO_BP ORA: 71 significant / 4,028 tested. Top term: GOBP_AMINO_ACID_METABOLIC_PROCESS (adj_p=1.2e-15).
+  - GO_BP GSEA: 409 significant / 2,934 tested. Top by |NES|: GOBP_MRNA_PROCESSING (NES=-3.21).
+  - REACTOME ORA: 28 significant / 612 tested.
+  - REACTOME GSEA: 281 significant / 590 tested. Top: REACTOME_EUKARYOTIC_TRANSLATION_INITIATION.
+  - Protein-term mapping: 353,688 rows.
+  - All 25+ output files produced. All spot-checks passed.
+
+- **Open: stub-run test not yet done** -- enrichment module wired and standalone-tested but not stub-tested across all 12 runs. [FOLLOW-UP NEEDED]
+
+### 2026-03-30 (Claude Code) -- Module 04 Differential Abundance Implemented, Tested, and Wired
+
+- **bin/differential_abundance.py implemented (Module 04 DIFFERENTIAL_ABUNDANCE process):**
+  - Contrast parsing + validation: `numerator_vs_denominator` format, split on first `_vs_`, validated against metadata group column before any R calls.
+  - Peptide count summarization: `min of nonzero` per-protein across all samples (zeros = imputed positions are excluded from min). Produces `n_peptides` vector for DEqMS.
+  - rpy2 bridge: Data passed to R via `ro.globalenv["prosift_*"]` variables. Linear model chain: `lmFit` → `contrasts.fit` → `eBayes` → `spectraCounteBayes`. R code executed as a string block. Results converted back using `localconverter(ro.default_converter + pandas2ri.converter)` context manager (rpy2 3.5+ API -- `pandas2ri.activate()` is deprecated).
+  - Output schema: 14 columns -- protein_id, gene_symbol, log2_fc, avg_abundance, limma_t, limma_pvalue, limma_adj_pvalue, deqms_t, deqms_pvalue, deqms_adj_pvalue, n_peptides, significant, direction, contrast.
+  - id_mapping join: Uses `input_id` column (not `protein_id`) as the protein identifier key in the id_mapping parquet. `id_col = "input_id" if "input_id" in id_mapping_df.columns else "protein_id"`.
+  - Volcano plot: -log10(DEqMS adj.P) vs. log2FC; colored by direction (up=#d62728, down=#1f77b4, NS=#cccccc); threshold lines at FC cutoff and adj.P cutoff; produced per contrast as PNG + HTML.
+  - MA plot: log2FC vs. avg_abundance; same coloring + thresholds; per contrast as PNG + HTML.
+  - Summary text: method, contrast, significance threshold, significant counts by direction, top 10 hits by DEqMS adj.P.
+  - Outputs: `.diff_abundance_results.parquet`, `.diff_abundance_results.csv`, `.diff_abundance_summary.txt`, `{contrast}.volcano_plot.png/.html`, `{contrast}.ma_plot.png/.html` (contrast in filename for consistent glob patterns across single/multi-contrast runs).
+
+- **modules/local/differential_abundance/main.nf created:**
+  - 7 named emit channels: results_table, results_table_csv, summary_txt, volcano_png, volcano_html, ma_png, ma_html.
+  - Publishes to `{run_id}/differential_abundance/`.
+  - Stub block dynamically extracts contrast name from params.yml at runtime using `grep -A 20 'contrasts:' | grep -m1 '^[[:space:]]*-' | sed | tr -d '"'`, avoiding hardcoded contrast names.
+
+- **workflows/prosift.nf updated:**
+  - `ch_input` multiMap expanded to 7 branches: `da_params` added as 7th branch.
+  - DIFFERENTIAL_ABUNDANCE wired: `IMPUTE.out.imputed_matrix.join(VALIDATE_INPUTS.out.metadata).join(UNIPROT_MAPPING.out.mapping_table).join(ch_input.da_params)` → `ch_da_input` → `DIFFERENTIAL_ABUNDANCE(ch_da_input)`.
+  - Module import added.
+
+- **nextflow.config updated (conda profile):**
+  - Added `R_HOME` and `DYLD_LIBRARY_PATH` to `process.beforeScript` so rpy2 can locate libR.dylib on macOS. Without `R_HOME`, rpy2 segfaults (exit code 139) on macOS even when R is on PATH.
+
+- **conf/base.config updated:**
+  - Added `maxForks = 2` for DIFFERENTIAL_ABUNDANCE (and already applied to PRENORM_QC, NORMALIZE, IMPUTE, MISSINGNESS_REPORT) to cap concurrent Chrome instances from kaleido. Running 12 processes in parallel caused Chrome to hang on macOS.
+
+- **Standalone test on CTXcyto benchmark:**
+  - 8,403 proteins, contrast KO_vs_WT. 778 significant (9.3%): 395 up, 383 down. Top hit: sp|Q9WV60|.
+  - All 7 output files produced. Volcano and MA plots confirmed functional.
+
+- **Bugs found and fixed during development:**
+  1. `pandas2ri.activate()` DeprecationWarning (rpy2 3.5+): removed activate(), switched to `localconverter` context manager.
+  2. rpy2 segfault (exit 139): R_HOME + DYLD_LIBRARY_PATH not set. Fixed in nextflow.config conda beforeScript and verified with standalone test.
+  3. `KeyError: protein_id` in id_mapping join: id_mapping parquet uses `input_id` not `protein_id` as protein key. Fixed with conditional column detection.
+  4. `n_peptides` dtype int32 (R returns int32; schema requires int64): fixed with `.astype("Int64")` (pandas nullable Int64).
+  5. Stub block hardcoded contrast name `KO_vs_WT`: fraction/region runs produced stale empty stub files with wrong contrast in filename. Fixed by dynamically extracting contrast from params.yml in the stub shell block. Stale files removed manually from results.
+  6. kaleido/Chrome hang at 11/12 runs: too many parallel Chrome instances on macOS. Fixed with `maxForks = 2` in conf/base.config.
+
+- **Full 12-run pipeline test (all modules, Modules 01-04):**
+  - All 12 runs completed successfully. Contrasts correct per run type.
+  - Significance counts biologically sensible: genotype comparisons 0.4-9.3% significant; fraction comparisons ~50%; region comparisons ~5%.
+
+  | Run | Significant | Up | Down | % Significant |
+  |---|---|---|---|---|
+  | CTXcyto_WT_vs_CTXcyto_KO | 778 / 8403 | 395 | 383 | 9.3% |
+  | CTXsynap_WT_vs_CTXsynap_KO | 33 / 8287 | 4 | 29 | 0.4% |
+  | HIPcyto_WT_vs_HIPcyto_KO | 192 / 8004 | 23 | 169 | 2.4% |
+  | HIPsynap_WT_vs_HIPsynap_KO | 43 / 8252 | 13 | 30 | 0.5% |
+  | CTXcyto_KO_vs_CTXsynap_KO | ~50% | -- | -- | synap-specific proteins |
+  | CTXcyto_WT_vs_CTXsynap_WT | ~50% | -- | -- | synap-specific proteins |
+  | CTXcyto_KO_vs_HIPcyto_KO | ~5% | -- | -- | regional comparison |
+  | CTXcyto_WT_vs_HIPcyto_WT | ~5% | -- | -- | regional comparison |
+  | CTXsynap_KO_vs_HIPsynap_KO | ~5% | -- | -- | regional comparison |
+  | CTXsynap_WT_vs_HIPsynap_WT | ~5% | -- | -- | regional comparison |
+  | HIPcyto_KO_vs_HIPsynap_KO | ~50% | -- | -- | fraction comparison |
+  | HIPcyto_WT_vs_HIPsynap_WT | ~50% | -- | -- | fraction comparison |
+
+### 2026-03-30 (Claude Code) -- Full Pipeline Test (Modules 01-03), Bug Fix in impute.py
+
+- **Full end-to-end Nextflow pipeline run on all 12 CTX/Synaptosome runs:**
+  - Command: `nextflow run main.nf -profile local,conda --samplesheet prosift_inputs/samplesheet.csv --outdir results_fulltest`
+  - All 7 processes (VALIDATE_INPUTS, FILTER_PROTEINS, UNIPROT_MAPPING, MISSINGNESS_REPORT, PRENORM_QC, NORMALIZE, IMPUTE) ran successfully on all 12 runs.
+  - 44 output files per run, consistent across all 12. 0 NaN remaining in any imputed matrix.
+
+- **Bug discovered and fixed: execute bit missing on normalize.py, impute.py, prosift_plot_utils.py:**
+  - First run attempt failed with `Permission denied` on `normalize.py`. The `Write` tool creates files without the execute bit set. Nextflow calls scripts directly as executables (equivalent to `./normalize.py`), which requires the execute bit. Running scripts with `python bin/normalize.py` (as done in standalone tests) bypasses this requirement, so the issue was invisible until the full pipeline run.
+  - Fixed with `chmod +x bin/*.py`. All 8 bin/ scripts now executable.
+  - [FOLLOW-UP NEEDED]: Future scripts added to `bin/` must have `chmod +x` applied immediately after creation.
+
+- **Bug discovered and fixed: impute.py `.txt` summary overcounted MAR proteins:**
+  - The `write_imputation_summary_txt` function (and logging block) counted MAR proteins as `(n_mar_imputed > 0).sum()`. This overcounts by including SINGLE-GROUP (MNAR-classified) proteins that also have sporadic NaN in their detected group -- those NaN receive KNN imputation, so `n_mar_imputed > 0`, but the protein's `imputation_class` is "MNAR".
+  - For CTXcyto: reported 519 MAR proteins in the txt, but parquet correctly showed 461. Difference: 58 SINGLE-GROUP proteins with 1 sporadic NaN in detected group (3 MinProb + 1 KNN each).
+  - Fixed: both locations now use `(imputation_summary["imputation_class"] == "MNAR/MAR").sum()`, matching the parquet classification.
+  - The imputed value counts (MNAR values, MAR values, total) were always correct -- only the protein-level counts in the txt were wrong.
+
+- **Full pipeline results across all 12 runs (median normalization, mixed imputation):**
+
+| Run | Proteins | MNAR proteins | MAR proteins | MNAR values | MAR values | Total imputed |
+|---|---|---|---|---|---|---|
+| CTXcyto_WT_vs_CTXcyto_KO | 8,403 | 124 | 461 | 372 | 586 | 958 |
+| CTXsynap_WT_vs_CTXsynap_KO | 8,287 | 151 | 435 | 453 | 583 | 1,036 |
+| HIPcyto_WT_vs_HIPcyto_KO | 8,004 | 103 | 774 | 309 | 1,018 | 1,327 |
+| HIPsynap_WT_vs_HIPsynap_KO | 8,252 | 95 | 443 | 285 | 602 | 887 |
+| CTXcyto_KO_vs_CTXsynap_KO | 8,421 | 406 | 489 | 1,218 | 618 | 1,836 |
+| CTXcyto_WT_vs_CTXsynap_WT | 8,418 | 480 | 551 | 1,440 | 667 | 2,107 |
+| CTXcyto_KO_vs_HIPcyto_KO | 8,247 | 235 | 518 | 705 | 727 | 1,432 |
+| CTXcyto_WT_vs_HIPcyto_WT | 8,250 | 249 | 738 | 747 | 957 | 1,704 |
+| CTXsynap_KO_vs_HIPsynap_KO | 8,285 | 171 | 424 | 513 | 578 | 1,091 |
+| CTXsynap_WT_vs_HIPsynap_WT | 8,294 | 141 | 485 | 423 | 632 | 1,055 |
+| HIPcyto_KO_vs_HIPsynap_KO | 8,236 | 569 | 597 | 1,707 | 787 | 2,494 |
+| HIPcyto_WT_vs_HIPsynap_WT | 8,321 | 633 | 840 | 1,899 | 1,037 | 2,936 |
+
+  - Genotype runs (WT vs. KO, same tissue/fraction): low MNAR counts (95-235). Most proteins detected in both conditions.
+  - Fraction/region runs (cyto vs. synap, CTX vs. HIP): high MNAR counts (141-633). Many proteins genuinely compartment-specific. Biologically expected.
+  - HIPcyto_WT_vs_HIPsynap_WT has the most total imputed values (2,936): most divergent comparison in the dataset.
+
+### 2026-03-30 (Claude Code) -- Module 03 IMPUTE Implemented, Tested, and Wired
+
+- **bin/impute.py implemented (Module 03 IMPUTE process):**
+  - MNAR/MAR classification (DEP-style): SINGLE-GROUP proteins → MNAR (absent group imputed with MinProb, sporadic in detected group → MAR). PASSED proteins with any NaN → MAR. Complete proteins → none.
+  - MinProb imputation (MNAR): per-sample random draws from Normal(q-th quantile, scale × SD) of observed values. Uses `np.random.default_rng(seed)` (modern numpy Generator API, not global state) for determinism. Parameters: `minprob_quantile: 0.01`, `minprob_scale: 0.3`, `random_seed: 42`.
+  - KNN imputation (MAR): sklearn `KNNImputer` on (proteins × samples) matrix directly. Each row = protein, each column = sample; finds k nearest proteins by abundance profile. No transpose needed -- KNNImputer in this orientation does protein-wise KNN. Parameter: `knn_k: 10`.
+  - MinProb fills MNAR positions first; KNNImputer then fills remaining NaN (MAR positions only).
+  - Single-method mode (`imputation.mode: single`): minprob, knn, or left_censored applied uniformly to all missing values.
+  - Two diagnostic plots via Plotly (PNG + HTML):
+    1. KDE density curves: observed (blue), MNAR-imputed (red dashed), MAR-imputed (green dotted). Uses `scipy.stats.gaussian_kde` with Scott bandwidth.
+    2. Per-sample imputation fraction bar chart, colored by group.
+  - 5 output files: imputed_matrix.parquet, imputation_summary.parquet, imputation_summary.csv, imputation_summary.txt, plus 4 plot files (2 plot types × PNG/HTML).
+
+- **modules/local/impute/main.nf created:**
+  - 8 named emit channels: `imputed_matrix`, `imputation_summary`, `imputation_summary_csv`, `imputation_summary_txt`, `plot_distributions_png`, `plot_distributions_html`, `plot_fractions_png`, `plot_fractions_html`.
+  - Publishes to `{run_id}/normalization/` (same directory as NORMALIZE).
+  - Stub block touches all 8 expected files.
+
+- **workflows/prosift.nf updated:**
+  - `ch_input` multiMap expanded to 6 branches: `impute_params` added as 6th branch.
+  - IMPUTE wired: `NORMALIZE.out.normalized_matrix.join(VALIDATE_INPUTS.out.metadata).join(FILTER_PROTEINS.out.filter_table).join(ch_input.impute_params)` → `ch_impute_input` → `IMPUTE(ch_impute_input)`.
+  - Module import added.
+
+- **Standalone smoke test on CTXcyto benchmark:**
+  - 8,403 proteins, 958 NaN values → 0 NaN in imputed matrix. All 8 output files produced.
+  - 124 MNAR proteins (all SINGLE-GROUP): 372 values imputed with MinProb (all 3 absent-group replicates per protein).
+  - 461 MAR proteins (PASSED with sporadic NaN): 586 values imputed with KNN.
+  - MNAR imputed values: mean 15.395, max 18.275, all below 25th percentile of observed distribution (21.009). Expected behavior for low-end imputation.
+  - MAR imputed values: within the main observed distribution (not low-end cluster). Correct behavior.
+
+- **Determinism confirmed:** Two independent runs with `random_seed: 42` produced identical MD5 hash for imputed_matrix.parquet (`5901db65f5d3a8107c066b353808da92`). Nextflow -resume caching will work correctly.
+
+- **Comprehensive spot-check (13 checks, all passed):**
+  1. Protein count preserved (8,403). PASS.
+  2. No NaN in imputed matrix. PASS.
+  3. Column structure: protein_id + 6 abundance_ + 6 peptide_count_. PASS.
+  4. Peptide count columns passed through unmodified. PASS.
+  5. MNAR count: 124 proteins (correct -- matches SINGLE-GROUP count from Module 01 filter table). PASS.
+  6. MAR count: 461 proteins (correct -- PASSED proteins with NaN after filter). PASS.
+  7. MNAR total values: 372 (124 proteins × 3 absent-group replicates). PASS.
+  8. MAR total values: 586 (sporadic NaN across 461 PASSED proteins). PASS.
+  9. MNAR imputed values cluster at low end: max 18.275 < 25th percentile 21.009. Initial spot-check appeared to fail (max 22.5) because it collected ALL NaN for MNAR proteins including sporadic MAR positions in the detected group. Corrected to collect only truly absent-group positions: max 18.275. PASS (not a bug in impute.py).
+  10. MAR imputed values are within main distribution (not low-end). Mean 23.3 vs. observed mean 23.5. PASS.
+  11. Protein row order preserved. PASS.
+  12. Determinism: identical MD5 on two independent runs. PASS.
+  13. All 8 expected output files present. PASS.
+
+- **Stub test on all 12 runs:** All passed. IMPUTE outputs published to `results/{run_id}/normalization/` for all 12 runs.
+
+### 2026-03-30 (Claude Code) -- Module 03 NORMALIZE Implemented, Tested, and Wired
+
+- **bin/normalize.py implemented (Module 03 NORMALIZE process):**
+  - Method-aware log2 + normalization dispatcher: `median` (additive shift on log2 scale), `quantile` (rank-based with NaN handling), `vsn` (R vsn2()+predict() via rpy2, NaN positions restored after transform), `none` (log2-only or pass-through).
+  - VSN implementation uses `vsn2()` + `predict()` rather than `justvsn()` to handle NaN values correctly. NaN mask saved before R call, restored after.
+  - CV computed on back-transformed linear scale (2^log2), sample std (ddof=1). Proteins with <2 observed values in a group get NaN CV.
+  - Post-normalization diagnostic plots via `bin/prosift_plot_utils.py`: intensity boxplots, PCA, correlation heatmap (all with `label="Post-Normalization"`).
+  - Correlation heatmap color scale fix also applied this session: `zmin` now floored to nearest 0.05 below minimum off-diagonal correlation (prevents compressing the full color range into a tiny span); annotation text rounded to 3dp (prevents "same label, different color" visual inconsistency from 2dp rounding).
+
+- **modules/local/normalize/main.nf created:**
+  - 12 named emit channels: `normalized_matrix`, `normalization_summary`, `cv_summary`, `cv_summary_csv`, `pca_results`, `correlation_matrix`, 3 plot pairs (PNG + HTML). Publishes to `{run_id}/normalization/`.
+  - Stub block touches all 12 expected output files.
+
+- **workflows/prosift.nf updated:**
+  - `ch_input` multiMap expanded from 4 to 5 branches: `normalize_params` added.
+  - NORMALIZE wired: `FILTER_PROTEINS.out.matrix.join(VALIDATE_INPUTS.out.metadata).join(ch_input.normalize_params)` → `ch_normalize_input` → `NORMALIZE(ch_normalize_input)`. Runs in parallel with PRENORM_QC (no dependency between them).
+  - Module 03 import added.
+
+- **Standalone smoke test on CTXcyto benchmark:**
+  - 8,403 proteins, 6 samples, median normalization. All 12 output files produced.
+  - CV medians: KO 0.090 (3.2% proteins CV > 50%), WT 0.082 (1.4% proteins CV > 50%).
+
+- **Comprehensive spot-check (10 checks, all passed):**
+  - Protein count preserved (8,403 in/out). Column structure correct (protein_id + 6 abundance_ + 6 peptide_count_). NaN positions unchanged. Peptide counts unmodified. All 6 sample medians identical post-normalization (max deviation 3.55e-15, floating-point noise). Log2 values in expected range (11.6-35.2). CV values match manual re-derivation with ddof=1 (apparent mismatch with numpy default ddof=0 was in the spot-check script, not normalize.py). Proteins with 0 observed values correctly get NaN CV. Protein row order preserved. All 12 output files present.
+
+- **Stub test on all 12 runs:** 72 total tasks (6 processes × 12 runs), all passed. NORMALIZE outputs published to `results/{run_id}/normalization/` for all 12 runs.
+
+---
+
+# Earlier Sessions (2026-03-20 through 2026-03-27)
+
+Session log entries from 2026-03-20 through 2026-03-27 predate this file's creation. Their content was captured in the Project History (`proSIFT_project_history.Rmd`: decisions in Section 1, milestones in Section 2). The entries covered: project inception, DAG design, Nextflow/Snakemake switch, data preparation scripts, cluster survey, environment finalization, Module 01 implementation and review, Module 02 architecture rescoping and implementation, Module 03 normalization and imputation design, and shared plot utilities creation.

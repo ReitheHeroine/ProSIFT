@@ -1,0 +1,165 @@
+---
+title: "ProSIFT -- Environment & Code Style Reference"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+    toc_depth: 3
+    theme: default
+---
+
+# ProSIFT -- Environment & Code Style Reference
+
+**Purpose:** Stable reference for platform details, development workflow, environment setup, version control, and code conventions. Read on demand when working with the cluster, writing new scripts, or committing code.
+
+**Last Updated:** 2026-03-31
+
+---
+
+# 1. Platform
+
+**Local machine:** macOS (development, documentation, git)
+
+**Cluster:** mesx.sdsu.edu (pipeline execution)
+
+*Surveyed via SSH 2026-03-25. All entries below are confirmed unless noted.*
+
+- SSH access: `ssh rhastings@mesx.sdsu.edu` (key-based auth, no password)
+- OS: Oracle Linux Server 8.10, x86_64
+- Home directory: `/home2/rhastings` (2.5 TB available)
+- Scratch directory: `/usr/scratch2/userdata2/rhastings` (11 TB available)
+- Conda: miniconda3 25.1.1 at `/home2/rhastings/miniconda3`; Python 3.12.9 in base
+- Existing conda envs: `base`, `classes`, `ml_hop` -- no `prosift` env yet
+- Job scheduler: **Torque 6** at `/usr/local/torque6/bin` (on PATH); `pbspro` Nextflow executor is correct
+- Java: not installed system-wide; will be installed via `openjdk=17` in prosift conda env
+- Nextflow: not installed; will be installed via conda
+- R: not installed; will be installed via conda (r-base>=4.3)
+- Singularity/Apptainer: not installed; deferred to later phase
+- Git: not installed on cluster (by design -- rsync workflow, see Section 2)
+
+---
+
+# 2. Development Workflow: Local + Cluster via rsync
+
+**Decision (2026-03-23):** Code is developed and documented locally. Files are synced to the cluster via `rsync` for execution. Git is used only for intentional milestones, not for shuttling changes between machines.
+
+**Why this approach:** The cluster lacks git. Installing it is possible (via conda) but using git to sync between local and cluster would clutter the commit history with small "fix path" / "increase memory" commits during iterative debugging. rsync provides instant, low-friction syncing over SSH with no version control overhead. Git commits are reserved for meaningful checkpoints ("QC module working", "imputation implemented").
+
+**Sync local to cluster (push code for execution):**
+
+```bash
+rsync -avz --exclude='.git' --exclude='data/' --exclude='results/' \
+  --exclude='.nextflow/' --exclude='work/' --exclude='.DS_Store' \
+  "/Users/reina/Library/Mobile Documents/com~apple~CloudDocs/Blanco-Suárez Lab/ProSIFT/" \
+  rhastings@mesx.sdsu.edu:~/ProSIFT/
+```
+
+**Sync cluster to local (pull back bug fixes or results):**
+
+```bash
+# Pull back code changes (e.g., after fixing a bug on the cluster)
+rsync -avz rhastings@mesx.sdsu.edu:~/ProSIFT/workflows/ \
+  "/Users/reina/Library/Mobile Documents/com~apple~CloudDocs/Blanco-Suárez Lab/ProSIFT/workflows/"
+
+# Pull back results (when needed for local inspection)
+rsync -avz rhastings@mesx.sdsu.edu:~/ProSIFT/results/ \
+  "/Users/reina/Library/Mobile Documents/com~apple~CloudDocs/Blanco-Suárez Lab/ProSIFT/results/"
+```
+
+**What does NOT get synced to the cluster:**
+
+- `.git/` directory (git is local only)
+- `data/` and `results/` (data lives on the cluster; results are pulled back selectively)
+- `.nextflow/` and `work/` (Nextflow work directories are cluster-local)
+- `prosift_inputs/` (input data lives on the cluster; not synced back)
+
+**Instructions for Claude Code sessions:**
+
+- Use `rsync` commands above to sync code to/from the cluster. Do not attempt to use git on the cluster.
+- Always sync local → cluster before asking the user to run on the cluster.
+- After debugging on the cluster, sync cluster → local to capture fixes before committing.
+- Do not sync without explicit user approval -- rsync can overwrite files in either direction.
+
+**When to graduate to git-on-cluster:** If iterative cluster debugging becomes frequent enough that rsync feels limiting (e.g., needing to track what changed on the cluster between runs), install git via conda on the cluster and switch to a `dev` branch workflow with squash merges to `main`.
+
+---
+
+# 3. Environment Setup
+
+**Development environment:** Conda -- `environment.yml` finalized 2026-03-25. Pin strategy: Python, pandas, numpy, scipy, rpy2, r-base pinned to major version ranges; other packages unpinned. Python=3.12 to match cluster base.
+
+```bash
+# Create environment (first time)
+conda env create -f environment.yml
+
+# Update existing environment
+conda env update -f environment.yml --prune
+
+# Activate before running any scripts
+conda activate prosift
+```
+
+**Key dependencies (finalized -- see environment.yml for exact specs):**
+
+| Package | Purpose | Phase |
+|---|---|---|
+| python=3.12 | Runtime | 1+ |
+| openjdk=17 | Required by Nextflow | 1+ |
+| nextflow | Pipeline orchestration | 1+ |
+| pandas, numpy, pyarrow, pyyaml | Data handling, Parquet intermediates | 1+ |
+| requests, tqdm | UniProt API + progress | 1+ |
+| r-base, rpy2, bioconductor-limma, bioconductor-deqms | Statistical analysis | 2 |
+| scipy, scikit-learn | Statistics, imputation | 2 |
+| gseapy | ORA/GSEA enrichment | 2 |
+| matplotlib, seaborn, plotly | QC/EDA visualization | 2 |
+| pytest, pytest-cov | Testing | 1+ |
+
+**[FOLLOW-UP NEEDED]** Verify `bioconductor-deqms` installs via bioconda. If not available, fallback is `BiocManager::install("DEqMS")` from within R after env creation.
+
+**Production environment:** Singularity container (.sif) -- deferred. [See Project Documentation Section 5.2]
+
+**Cluster setup sequence (first time):**
+
+```bash
+# 1. Sync project to cluster
+rsync -avz --exclude='.git' --exclude='prosift_inputs/' \
+  --exclude='.nextflow/' --exclude='work/' --exclude='.DS_Store' \
+  "/Users/reina/Library/Mobile Documents/com~apple~CloudDocs/Blanco-Suárez Lab/ProSIFT/" \
+  rhastings@mesx.sdsu.edu:~/ProSIFT/
+
+# 2. On cluster: create prosift environment
+conda env create -f ~/ProSIFT/environment.yml
+
+# 3. Verify Nextflow can find Java
+conda activate prosift && nextflow -version
+```
+
+---
+
+# 4. GitHub Repository
+
+**Remote:** `git@github.com:ReitheHeroine/ProSIFT.git` (SSH)
+
+**Branch strategy:** `main` is the default and primary branch. Feature branches may be used as the project grows.
+
+**What gets committed:**
+
+- All code (Nextflow workflows, scripts, modules)
+- Configuration files (nextflow.config, default params.yml)
+- Documentation (project_documentation/*.Rmd, *.svg)
+- Environment definitions (environment.yml, Singularity.def)
+- Pipeline entry point (main.nf)
+
+**What does NOT get committed** (handled by .gitignore):
+
+- Data files (data/, results/)
+- Container images (*.sif)
+- Nextflow work directory (.nextflow/, work/)
+- Cache files (.cache/)
+- System/IDE files (.DS_Store, .vscode/, __pycache__/)
+
+The .gitignore file is maintained at the project root. Update it when new file types or directories need to be excluded.
+
+

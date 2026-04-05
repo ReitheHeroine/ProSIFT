@@ -47,12 +47,13 @@ import plotly.graph_objects as go
 _PALETTE = px.colors.qualitative.D3
 
 # Detection filter category display order
-_CATEGORY_ORDER = ["PASSED", "SINGLE-GROUP", "SPARSE", "ABSENT"]
+_CATEGORY_ORDER = ["PASSED", "PARTIAL", "SINGLE-GROUP", "SPARSE", "ABSENT"]
 
 # Colors per filter category
 _CATEGORY_COLORS = {
     "PASSED":       "#2ca02c",   # green
     "SINGLE-GROUP": "#1f77b4",   # blue
+    "PARTIAL":      "#9467bd",   # purple
     "SPARSE":       "#ff7f0e",   # orange
     "ABSENT":       "#d62728",   # red
 }
@@ -238,7 +239,7 @@ def plot_missingness_heatmap(
     Columns grouped by condition.
     """
     # Subset to filtered-out proteins
-    removed_categories = ["SINGLE-GROUP", "SPARSE", "ABSENT"]
+    removed_categories = ["PARTIAL", "SINGLE-GROUP", "SPARSE", "ABSENT"]
     removed_ids = filter_df.loc[
         filter_df["filter_status"].isin(removed_categories), "protein_id"
     ].tolist()
