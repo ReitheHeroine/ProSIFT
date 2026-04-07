@@ -8,9 +8,9 @@ output:
     theme: default
 ---
 
-**Last Updated:** 2026-04-01
+**Last Updated:** 2026-04-04
 
-**Module Status:** Design complete.
+**Module Status:** Complete. All processes (4.1-4.10) implemented and tested, including Layer 2 ortholog mapping (Process 4.7).
 
 **Pipeline Position:** [Input files] --> **Input validation & ID mapping** --> [Pre-normalization QC/EDA (Module 02), Normalization (Module 03)]
 
@@ -243,22 +243,37 @@ The pre-filter missingness overview captures the data state before filtering. Th
 
 ## 4.7 Ortholog Mapping (Conditional)
 
+*Updated 2026-04-02. Layer 2 ortholog mapping implemented via Ensembl BioMart.*
+
 **Condition:** Runs only when `project.organism` = "mouse" in params.yml.
 
-**What it does:** Maps mouse gene symbols to human ortholog gene symbols for downstream querying of human-centric databases (DGIdb, DisGeNET).
+**What it does:** Maps mouse Ensembl gene IDs to human ortholog gene symbols and Entrez IDs for downstream querying of human-centric databases (DGIdb, DisGeNET). Implemented as part of `bin/uniprot_mapping.py` (not a separate Nextflow process), running as a single bulk BioMart query after the UniProt mapping completes.
 
 **Two-layer mapping:**
 
-- **Layer 1:** Input protein IDs (mouse UniProt accessions) to mouse gene symbols and other mouse IDs. Source: UniProt ID mapping API (handled in Step 4.5).
-- **Layer 2:** Mouse gene symbols to human ortholog gene symbols. Source: Ensembl BioMart ortholog tables (preferred for currency and comprehensiveness) or JAX MGI (authoritative for mouse genetics). HomoloGene was considered but has not been updated since 2014.
+- **Layer 1:** Input protein IDs (mouse UniProt accessions) to mouse gene symbols, Entrez IDs, and Ensembl gene IDs. Source: UniProt ID mapping API (handled in Process 4.5).
+- **Layer 2:** Mouse Ensembl gene IDs to human ortholog gene symbols and Entrez IDs. Source: Ensembl BioMart REST API. The primary join key is `ensembl_gene_mouse` (not gene symbol), because Ensembl IDs are unambiguous cross-references between organisms. Gene symbol fallback is used for the ~3.4% of proteins lacking an Ensembl gene ID from UniProt: these are queried separately by mouse gene symbol against BioMart's external gene name attribute.
 
-**Ortholog status tracking:** Ortholog information is tracked at the protein level. The mapping table includes `human_ortholog_symbol`, `human_ortholog_entrez`, and `ortholog_mapping_status` (one_to_one, one_to_many, no_ortholog). Since ProSIFT's primary use case is identifying candidates for human therapeutics, annotations from human-centric databases are presented without per-annotation flags. Proteins with no human ortholog have empty DGIdb and DisGeNET results, and the ortholog_mapping_status field explains why. (See master overview Decision Register entry dated 2026-03-21 for full rationale.)
+**BioMart query implementation:**
+
+- **Endpoint:** Ensembl BioMart REST API (`http://www.ensembl.org/biomart/martservice`), with automatic fallback to the US East mirror (`http://useast.ensembl.org/biomart/martservice`) on connection failure or timeout.
+- **Dataset:** `mmusculus_gene_ensembl`
+- **Attributes queried:** `ensembl_gene_id`, `external_gene_name` (mouse), `hsapiens_homolog_associated_gene_name` (human symbol), `hsapiens_homolog_ensembl_gene` (human Ensembl), `hsapiens_homolog_orthology_type` (one2one, one2many, many2many), `hsapiens_homolog_orthology_confidence` (0 or 1)
+- **Query mode:** Single bulk XML query for all mouse Ensembl gene IDs in the run. BioMart returns one row per mouse-human ortholog pair.
+
+**One-to-many ortholog handling:** When a mouse gene maps to multiple human orthologs, the highest-confidence ortholog is stored in the primary columns (`human_ortholog_symbol`, `human_ortholog_entrez`). All orthologs are recorded in the `mapping_notes` column (format: `orthologs: HUMAN1, HUMAN2, HUMAN3`). Confidence is ranked by: orthology_confidence = 1 over 0, then one2one over one2many over many2many.
+
+**Version suffix stripping:** Ensembl gene IDs from UniProt sometimes include version suffixes (e.g., `ENSMUSG00000029580.18`). These are stripped to the base ID (e.g., `ENSMUSG00000029580`) before querying BioMart, which does not accept versioned IDs.
+
+**Ortholog status tracking:** The mapping table `ortholog_mapping_status` column records one of: `one_to_one` (clear single ortholog), `one_to_many` (multiple human orthologs, best stored in primary columns), `no_ortholog` (no human ortholog found in BioMart). Proteins with no human ortholog will have null `human_ortholog_symbol` and `human_ortholog_entrez`. Since ProSIFT's primary use case is identifying candidates for human therapeutics, annotations from human-centric databases are presented without per-annotation flags. Proteins with no human ortholog have empty DGIdb and DisGeNET results, and the ortholog_mapping_status field explains why. (See project history Decision Register entry dated 2026-03-21 for full rationale.)
 
 **PubMed queries** use both the mouse gene symbol and the human ortholog symbol, since relevant literature may use either. Results are labeled with which symbol generated the hit.
 
-**[FOLLOW-UP NEEDED]** Select the ortholog mapping resource (Ensembl BioMart vs. JAX MGI) and implement the Layer 2 mapping during Phase 3.
+**CTXcyto benchmark results (2026-04-02):** 8,134 proteins with Ensembl gene IDs queried via BioMart. 97.0% one_to_one, 1.1% one_to_many, 1.9% no_ortholog. 269 proteins queried via gene symbol fallback (lacking Ensembl IDs from UniProt).
 
 ## 4.8 Mapping Table Output Schema
+
+*Updated 2026-04-02 to reflect populated ortholog columns.*
 
 The mapping module produces a single table (Parquet file) with one row per input protein ID:
 
@@ -267,20 +282,25 @@ The mapping module produces a single table (Parquet file) with one row per input
 - gene_symbol_mouse: primary mouse gene symbol
 - entrez_id_mouse: NCBI Entrez Gene ID (mouse)
 - ensembl_gene_mouse: Ensembl gene ID (mouse)
-- human_ortholog_symbol: human ortholog gene symbol (null if no ortholog found)
-- human_ortholog_entrez: human ortholog Entrez ID (null if no ortholog found)
+- human_ortholog_symbol: human ortholog gene symbol (null if no ortholog found). Populated via Ensembl BioMart Layer 2 mapping.
+- human_ortholog_entrez: human ortholog Entrez ID (null if no ortholog found). Populated via Ensembl BioMart Layer 2 mapping.
+- ortholog_mapping_status: one of [one_to_one, one_to_many, no_ortholog, null]. Null when organism is not mouse or when the protein lacks an Ensembl gene ID and gene symbol fallback also fails.
 - mapping_status: one of [mapped, unmapped, isoform_collapsed, accession_redirected, multiple_mappings]
-- mapping_notes: free text for edge cases and diagnostics
+- mapping_notes: free text for edge cases and diagnostics. Includes one-to-many ortholog alternatives when applicable (format: `orthologs: GENE1, GENE2, ...`).
 
 Every downstream module reads this table and joins it with its input data to get the IDs it needs. The enrichment module uses gene_symbol_mouse. The PubMed module uses both gene_symbol_mouse and human_ortholog_symbol. DGIdb and DisGeNET use human_ortholog_entrez (and are skipped for proteins where it is null).
 
 ## 4.9 Cache Mapping Table
+
+*Updated 2026-04-02 to reflect schema versioning.*
 
 **What it does:** Writes the completed mapping table to Parquet and stores it in the cache directory. Subsequent runs with the same input IDs and unexpired cache will skip the API calls.
 
 **Cache key:** Hash of sorted input protein IDs + source ID type + organism.
 
 **Cache lifetime:** Configurable via `databases.cache_days` (default 30 days).
+
+**Schema versioning:** The cache metadata JSON sidecar includes a `schema_version` field (current: v2, bumped from v1 when ortholog mapping was added). On cache load, if the stored schema version does not match the expected version, the cache is treated as a miss and the mapping is regenerated. This prevents stale cache files from being served when the mapping logic changes (e.g., new columns added, status values changed).
 
 ## 4.10 Missingness Report
 
@@ -305,7 +325,7 @@ Every downstream module reads this table and joins it with its input data to get
 
 **Plot 1: Filter category bar chart.** Four bars showing the number of proteins in each detection filter category (PASSED, SINGLE-GROUP, SPARSE, ABSENT). Bars annotated with counts and percentages. Provides an immediate visual summary of data completeness. Data source: `detection_filter_table.csv`, counting rows per `filter_status` value.
 
-**Plot 2: Per-sample detection bar chart.** One bar per sample, height = number of proteins detected (non-missing) in that sample across the full pre-filter dataset. Bars colored by group. Samples within each group ordered consistently (e.g., replicate number). Allows quick identification of outlier samples with unusually low detection counts relative to their group. Data source: `validated_matrix.parquet`, counting non-NaN abundance values per sample column. Group assignments from `validated_metadata.parquet`.
+**Plot 2: Per-sample detection bar chart.** One bar per sample, height = number of proteins detected (non-missing) in that sample across the full pre-filter dataset. Bars colored by group. Samples within each group ordered consistently (e.g., replicate number). The plot subtitle shows the total input protein count as a denominator (e.g., "out of 8,847 total input proteins"), providing context for interpreting detection counts. Allows quick identification of outlier samples with unusually low detection counts relative to their group. Data source: `validated_matrix.parquet`, counting non-NaN abundance values per sample column. Group assignments from `validated_metadata.parquet`.
 
 **Plot 3: Missingness heatmap (filtered-out proteins).** Rows = proteins that did NOT pass the detection filter (SINGLE-GROUP, SPARSE, and ABSENT categories). Columns = samples, grouped by condition. Cells colored binary: detected (colored) vs. missing (white/light). Proteins sorted by filter category, then by total detection count within each category. This shows the structure of the removed proteins: SINGLE-GROUP proteins appear as blocks of presence in one group and absence in the other, SPARSE proteins show scattered detections, and ABSENT proteins are entirely empty. Data source: join `detection_filter_table.csv` (to identify filtered-out proteins and their categories) with `validated_matrix.parquet` (to get per-sample presence/absence). Note: with ~400-500 filtered-out proteins for a typical CTX run, this heatmap is a manageable size. The plot includes category labels or dividers on the y-axis to visually separate the three filtered categories.
 
@@ -495,7 +515,7 @@ The following params.yml fields control this module:
 - **Gene symbol duplicates in protein group data:** DIA-NN and other search engines can report multiple protein groups mapping to the same gene symbol when isoforms or fragments have distinguishing peptide evidence. In the CTX/Synaptosome dataset, 240 gene symbols are duplicated across 518 rows (5.8% of 8,948 proteins). This makes gene symbols unsuitable as a unique protein ID for ProSIFT input without prior aggregation. Users who must use gene symbols should collapse protein groups to unique gene symbols before input.
 - **Contaminant proteins:** Common contaminants (keratins, BSA, trypsin) have valid UniProt accessions and will map successfully if their accessions are clean. However, some search engines prefix contaminant accessions with non-standard tags (e.g., MaxQuant's `CON__P02769`, DIA-NN's `C_` prefix) that are not valid UniProt identifiers and will fail to map. Users should remove contaminants during upstream processing (standard practice) or strip search-engine-specific prefixes before input. The pipeline does not automatically detect or remove contaminants.
 - **Deprecated UniProt accessions:** Accessions that have been merged or deleted in UniProt will fail to map. The mapping module flags these as unmapped rather than attempting to resolve them. This is a concern when the reference database used for the search (e.g., UP000000590 downloaded 2025-04-25) is older than the current UniProt release.
-- **Ortholog mapping coverage:** Approximately 80% of mouse genes have a clear one-to-one human ortholog. The remaining 20% may have no ortholog, one-to-many mappings, or ambiguous mappings. These are flagged in the mapping table.
+- **Ortholog mapping coverage:** In the CTXcyto benchmark, 97.0% of mouse proteins have a one-to-one human ortholog, 1.1% have one-to-many mappings (highest-confidence stored in primary columns, alternatives in `mapping_notes`), and 1.9% have no human ortholog. Proteins with no ortholog will have empty DGIdb and DisGeNET results. One-to-many cases use the highest-confidence ortholog for querying, which may not always be the functionally relevant one.
 - **Detection filter and biological presence/absence:** The per-run detection filter (Section 4.4) retains proteins detected in only one group (e.g., present in WT, absent in KO) because these are potential biological hits. However, the statistical reliability of these proteins is inherently limited -- the "absent" group values will be entirely imputed. The QC module should flag these for careful interpretation downstream.
 
 ---
@@ -931,3 +951,12 @@ Specific changes to this file:
 
 **Affected sections:** 4.4 (category definitions, validation report format block, filter table schema description). Module 03a Section 4.7 (MNAR/MAR classification rules updated to include PARTIAL).
 **Downstream effects:** `filter_proteins.py` (category assignment), `missingness_report.py` (category order, colors, heatmap inclusion), `impute.py` (MNAR/MAR routing for PARTIAL proteins).
+
+### 2026-04-02 -- Ortholog Mapping (Layer 2) Implemented via Ensembl BioMart
+
+**Change:** Layer 2 ortholog mapping implemented within `bin/uniprot_mapping.py`. Ensembl BioMart selected as the mapping resource (resolving the open design question). Key implementation decisions: primary join on `ensembl_gene_mouse` with gene symbol fallback for ~3.4% of proteins lacking Ensembl IDs; single bulk XML query; US East mirror fallback on connection failure; version suffix stripping for Ensembl IDs; highest-confidence ortholog stored in primary columns with all alternatives in `mapping_notes`; cache schema version bumped to v2.
+
+**Reason:** Ortholog mapping was originally deferred to Phase 3 (see project history Decision Register entry 2026-03-26) pending the database query modules that consume ortholog information. Moved forward because (a) the implementation is contained within the existing `uniprot_mapping.py` script with no Nextflow changes, (b) having real ortholog data available enables better design of Module 06 (Database Queries), and (c) resolving the BioMart vs. JAX MGI question removes a long-standing open item.
+
+**Affected sections:** 4.7 (rewritten from design stub to implementation spec), 4.8 (schema updated with `ortholog_mapping_status` column and populated ortholog columns), 4.9 (cache schema versioning added).
+**Downstream effects:** Module 06 (Database Queries) can now gate DGIdb and DisGeNET queries on `ortholog_mapping_status`. PubMed queries can use both mouse and human gene symbols. The project history Decision Register entry "Ortholog Mapping Deferred to Phase 3" is superseded.

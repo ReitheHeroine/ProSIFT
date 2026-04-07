@@ -4,13 +4,15 @@ Title:         impute.py
 Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 Author:        Reina Hastings (reinahastings13@gmail.com)
 Created:       2026-03-30
-Last Modified: 2026-03-30
+Last Modified: 2026-04-07
 Purpose:       Module 03 IMPUTE process. Classifies missing values as MNAR or MAR
                using Module 01's detection filter table (DEP-style: SINGLE-GROUP
                proteins = MNAR in their absent group, PASSED proteins with sporadic
                NaN = MAR). Applies MinProb for MNAR values and protein-wise KNN for
                MAR values. Produces two diagnostic plots and a per-protein imputation
-               summary. No NaN values remain in the output matrix.
+               summary. No NaN values remain in the output matrix. Also produces
+               a per-cell imputation mask (observed/mnar/mar) for downstream
+               re-rendering by Module 03b (QC Report Assembly).
 Inputs:
   --matrix       {run_id}.normalized_matrix.parquet  (Module 03 NORMALIZE)
   --metadata     {run_id}.validated_metadata.parquet  (Module 01 VALIDATE_INPUTS)
@@ -18,6 +20,7 @@ Inputs:
   --params       {run_id}_params.yml
 Outputs:
   {run_id}.imputed_matrix.parquet
+  {run_id}.imputation_mask.parquet
   {run_id}.imputation_summary.parquet/.csv
   {run_id}.imputation_summary.txt
   {run_id}.imputation_distributions.png/.html
@@ -701,6 +704,44 @@ def write_imputed_matrix(
     logging.info(f"  Saved: {path.name}")
 
 
+def build_imputation_mask(
+    norm_df: pd.DataFrame,
+    mnar_mask: pd.DataFrame,
+    mar_mask: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Build a per-cell categorical imputation mask.
+
+    Same shape as the abundance matrix (index = protein_id, columns = sample_ids).
+    Each cell is one of: 'observed', 'mnar', 'mar'.
+
+    Parameters
+    ----------
+    norm_df : pd.DataFrame
+        Pre-imputation normalized matrix (used to identify observed values).
+    mnar_mask : pd.DataFrame
+        Boolean mask of positions imputed via MNAR method.
+    mar_mask : pd.DataFrame
+        Boolean mask of positions imputed via MAR method.
+    """
+    mask = pd.DataFrame('observed', index=norm_df.index, columns=norm_df.columns)
+    mask[mnar_mask] = 'mnar'
+    mask[mar_mask] = 'mar'
+    return mask
+
+
+def write_imputation_mask(
+    mask_df: pd.DataFrame,
+    outdir: Path,
+    run_id: str,
+) -> None:
+    """Write the per-cell imputation mask as Parquet."""
+    out = mask_df.reset_index()  # restore protein_id as column
+    path = outdir / f'{run_id}.imputation_mask.parquet'
+    out.to_parquet(path, index=False)
+    logging.info(f'  Saved: {path.name}')
+
+
 def write_imputation_summary_table(
     summary_df: pd.DataFrame,
     outdir: Path,
@@ -833,9 +874,13 @@ def main() -> None:
         norm_df, filter_df, protein_class, mnar_mask, mar_mask
     )
 
+    # --- Build imputation mask ---
+    imp_mask = build_imputation_mask(norm_df, mnar_mask, mar_mask)
+
     # --- Write outputs ---
     logging.info("Writing outputs...")
     write_imputed_matrix(imputed_df, peptide_df, abundance_prefix, outdir, run_id)
+    write_imputation_mask(imp_mask, outdir, run_id)
     write_imputation_summary_table(imputation_summary, outdir, run_id)
     write_imputation_summary_txt(imputation_summary, run_id, method_str, params, outdir)
 

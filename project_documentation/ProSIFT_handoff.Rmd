@@ -10,7 +10,7 @@ output:
     theme: default
 ---
 
-**Last Updated:** 2026-04-02 (added: ortholog mapping implementation task to pending queue; resolved cache schema version open question)
+**Last Updated:** 2026-04-07 (Module 05 edge case tested; documentation restructuring complete for all modules)
 
 **Purpose:** Operational coordination across Claude sessions. Tracks current development state, active tasks, blockers, and data contracts. Updated every session.
 
@@ -105,7 +105,7 @@ Step [X] complete.
 
 **Current phase:** Phase 2 in progress.
 
-**Current focus:** Module 05 (ORA/GSEA Enrichment) complete (2026-03-31). Ortholog mapping (Process 4.7) implemented (2026-04-02). Module 06 (Database Queries) design and implementation next.
+**Current focus:** Module 03b (QC Report Assembly) implemented and tested (2026-04-07). Module 06 (Database Queries) design and implementation next.
 
 ## 2.2 Module Status
 
@@ -117,10 +117,10 @@ Tracks implementation status of individual modules within and across phases. A m
 | nextflow.config + params.yml schema | 1 | Functional | 2026-03-26 | local/pbs/conda/singularity profiles; cluster path needs updating before first cluster run |
 | Conda environment | 1 | Complete | 2026-03-25 | environment.yml finalized; prosift env exists locally; not yet created on cluster |
 | Data preparation scripts | Pre-1 | Complete | 2026-03-26 | 3 scripts in scripts/; samplesheet.csv generated; 12 per-run input directories |
-| Module 01: Input Validation & ID Mapping | 1 | Complete | 2026-04-02 | All processes (4.1-4.10) implemented and tested. 5 scripts in bin/. Process 4.7 (ortholog mapping) now populated via BioMart. |
-| Module 02: Pre-normalization QC/EDA | 1 | Complete | 2026-03-27 | bin/prenorm_qc.py; 17 outputs; CTXcyto benchmark verified |
-| Module 03: Normalization & Imputation | 2 | Complete | 2026-03-30 | NORMALIZE + IMPUTE both implemented and tested. Full pipeline test all 12 runs, 0 NaN remaining. |
-| QC Report Assembly | 2 | Not started | -- | Collects diagnostics from Modules 02-03 into consolidated HTML report |
+| Module 01: Input Validation & ID Mapping | 1 | Complete | 2026-04-06 | All processes (4.1-4.10) implemented and tested. 5 scripts in bin/. Process 4.7 (ortholog mapping) now populated via BioMart. missingness_report.py Plot 2 denominator annotation added. |
+| Module 02: Pre-normalization QC/EDA | 1 | Complete | 2026-04-06 | bin/prenorm_qc.py; 18 outputs (added density plot); clustermap with dendrogram; CTXcyto benchmark verified |
+| Module 03: Normalization & Imputation | 2 | Complete | 2026-04-06 | NORMALIZE + IMPUTE both implemented and tested. Full pipeline test all 12 runs, 0 NaN remaining. NORMALIZE now produces 4 diagnostic plot types (added density, clustermap replaces heatmap). |
+| QC Report Assembly | 2 | Functional | 2026-04-07 | bin/qc_report_assembly.py + Nextflow module. CTXcyto benchmark tested. Prerequisite imputation mask implemented. |
 | Module 04: Differential Abundance (DEqMS) | 2 | Complete | 2026-03-30 | bin/differential_abundance.py; limma+DEqMS via rpy2; 7 outputs; tested all 12 runs. |
 | Module 05: ORA / GSEA enrichment | 2 | Complete | 2026-03-31 | bin/enrichment.py; gseapy ORA + preranked GSEA; GO_BP + Reactome; lollipop + running score plots; standalone tested. |
 | Module 06: Database queries (all 5 databases) | 3 | Not started | -- | -- |
@@ -140,8 +140,9 @@ Tracks which Nextflow processes exist and whether they are functional. Populated
 | MISSINGNESS_REPORT | 01 | Functional | bin/missingness_report.py; errorStrategy 'ignore'; tested all 12 runs |
 | PRENORM_QC | 02 | Functional | bin/prenorm_qc.py; 17 outputs; tested all 12 runs |
 | NORMALIZE | 03 | Functional | bin/normalize.py; 12 emit channels; tested all 12 runs (2026-03-30) |
-| IMPUTE | 03 | Functional | bin/impute.py; 8 emit channels; tested all 12 runs (2026-03-30) |
+| IMPUTE | 03 | Functional | bin/impute.py; 9 emit channels (added imputation_mask 2026-04-07); tested all 12 runs (2026-03-30) |
 | DIFFERENTIAL_ABUNDANCE | 04 | Functional | bin/differential_abundance.py; limma + DEqMS via rpy2; volcano + MA plots; 7 named emit channels; tested all 12 runs (2026-03-30) |
+| QC_REPORT_ASSEMBLY | 03b | Functional | bin/qc_report_assembly.py; 13 Plotly plots; single HTML output; errorStrategy 'ignore'; CTXcyto benchmark tested (2026-04-07) |
 | ENRICHMENT | 05 | Functional | bin/enrichment.py; gseapy ORA + preranked GSEA; lollipop plots (Plotly PNG+HTML) + GSEA running score plots; 9 named emit channels; standalone tested (2026-03-31) |
 
 ---
@@ -162,22 +163,6 @@ Tracks which Nextflow processes exist and whether they are functional. Populated
 > - **Acceptance criteria:** [How to know when it's done]
 > - **Dependencies:** [Other tasks or modules that must be complete first]
 
-### Resolve Detection Filter Category Gap (PARTIAL proteins)
-- **Assigned to:** Claude.ai (design decision), then Claude Code (implementation)
-- **Priority:** High
-- **Phase:** 2
-- **Module:** Module 01 (detection filter), with downstream impact on Module 03 (imputation) and Module 01 Process 4.10 (missingness report)
-- **Description:** The detection filter (Process 4.4) has a gap in its category definitions. The filter logic retains any protein detected in >= `min_detections_per_group` replicates in at least one group, but the four category labels (PASSED, SINGLE-GROUP, SPARSE, ABSENT) do not cover the case where a protein passes in one group but has sub-threshold, non-zero detection in the other group (e.g., 2/3 WT, 1/3 KO with min=2). This protein is retained by the filter but does not fit any category: not PASSED (KO below threshold), not SINGLE-GROUP (KO is not zero), not SPARSE (WT meets threshold), not ABSENT.
-- **Context/References:** Module 01 spec Section 4.4 (filter logic and category definitions). Module 03 spec Section 4.7 (MNAR/MAR classification consumes `filter_status` column). Discussion in Claude.ai session 2026-03-31 evaluated two options: (A) expand SINGLE-GROUP to include sub-threshold non-zero, or (B) add a fifth category (PARTIAL). Preliminary recommendation: Option B (fifth category) to preserve clean SINGLE-GROUP semantics, but contingent on empirical count of affected proteins in the benchmark data.
-- **Acceptance criteria:**
-  1. Design decision documented: choose Option A or B based on empirical protein counts from benchmark data
-  2. Module 01 spec (Section 4.4) updated: category definitions, validation report format block, and category description text all revised to cover the full partition space with no gaps
-  3. Module 03 spec (Section 4.7) updated: MNAR/MAR classification rule explicitly addresses the new/revised category
-  4. Implementation updated: `filter_proteins.py` category assignment logic, `missingness_report.py` Plot 1 (bar chart) and Plot 3 (heatmap), `impute.py` MNAR/MAR routing
-  5. Detection filter table schema unchanged (still one `filter_status` column per protein; only the set of valid values changes)
-  6. Decision Register entry added to Module 01 spec
-- **Dependencies:** None (can be done independently of Module 06 work). Should be resolved before any re-run of the full pipeline to ensure filter table and imputation summary are correct.
-
 ### Replace Missingness Heatmap with SINGLE-GROUP Direction Summary
 - **Assigned to:** Claude Code
 - **Priority:** Low
@@ -190,7 +175,7 @@ Tracks which Nextflow processes exist and whether they are functional. Populated
   2. Missingness report Plot 3 (heatmap) removed or replaced
   3. Module 01 spec Section 4.10 updated to reflect the change
   4. Remaining plots (1, 2, 4) unaffected
-- **Dependencies:** If the detection filter category gap task (above) adds a PARTIAL category, this task should account for PARTIAL proteins in the direction summary as well.
+- **Dependencies:** The PARTIAL category has been implemented (2026-04-06). This task should account for PARTIAL proteins in the direction summary as well.
 
 ## 3.2 Decisions and Designs for Review
 
@@ -204,6 +189,11 @@ None currently.
 *Detailed completed task log (2026-03-20 through 2026-03-30) archived. Summary: data prep scripts, Module 01 (all processes), Module 02, Module 03 (NORMALIZE + IMPUTE), full pipeline test all 12 runs, Module 04 design. See Project History (`proSIFT_project_history.Rmd`) Section 2 (Development Log) for details.*
 
 - Ortholog Mapping (Layer 2, Process 4.7) implemented and tested -- 2026-04-02 -- bin/uniprot_mapping.py extended with BioMart query, mirror fallback, version suffix stripping, cache schema versioning. CTXcyto: 97.0% one_to_one, 1.1% one_to_many, 1.9% no_ortholog. See session log 2026-04-02 for details.
+- Module 01/02 QC Visualization Enhancements -- 2026-04-06 -- (A) Per-sample KDE density plots added to prenorm_qc.py. (B) Correlation heatmap converted to clustermap with dendrogram (1-r distance, average linkage). (C) Denominator annotations: missingness report Plot 2 subtitle shows total protein count; prenorm_qc.py HTML report notes post-filter denominator. (D) Module 02 spec updated (Section 4.2b, 4.5, 5); Module 01 spec Section 4.10 updated. CTXcyto benchmark tested, all outputs verified.
+- Post-normalization density plot and clustermap added to NORMALIZE -- 2026-04-06 -- `plot_density()` moved to shared `prosift_plot_utils.py`. `normalize.py` now produces `postnorm_density` and `postnorm_clustermap` (replacing `postnorm_correlation_heatmap`). Nextflow NORMALIZE and PRENORM_QC modules updated (new density channels, clustermap rename). Module 03a spec Section 4.5 revised (4 plot types). CTXcyto benchmark tested.
+- Imputation mask added to IMPUTE process -- 2026-04-07 -- `bin/impute.py` extended with `build_imputation_mask()` and `write_imputation_mask()`. New output `{run_id}.imputation_mask.parquet` (per-cell: observed/mnar/mar). IMPUTE Nextflow module updated (new emit channel). Module 03a spec Section 2.2 updated. CTXcyto benchmark: mask shape (8403, 7), categories match imputation_summary exactly.
+- Module 03b QC Report Assembly implemented -- 2026-04-07 -- New `bin/qc_report_assembly.py` (15 CLI args, 13 Plotly plots, 6 report sections). New `modules/local/qc_report_assembly/main.nf` (errorStrategy 'ignore'). Re-renders all plots from upstream data; CSS grid paired layouts; CV density plot (new). CTXcyto benchmark tested: 2.6 MB report, all numbers verified against upstream files.
+- PARTIAL detection filter category implemented -- 2026-04-06 -- Option B (fifth category) chosen. Code: `filter_proteins.py` (classify + report), `missingness_report.py` (order, colors, heatmap), `impute.py` (mixed MNAR/MAR routing). Specs: Module 01 Section 4.4 + Decision Register, Module 03a Section 4.7. Category order: PASSED-PARTIAL-SINGLE-GROUP-SPARSE-ABSENT. CTXcyto rerun: 263 PARTIAL proteins (2.9%), previously misclassified. Module 01 fully rerun for CTXcyto_WT_vs_CTXcyto_KO (all 4 processes). Stale results_fulltest/ and results_test/ directories deleted.
 
 ---
 
@@ -236,6 +226,4 @@ None currently.
 
 This section holds the in-progress session log entry. It is written during the session and flushed to `proSIFT_session_log.Rmd` at session end (see Section 1, "AT SESSION END" for the flush procedure).
 
-[SESSION START]
-
-[SESSION END]
+[No active session]

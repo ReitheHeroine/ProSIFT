@@ -4,7 +4,7 @@ Title:         prosift_plot_utils.py
 Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 Author:        Reina Hastings (reinahastings13@gmail.com)
 Created:       2026-03-27
-Last Modified: 2026-03-27
+Last Modified: 2026-04-06 (clustermap with dendrogram replaces fixed-order heatmap)
 Purpose:       Shared Plotly plotting utilities used by Module 02 (prenorm_qc.py)
                and Module 03 (normalize.py). Provides color palette helpers, a
                save_plot dispatcher (PNG + HTML), and the three diagnostic plots
@@ -26,6 +26,10 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import scipy.stats
+from plotly.subplots import make_subplots
+from scipy.cluster.hierarchy import average, dendrogram, leaves_list
+from scipy.spatial.distance import squareform
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
@@ -126,6 +130,87 @@ def plot_intensity_boxplots(
         height=520,
         width=800,
         showlegend=True,
+    )
+    return fig
+
+
+def plot_density(
+    log2_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    color_map: dict[str, str],
+    run_id: str,
+    label: str = 'Pre-Normalization',
+) -> go.Figure:
+    """
+    Overlaid kernel density estimate (KDE) of log2 intensity distributions.
+    One line per sample, colored by group. Complements box plots by showing
+    full distributional shape (bimodality, skewness, shoulder effects) that
+    summary statistics cannot capture.
+
+    Parameters
+    ----------
+    log2_df : pd.DataFrame
+        Log2 abundance matrix; index = protein_id, columns = sample_ids.
+    summary_df : pd.DataFrame
+        Per-sample summary with 'sample_id' and 'group' columns.
+    color_map : dict[str, str]
+        {group_label: hex_color} from make_color_map().
+    run_id : str
+        Run identifier for plot title.
+    label : str
+        Phase label for the plot title, e.g. 'Pre-Normalization' or
+        'Post-Normalization'.
+    """
+    sample_order = (
+        summary_df.sort_values(['group', 'sample_id'])['sample_id'].tolist()
+    )
+
+    fig = go.Figure()
+    shown_groups: set[str] = set()
+
+    for sid in sample_order:
+        grp = str(summary_df.loc[summary_df['sample_id'] == sid, 'group'].iloc[0])
+        show_legend = grp not in shown_groups
+        shown_groups.add(grp)
+
+        values = log2_df[sid].dropna().values
+        if len(values) < 2:
+            continue
+
+        # Step 1: Compute KDE using scipy gaussian_kde (Scott's rule bandwidth)
+        kde = scipy.stats.gaussian_kde(values)
+
+        # Step 2: Evaluate over a regular grid spanning the data range
+        x_min, x_max = float(values.min()), float(values.max())
+        margin = (x_max - x_min) * 0.05
+        x_grid = np.linspace(x_min - margin, x_max + margin, 512)
+        density = kde(x_grid)
+
+        fig.add_trace(
+            go.Scatter(
+                x=x_grid,
+                y=density,
+                mode='lines',
+                line=dict(color=color_map[grp], width=1.5),
+                name=grp,
+                legendgroup=grp,
+                legendgrouptitle_text=grp if show_legend else None,
+                showlegend=show_legend,
+                hovertemplate=(
+                    f'<b>{sid}</b><br>'
+                    'log2 intensity: %{x:.2f}<br>'
+                    'Density: %{y:.4f}<extra></extra>'
+                ),
+            )
+        )
+
+    fig.update_layout(
+        title=f'Intensity Density ({label}): {run_id}',
+        xaxis_title='log2 Intensity',
+        yaxis_title='Density',
+        height=520,
+        width=800,
+        legend_title_text='Group',
     )
     return fig
 
@@ -277,12 +362,15 @@ def compute_and_plot_correlation(
     summary_df: pd.DataFrame,
     color_map: dict[str, str],
     run_id: str,
-    label: str = "Pre-Normalization",
+    label: str = 'Pre-Normalization',
 ) -> tuple[pd.DataFrame, go.Figure]:
     """
-    Pearson correlation matrix using pairwise-complete observations.
-    Color scale anchored to [min_off_diagonal_corr, 1.0] to amplify subtle
-    within-group vs between-group differences. Samples ordered by group.
+    Pearson correlation clustermap with dendrogram arms.
+
+    Pairwise-complete Pearson correlation, hierarchically clustered using
+    distance = 1 - r and average linkage. The dendrogram determines sample
+    ordering (data-driven rather than fixed group order). Color scale anchored
+    to [floor(min_off_diag, 0.05), 1.0].
 
     Parameters
     ----------
@@ -291,76 +379,151 @@ def compute_and_plot_correlation(
     summary_df : pd.DataFrame
         Per-sample summary with at minimum 'sample_id' and 'group' columns.
     color_map : dict[str, str]
-        {group_label: hex_color} -- not used for the heatmap itself but
-        accepted for API consistency.
+        {group_label: hex_color} from make_color_map().
     run_id : str
         Run identifier used in the plot title.
     label : str
-        Phase label for the plot title, e.g. "Pre-Normalization".
+        Phase label for the plot title, e.g. 'Pre-Normalization'.
 
     Returns
     -------
     corr_df : pd.DataFrame
-        Square Pearson correlation matrix (sample_id index and columns).
+        Square Pearson correlation matrix (sample_id index and columns,
+        in original order for downstream use).
     fig : go.Figure
-        Annotated heatmap.
+        Clustermap with top dendrogram and annotated heatmap.
     """
-    # Order samples: group together for clear block structure
-    sample_order = (
-        summary_df.sort_values(["group", "sample_id"])["sample_id"].tolist()
-    )
-    log2_ordered = log2_df[sample_order]
+    sample_ids = log2_df.columns.tolist()
 
     # Pairwise-complete Pearson correlation (pandas default)
-    corr_df = log2_ordered.corr(method="pearson")
+    corr_df = log2_df.corr(method='pearson')
 
-    # Anchor color scale to a round number below the actual minimum off-diagonal
-    # correlation. Flooring to the nearest 0.05 prevents the full color range
-    # from compressing into a tiny span when all correlations are very high
-    # (e.g. 0.977-1.0), which would make visually similar values appear very
-    # different. The floor of 0.80 ensures the scale never anchors so low that
-    # real variation is obscured.
-    mask = ~np.eye(len(sample_order), dtype=bool)
-    min_corr = float(corr_df.values[mask].min())
-    zmin = max(0.80, np.floor(min_corr * 20) / 20)  # floor to nearest 0.05
+    # --- Hierarchical clustering: distance = 1 - r, average linkage ---
+    # Clip correlations to [0, 1] for distance computation (negative
+    # correlations are theoretically possible but extremely unlikely in
+    # proteomics replicates; clipping prevents negative distances).
+    corr_values = corr_df.values.copy()
+    np.fill_diagonal(corr_values, 1.0)
+    dist_matrix = 1.0 - np.clip(corr_values, 0.0, 1.0)
+    # Ensure exact symmetry and zero diagonal for squareform
+    dist_matrix = (dist_matrix + dist_matrix.T) / 2.0
+    np.fill_diagonal(dist_matrix, 0.0)
+    condensed = squareform(dist_matrix)
+    linkage_matrix = average(condensed)
 
-    # Axis labels: "Group: SampleID"
-    group_of = dict(zip(summary_df["sample_id"], summary_df["group"].astype(str)))
-    axis_labels = [f"{group_of[s]}: {s}" for s in sample_order]
+    # Get dendrogram leaf order (data-driven sample ordering)
+    dendro_result = dendrogram(linkage_matrix, no_plot=True)
+    leaf_order = dendro_result['leaves']
+    ordered_samples = [sample_ids[i] for i in leaf_order]
 
-    # Cell annotations with 3dp so displayed values match the color differences
-    # visible on the heatmap (2dp would round distinct values to identical text
-    # while their colors still differ, which is visually inconsistent).
+    # Reorder correlation matrix by dendrogram leaves
+    corr_ordered = corr_df.loc[ordered_samples, ordered_samples]
+
+    # --- Color scale: anchor to observed range ---
+    n = len(ordered_samples)
+    mask = ~np.eye(n, dtype=bool)
+    min_corr = float(corr_ordered.values[mask].min())
+    zmin = max(0.80, np.floor(min_corr * 20) / 20)
+
+    # --- Build clustermap figure with dendrogram on top ---
+    group_of = dict(zip(summary_df['sample_id'], summary_df['group'].astype(str)))
+    axis_labels = [f'{group_of[s]}: {s}' for s in ordered_samples]
+
+    # Subplot layout: dendrogram on top (row 1), heatmap below (row 2)
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.15, 0.85],
+        vertical_spacing=0.02,
+        shared_xaxes=True,
+    )
+
+    # Step 1: Draw dendrogram arms
+    icoord = dendro_result['icoord']  # x coordinates of dendrogram links
+    dcoord = dendro_result['dcoord']  # y coordinates (heights)
+    for xs, ys in zip(icoord, dcoord):
+        # scipy dendrogram uses 5, 15, 25... as leaf positions (step of 10);
+        # remap to 0-based sample indices for alignment with heatmap
+        mapped_xs = [(x - 5) / 10 for x in xs]
+        fig.add_trace(
+            go.Scatter(
+                x=mapped_xs,
+                y=ys,
+                mode='lines',
+                line=dict(color='#333', width=1.2),
+                showlegend=False,
+                hoverinfo='skip',
+            ),
+            row=1, col=1,
+        )
+
+    # Step 2: Draw heatmap
+    fig.add_trace(
+        go.Heatmap(
+            z=corr_ordered.values,
+            x=list(range(n)),
+            y=list(range(n)),
+            colorscale='RdBu',
+            zmin=zmin,
+            zmax=1.0,
+            colorbar=dict(title='Pearson r', y=0.4, len=0.7),
+            hovertemplate='%{customdata[0]}<br>%{customdata[1]}<br>r = %{z:.4f}<extra></extra>',
+            customdata=[
+                [
+                    [axis_labels[i], axis_labels[j]]
+                    for j in range(n)
+                ]
+                for i in range(n)
+            ],
+        ),
+        row=2, col=1,
+    )
+
+    # Step 3: Cell annotations with 3dp
     annotations = []
-    for i, row_sid in enumerate(sample_order):
-        for j, col_sid in enumerate(sample_order):
-            val = corr_df.loc[row_sid, col_sid]
+    for i in range(n):
+        for j in range(n):
+            val = corr_ordered.values[i, j]
             annotations.append(
                 dict(
                     x=j, y=i,
-                    text=f"{val:.3f}",
+                    text=f'{val:.3f}',
                     showarrow=False,
-                    font=dict(size=10, color="black"),
+                    font=dict(size=10, color='black'),
+                    xref='x2', yref='y2',
                 )
             )
 
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=corr_df.values,
-            x=axis_labels,
-            y=axis_labels,
-            colorscale="RdBu",
-            zmin=zmin,
-            zmax=1.0,
-            colorbar=dict(title="Pearson r"),
-            hovertemplate="%{y}<br>%{x}<br>r = %{z:.4f}<extra></extra>",
-        )
-    )
     fig.update_layout(
-        title=f"Sample Correlation Heatmap ({label}): {run_id}",
+        title=f'Sample Correlation Clustermap ({label}): {run_id}',
         annotations=annotations,
-        height=520,
-        width=640,
-        xaxis=dict(tickangle=40),
+        height=620,
+        width=680,
+        # Dendrogram axis (top)
+        xaxis=dict(
+            showticklabels=False,
+            showgrid=False,
+            zeroline=False,
+            range=[-0.5, n - 0.5],
+        ),
+        yaxis=dict(
+            showticklabels=False,
+            showgrid=False,
+            zeroline=False,
+        ),
+        # Heatmap axes
+        xaxis2=dict(
+            tickvals=list(range(n)),
+            ticktext=axis_labels,
+            tickangle=40,
+            side='bottom',
+        ),
+        yaxis2=dict(
+            tickvals=list(range(n)),
+            ticktext=axis_labels,
+            autorange='reversed',
+        ),
     )
+
+    # Return corr_df in original sample order (not clustered) so downstream
+    # consumers (e.g., outlier flagging) are not affected by reordering.
     return corr_df, fig

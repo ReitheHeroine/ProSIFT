@@ -29,6 +29,8 @@ process IMPUTE {
     output:
     // Primary output -- fed into Module 04 Differential Abundance
     tuple val(meta), path("*.imputed_matrix.parquet"),          emit: imputed_matrix
+    // Per-cell imputation mask (observed/mnar/mar) -- used by Module 03b QC Report Assembly
+    tuple val(meta), path("*.imputation_mask.parquet"),         emit: imputation_mask
     // Diagnostic data files
     tuple val(meta), path("*.imputation_summary.parquet"),      emit: imputation_summary
     tuple val(meta), path("*.imputation_summary.csv"),          emit: imputation_summary_csv
@@ -53,6 +55,7 @@ process IMPUTE {
     stub:
     """
     touch ${meta.run_id}.imputed_matrix.parquet
+    touch ${meta.run_id}.imputation_mask.parquet
     touch ${meta.run_id}.imputation_summary.parquet
     touch ${meta.run_id}.imputation_summary.csv
     touch ${meta.run_id}.imputation_summary.txt

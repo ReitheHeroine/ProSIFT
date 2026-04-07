@@ -4,7 +4,7 @@ Title:         missingness_report.py
 Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 Author:        Reina Hastings (reinahastings13@gmail.com)
 Created:       2026-03-27
-Last Modified: 2026-03-27
+Last Modified: 2026-04-06 (added: total protein count denominator to Plot 2 subtitle)
 Purpose:       Module 01, Process 4.10: Missingness visualization report.
                Reads the detection filter table (from FILTER_PROTEINS),
                validated abundance matrix, and validated metadata (both from
@@ -175,8 +175,13 @@ def plot_per_sample_detection(
     matrix_df: pd.DataFrame,
     metadata_df: pd.DataFrame,
     run_id: str,
+    n_total_proteins: int | None = None,
 ) -> go.Figure:
-    """Bar chart: number of proteins detected per sample, colored by group."""
+    """Bar chart: number of proteins detected per sample, colored by group.
+
+    When n_total_proteins is provided, the total input protein count is shown
+    in the plot subtitle as a denominator for interpreting detection counts.
+    """
     # Identify abundance columns in the matrix (may have an abundance_ prefix)
     abund_cols = [c for c in matrix_df.columns if c != "protein_id"
                   and not c.startswith("peptide_count_")]
@@ -210,14 +215,19 @@ def plot_per_sample_detection(
             hovertemplate="<b>%{x}</b><br>Detected: %{y:,}<extra></extra>",
         ))
 
+    # Build title with denominator subtitle when total protein count is known
+    title_text = f"{run_id} - Per-sample detection counts (pre-filter)"
+    if n_total_proteins is not None:
+        title_text += f"<br><span style='font-size:12px;color:#666'>out of {n_total_proteins:,} total input proteins</span>"
+
     fig.update_layout(
-        title=dict(text=f"{run_id} - Per-sample detection counts (pre-filter)", x=0.5),
+        title=dict(text=title_text, x=0.5),
         xaxis_title="Sample",
         yaxis_title="Proteins detected",
         legend_title="Group",
         template="simple_white",
         barmode="group",
-        margin=dict(t=60, b=80),
+        margin=dict(t=80, b=80),
         xaxis=dict(tickangle=-30),
     )
     return fig
@@ -512,7 +522,7 @@ def main() -> None:
     fig_categories = plot_filter_categories(filter_df, run_id)
 
     logging.info("Generating Plot 2: per-sample detection bar chart")
-    fig_sample_det = plot_per_sample_detection(matrix_df, metadata_df, run_id)
+    fig_sample_det = plot_per_sample_detection(matrix_df, metadata_df, run_id, n_total_proteins=n_proteins)
 
     logging.info("Generating Plot 3: missingness heatmap (filtered-out proteins)")
     fig_heatmap = plot_missingness_heatmap(filter_df, matrix_df, metadata_df, run_id)

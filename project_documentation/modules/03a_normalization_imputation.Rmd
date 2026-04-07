@@ -90,6 +90,7 @@ See master project documentation (`proSIFT_master_doc.Rmd`) Section 2.2 (main sp
 
 **Diagnostic (consumed by QC Report Assembly):**
 
+- **Imputation mask** (`{run_id}.imputation_mask.parquet`): same shape as the abundance matrix (rows = proteins, columns = protein_id + sample columns). Per-cell categorical values: `observed` (value was present in the normalized matrix), `mnar` (imputed via MinProb), `mar` (imputed via KNN). Used by Module 03b to re-render imputation diagnostics (distribution overlay, per-sample fraction bar chart) without re-running the imputation logic. Added 2026-04-07; see Module 03b spec Section 5 ("Imputation Mask Added to IMPUTE Outputs").
 - **Imputation summary table** (`{run_id}.imputation_summary.parquet` + `.csv`): one row per protein. Columns: `protein_id`, `filter_status` (PASSED or SINGLE-GROUP), `imputation_class` (MNAR, MAR, or none), `n_imputed_total`, `n_imputed_per_group`, `imputation_method_used` (minprob, knn, or none).
 - **Observed vs. imputed distribution plot** (`{run_id}.imputation_distributions`): PNG + interactive HTML. Overlaid density curves showing the distribution of observed values and imputed values. MNAR-imputed and MAR-imputed values shown separately.
 - **Per-sample imputation fraction bar chart** (`{run_id}.imputation_fractions`): PNG + interactive HTML. One bar per sample, showing the fraction of values that were imputed. Colored by group.
@@ -209,15 +210,19 @@ Skips normalization. If `abundance_type` is `raw`, applies log2(x) only. Otherwi
 
 ### 4.5 Post-Normalization Diagnostic Plots
 
-Three plot types mirroring Module 02's pre-normalization versions:
+*Revised 2026-04-06: added density plot; correlation heatmap replaced by clustermap with dendrogram.*
 
-**Box plots:** Did normalization align the distributions? Medians should now be equal (median normalization) or distributions identical (quantile).
+Four plot types mirroring Module 02's pre-normalization versions:
 
-**PCA (PC1 vs. PC2):** Did normalization change the dominant variation sources? Biological signal should become more prominent after technical variation is removed.
+**Box plots:** Did normalization align the distributions? Medians should now be equal (median normalization) or distributions identical (quantile). Output: `{run_id}.postnorm_boxplots` (PNG + HTML).
 
-**Correlation heatmap:** Did within-group correlations improve?
+**Density plots:** Per-sample overlaid KDE curves showing full distributional shape after normalization. Complements box plots by revealing bimodality, shoulders, or shape changes introduced by the normalization method. Output: `{run_id}.postnorm_density` (PNG + HTML).
 
-Same implementation as Module 02: complete cases for PCA, center-and-scale, Pearson correlation with pairwise-complete and observed-range color scale. Plotting functions are shared via `bin/prosift_plot_utils.py` for visual consistency.
+**PCA (PC1 vs. PC2):** Did normalization change the dominant variation sources? Biological signal should become more prominent after technical variation is removed. Output: `{run_id}.postnorm_pca_scatter` (PNG + HTML).
+
+**Correlation clustermap:** Did within-group correlations improve? Hierarchical clustering (distance = 1 - Pearson r, average linkage) with dendrogram arms above the heatmap. Sample ordering is data-driven (dendrogram leaf order). Output: `{run_id}.postnorm_clustermap` (PNG + HTML). The correlation matrix Parquet output retains original sample order.
+
+Same implementation as Module 02: complete cases for PCA, center-and-scale, Pearson correlation with pairwise-complete and observed-range color scale. All four plotting functions are shared via `bin/prosift_plot_utils.py` for visual consistency between pre- and post-normalization views.
 
 Diagnostic plots are produced even when `method: none` (so the QC Report Assembly always has something to show).
 

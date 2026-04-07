@@ -4,7 +4,7 @@ Title:         normalize.py
 Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 Author:        Reina Hastings (reinahastings13@gmail.com)
 Created:       2026-03-30
-Last Modified: 2026-03-30
+Last Modified: 2026-04-06 (added: post-norm density plot; correlation heatmap -> clustermap via shared utils)
 Purpose:       Module 03 NORMALIZE process. Applies method-aware log2 transformation
                and normalization (median, quantile, VSN, or none) to the post-filter
                abundance matrix. Produces post-normalization diagnostic plots, a CV
@@ -22,8 +22,9 @@ Outputs:
   {run_id}.postnorm_pca_results.parquet
   {run_id}.postnorm_correlation_matrix.parquet
   {run_id}.postnorm_boxplots.png/.html
+  {run_id}.postnorm_density.png/.html
   {run_id}.postnorm_pca_scatter.png/.html
-  {run_id}.postnorm_correlation_heatmap.png/.html
+  {run_id}.postnorm_clustermap.png/.html
 Usage:
   normalize.py --matrix CTXcyto_WT_vs_CTXcyto_KO.filtered_matrix.parquet \
                --metadata CTXcyto_WT_vs_CTXcyto_KO.validated_metadata.parquet \
@@ -46,6 +47,7 @@ from prosift_plot_utils import (
     compute_and_plot_correlation,
     compute_and_plot_pca,
     make_color_map,
+    plot_density,
     plot_intensity_boxplots,
     save_plot,
 )
@@ -555,6 +557,12 @@ def main() -> None:
     )
     save_plot(box_fig, outdir / f"{run_id}.postnorm_boxplots")
 
+    density_fig = plot_density(
+        norm_df, summary_df, color_map, run_id,
+        label="Post-Normalization",
+    )
+    save_plot(density_fig, outdir / f"{run_id}.postnorm_density")
+
     pca_df, pca_fig = compute_and_plot_pca(
         norm_df, summary_df, color_map, run_id,
         label="Post-Normalization",
@@ -569,7 +577,7 @@ def main() -> None:
     )
     corr_df.to_parquet(outdir / f"{run_id}.postnorm_correlation_matrix.parquet")
     logging.info(f"  Saved: {run_id}.postnorm_correlation_matrix.parquet")
-    save_plot(corr_fig, outdir / f"{run_id}.postnorm_correlation_heatmap")
+    save_plot(corr_fig, outdir / f"{run_id}.postnorm_clustermap")
 
     # --- CV computation ---
     logging.info("Computing per-protein CV (back-transformed linear scale)...")

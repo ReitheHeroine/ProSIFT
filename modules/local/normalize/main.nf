@@ -5,8 +5,8 @@
  * Applies the normalization method specified in params.yml (median, quantile,
  * VSN, or none) to the filtered protein abundance matrix. Produces a
  * normalized matrix in Parquet format, per-protein CV summaries, a plain-text
- * normalization summary, and three post-normalization diagnostic plots
- * (intensity distributions, PCA, sample correlation heatmap).
+ * normalization summary, and four post-normalization diagnostic plots
+ * (intensity distributions, density, PCA, sample correlation clustermap).
  */
 
 nextflow.enable.dsl = 2
@@ -35,13 +35,15 @@ process NORMALIZE {
     tuple val(meta), path("*.cv_summary.csv"),                   emit: cv_summary_csv
     tuple val(meta), path("*.postnorm_pca_results.parquet"),     emit: pca_results
     tuple val(meta), path("*.postnorm_correlation_matrix.parquet"), emit: correlation_matrix
-    // Plots (PNG + interactive HTML, 3 plot types)
+    // Plots (PNG + interactive HTML, 4 plot types)
     tuple val(meta), path("*.postnorm_boxplots.png"),            emit: plot_boxplots_png
     tuple val(meta), path("*.postnorm_boxplots.html"),           emit: plot_boxplots_html
+    tuple val(meta), path("*.postnorm_density.png"),             emit: plot_density_png
+    tuple val(meta), path("*.postnorm_density.html"),            emit: plot_density_html
     tuple val(meta), path("*.postnorm_pca_scatter.png"),         emit: plot_pca_png
     tuple val(meta), path("*.postnorm_pca_scatter.html"),        emit: plot_pca_html
-    tuple val(meta), path("*.postnorm_correlation_heatmap.png"), emit: plot_corr_png
-    tuple val(meta), path("*.postnorm_correlation_heatmap.html"), emit: plot_corr_html
+    tuple val(meta), path("*.postnorm_clustermap.png"),          emit: plot_clustermap_png
+    tuple val(meta), path("*.postnorm_clustermap.html"),         emit: plot_clustermap_html
 
     script:
     """
@@ -63,10 +65,12 @@ process NORMALIZE {
     touch ${meta.run_id}.postnorm_correlation_matrix.parquet
     touch ${meta.run_id}.postnorm_boxplots.png
     touch ${meta.run_id}.postnorm_boxplots.html
+    touch ${meta.run_id}.postnorm_density.png
+    touch ${meta.run_id}.postnorm_density.html
     touch ${meta.run_id}.postnorm_pca_scatter.png
     touch ${meta.run_id}.postnorm_pca_scatter.html
-    touch ${meta.run_id}.postnorm_correlation_heatmap.png
-    touch ${meta.run_id}.postnorm_correlation_heatmap.html
+    touch ${meta.run_id}.postnorm_clustermap.png
+    touch ${meta.run_id}.postnorm_clustermap.html
     """
 
 }

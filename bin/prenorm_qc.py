@@ -4,7 +4,7 @@ Title:         prenorm_qc.py
 Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 Author:        Reina Hastings (reinahastings13@gmail.com)
 Created:       2026-03-27
-Last Modified: 2026-03-27 (refactored: shared plot functions moved to prosift_plot_utils.py)
+Last Modified: 2026-04-06 (added: density plot; clustermap with dendrogram; denominator note)
 Purpose:       Module 02 pre-normalization QC/EDA. Computes per-sample intensity summaries,
                intensity distribution box plots, Q-Q plots, PCA, and sample-to-sample
                correlations on the post-filter, pre-normalization abundance data. Synthesizes
@@ -22,6 +22,7 @@ Outputs:
   {run_id}.pca_results.parquet
   {run_id}.sample_intensity_summary.png/.html
   {run_id}.intensity_boxplots.png/.html
+  {run_id}.density_plot.png/.html
   {run_id}.qq_plot.png/.html
   {run_id}.pca_scatter.png/.html
   {run_id}.correlation_heatmap.png/.html
@@ -52,6 +53,7 @@ from prosift_plot_utils import (
     compute_and_plot_correlation,
     compute_and_plot_pca,
     make_color_map,
+    plot_density,
     plot_intensity_boxplots,
     save_plot,
 )
@@ -286,6 +288,11 @@ def plot_sample_intensity_summary(
 
 
 # ============================================================
+# SECTION 4.2b: PER-SAMPLE DENSITY PLOTS
+# (implemented in prosift_plot_utils.plot_density)
+# ============================================================
+
+# ============================================================
 # SECTION 4.3: Q-Q PLOT
 # ============================================================
 
@@ -507,6 +514,7 @@ def generate_html_report(
     flags_df: pd.DataFrame,
     plots: dict[str, go.Figure],
     outdir: Path,
+    n_total_proteins: int = 0,
 ) -> Path:
     """
     Build a self-contained HTML QC report with embedded plots (plotly.js embedded
@@ -571,6 +579,7 @@ def generate_html_report(
     plot_order = [
         ("sample_intensity_summary", "Per-Sample Intensity Summary"),
         ("intensity_boxplots",       "Intensity Distributions (Box Plots)"),
+        ("density_plot",             "Intensity Density (Per-Sample KDE)"),
         ("qq_plot",                  "Distributional Shape (Q-Q Plot)"),
         ("pca_scatter",              "Principal Component Analysis"),
         ("correlation_heatmap",      "Sample-to-Sample Correlation"),
@@ -706,6 +715,9 @@ def generate_html_report(
     All intensity metrics computed on log2 working copy (log2(x+1) for raw input; as-is for
     log2/normalized input). total_intensity is summed on raw linear scale and reported only for
     raw input; N/A otherwise.
+    <br><strong>Note:</strong> <code>n_detected</code> counts non-missing values in the
+    <em>post-filter</em> matrix ({n_total_proteins:,} proteins after detection filtering).
+    For pre-filter detection counts per sample, see the Module 01 missingness report.
 </p>
 
 <h2>Sample Outlier Flags</h2>
@@ -785,6 +797,11 @@ def main() -> None:
     box_fig = plot_intensity_boxplots(log2_df, summary_df, color_map, run_id)
     save_plot(box_fig, outdir / f"{run_id}.intensity_boxplots")
 
+    # --- Section 4.2b: Per-sample density plots ---
+    logging.info("Generating density plots...")
+    density_fig = plot_density(log2_df, summary_df, color_map, run_id)
+    save_plot(density_fig, outdir / f"{run_id}.density_plot")
+
     # --- Section 4.3: Q-Q plot ---
     logging.info("Generating Q-Q plot...")
     qq_fig = plot_qq(log2_df, summary_df, color_map, run_id)
@@ -829,11 +846,12 @@ def main() -> None:
     plots = {
         "sample_intensity_summary": summary_fig,
         "intensity_boxplots":       box_fig,
+        "density_plot":             density_fig,
         "qq_plot":                  qq_fig,
         "pca_scatter":              pca_fig,
         "correlation_heatmap":      corr_fig,
     }
-    generate_html_report(run_id, summary_df, flags_df, plots, outdir)
+    generate_html_report(run_id, summary_df, flags_df, plots, outdir, n_total_proteins)
 
     logging.info(
         f"Module 02 complete. "

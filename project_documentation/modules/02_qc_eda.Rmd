@@ -108,7 +108,7 @@ The log2(x+1) transformation (rather than log2(x)) handles any zero values witho
 
 **Metrics (one value per sample):**
 
-- **`n_detected`:** Number of non-missing (non-NaN) abundance values. The post-filter detection count. With ~8,400 proteins and at most 1-2 missing values per protein, expect values in the range 8,200-8,400 for typical CTX runs.
+- **`n_detected`:** Number of non-missing (non-NaN) abundance values. The post-filter detection count -- i.e., the denominator is the number of proteins that passed the detection filter, not the total input protein count. With ~8,400 proteins and at most 1-2 missing values per protein, expect values in the range 8,200-8,400 for typical CTX runs. For pre-filter per-sample detection counts (denominator = all input proteins), see Module 01 missingness report Plot 2.
 - **`median_intensity`:** Median of all non-missing abundance values (on log2 scale if log2 working copy is used; on raw scale if `abundance_type` is `raw` and reporting raw metrics alongside). Reports the center of each sample's distribution.
 - **`total_intensity`:** Sum of all non-missing abundance values on the raw (linear) scale. Proxy for sample loading or injection amount. Computed only when `abundance_type` is `raw`; set to null when `abundance_type` is `log2` or `normalized` (summing log values is not interpretable). Large differences between samples suggest unequal loading that normalization should correct.
 - **`mad_intensity`:** Median absolute deviation of non-missing abundance values (on log2 scale). A robust measure of distributional spread. Identifies samples with unusually narrow or wide distributions compared to their peers.
@@ -141,6 +141,31 @@ The log2(x+1) transformation (rather than log2(x)) handles any zero values witho
 **Output:** `{run_id}.intensity_boxplots` (PNG + interactive HTML).
 
 **Missing values:** NaN values are excluded from the box plot statistics. With at most 1-2 missing values per protein per sample, this has negligible effect.
+
+## 4.2b Per-Sample Density Plots
+
+*Added 2026-04-06.*
+
+**What it shows:** The full shape of each sample's abundance distribution as a continuous curve, complementing the box plots. Density plots reveal features that box plots compress or hide: bimodality, shoulders, asymmetric tails, and subtle shape differences between samples.
+
+**What the researcher looks for:**
+
+- **All curves overlapping closely:** samples have similar distributions. Normal and expected.
+- **One curve shifted left or right:** loading difference (similar to box plot median shift). Normalization should correct this.
+- **A curve with a different shape** (e.g., bimodal, broader, or with a shoulder): potential technical artifact or biological subpopulation. Worth investigating.
+- **Group-level shape differences:** if all WT curves share one shape and all KO curves share another, this could reflect genuine biological change in the abundance distribution (not just individual protein shifts).
+
+**Implementation:**
+
+- Overlaid kernel density estimate (KDE) plot: one line per sample, colored by group.
+- Data: log2 working copy (same as box plots).
+- KDE computed using `scipy.stats.gaussian_kde` with Scott's rule bandwidth selection.
+- Evaluated over 512 points spanning the data range with 5% margin on each side.
+- Samples ordered by group in the legend for consistency with other plots.
+
+**Output:** `{run_id}.density_plot` (PNG + interactive HTML).
+
+**Missing values:** NaN values are excluded before KDE fitting. Negligible effect with post-filter missingness.
 
 ## 4.3 Distributional Shape Assessment (Q-Q Plot)
 
@@ -188,29 +213,33 @@ The log2(x+1) transformation (rather than log2(x)) handles any zero values witho
 - **PC1 vs. PC3 skipped.** With 6 samples, the first two components typically capture most of the variance. The post-normalization PCA in Module 03 will show whether group separation improves. If a researcher needs additional component views, the PCA coordinates are available in the output Parquet for custom plotting.
 - **Pre-normalization context:** The pre-normalization PCA may show technical variation dominating biological variation. This is expected and is the reason normalization exists. The QC report should include a note contextualizing this so the researcher is not alarmed by imperfect group separation.
 
-## 4.5 Sample-to-Sample Correlation Heatmap
+## 4.5 Sample-to-Sample Correlation Clustermap
 
-**What it shows:** Pairwise similarity between all samples' protein abundance profiles. A complementary view to PCA: while PCA shows sample relationships in a reduced space, the correlation heatmap shows all pairwise relationships directly.
+*Revised 2026-04-06: converted from fixed group-ordered heatmap to hierarchically clustered clustermap with dendrogram.*
+
+**What it shows:** Pairwise similarity between all samples' protein abundance profiles, with hierarchical clustering to reveal data-driven grouping. A complementary view to PCA: while PCA shows sample relationships in a reduced space, the correlation clustermap shows all pairwise relationships directly, with the dendrogram making similarity structure explicit.
 
 **What the researcher looks for:**
 
-- **Replicates should correlate highly.** The within-group blocks (WT-WT, KO-KO) should show higher correlations than the between-group blocks.
-- **A replicate correlating poorly with its own group** but well with the other group: potential sample swap or mislabel.
-- **A replicate correlating poorly with everything:** potential failed sample.
-- **Uniformly high correlations everywhere** (no visible block structure): the biological effect is small relative to overall proteome similarity. Common and not necessarily a problem.
+- **Replicates should cluster together.** The dendrogram should group same-condition replicates on adjacent branches before merging with the other condition.
+- **A replicate clustering with the wrong group:** potential sample swap or mislabel.
+- **A replicate on an isolated branch** far from all other samples: potential failed sample.
+- **Uniformly high correlations everywhere** (short dendrogram branches, no visible block structure): the biological effect is small relative to overall proteome similarity. Common and not necessarily a problem.
 
 **Implementation:**
 
 - **Correlation method:** Pearson correlation on the log2 working copy. Standard choice for proteomics QC.
 - **Missing value handling:** Pairwise-complete (pandas `DataFrame.corr()` default). Each pair of samples uses all proteins where both have non-missing values. With at most 1-2 missing values per protein, different pairs use nearly identical protein sets. This is preferable to complete-cases-only because it wastes no data.
-- **Color scale:** Anchored to the observed range, from the minimum pairwise correlation to 1.0. Do NOT use a 0-to-1 scale: proteomics replicates typically correlate at 0.95+, and the subtle within-group vs. between-group differences are invisible on a 0-to-1 color range.
-- **Sample ordering:** Grouped by condition (all WT samples together, all KO samples together), not hierarchically clustered. With 6 samples, the block structure is visible by eye without clustering.
-- **Cell annotations:** Each cell annotated with the correlation value (2 decimal places).
+- **Hierarchical clustering:** Distance metric = 1 - Pearson r. Linkage = average (UPGMA). Correlations clipped to [0, 1] before distance computation (negative correlations are theoretically possible but extremely unlikely in proteomics replicates). Clustering computed via `scipy.cluster.hierarchy.average` on the condensed distance matrix.
+- **Sample ordering:** Determined by dendrogram leaf order (data-driven), replacing the previous fixed group-based ordering. This lets the data reveal its own structure rather than imposing assumed grouping.
+- **Dendrogram:** Displayed above the heatmap. Branch heights represent average linkage distances (1 - r). Shorter branches = higher similarity.
+- **Color scale:** Anchored to the observed range, from floor(min off-diagonal correlation, nearest 0.05) to 1.0, with a floor of 0.80. Do NOT use a 0-to-1 scale: proteomics replicates typically correlate at 0.95+, and the subtle differences are invisible on a 0-to-1 color range.
+- **Cell annotations:** Each cell annotated with the correlation value (3 decimal places).
 
 **Output:**
 
-- Correlation heatmap (`{run_id}.correlation_heatmap`): 6x6 matrix (for a typical CTX run), sample labels on both axes, group indicated by color annotation or sidebar. PNG + interactive HTML.
-- Correlation matrix stored as `{run_id}.correlation_matrix.parquet`: square matrix, one row and one column per sample.
+- Correlation clustermap (`{run_id}.correlation_heatmap`): dendrogram + annotated heatmap, sample labels on both axes with "Group: SampleID" format. PNG + interactive HTML. Output filename unchanged for backward compatibility.
+- Correlation matrix stored as `{run_id}.correlation_matrix.parquet`: square matrix in original (non-clustered) sample order, one row and one column per sample. Downstream consumers (e.g., outlier flagging) use this matrix directly and are unaffected by the visual reordering.
 
 ## 4.6 Outlier Detection and Sample Flagging
 
@@ -276,15 +305,17 @@ The log2(x+1) transformation (rather than log2(x)) handles any zero values witho
 
 **Impact:** Module 02 does not compute or report CV. The CV summary feeds into the QC Report Assembly and into protein-level QC flags in the Results Assembly module.
 
-### 2026-03-27 -- Box Plots Only (No Density Plots) for Intensity Distributions
+### 2026-03-27 -- Box Plots and Density Plots for Intensity Distributions
 
-**Decision:** Produce box plots of per-sample intensity distributions. Density plots (kernel density estimates) are not produced.
+*Revised 2026-04-06: added density plots alongside box plots (previously box plots only).*
 
-**Rationale:** Box plots and density plots are complementary: box plots show summary statistics (median, IQR, outliers) compactly, while density plots show full distributional shape (bimodality, skewness). However, with only 6 samples the box plots are clear and sufficient. The Q-Q plot (Section 4.3) provides distributional shape information that density plots would also provide, making density plots partially redundant.
+**Decision:** Produce both box plots and overlaid KDE density plots of per-sample intensity distributions.
 
-**Alternatives considered:** (1) Both box and density plots -- reasonable but adds visual bulk to the report for marginal information gain. (2) Density only -- rejected because box plots are the more standard/expected QC visualization.
+**Rationale:** Box plots and density plots are complementary: box plots show summary statistics (median, IQR, outliers) compactly, while density plots show full distributional shape (bimodality, shoulders, asymmetric tails). The Q-Q plot (Section 4.3) tests normality but does not reveal features like bimodality or inter-sample shape differences as directly as overlaid density curves. With overlaid KDE lines, a researcher can immediately see whether all samples share the same distributional shape or whether one sample has a distinct profile (e.g., a shoulder or secondary mode). This is especially useful for identifying subtle batch effects or failed samples that might not shift the median but change the overall shape.
 
-**Impact:** One fewer plot type in the report. Distributional shape information comes from the Q-Q plot and the skewness/kurtosis metrics instead.
+**Alternatives considered:** (1) Box plots only (original decision) -- sufficient for median/spread comparison but compresses shape information. (2) Density only -- rejected because box plots remain the more standard/expected QC visualization for quick assessment. (3) Violin plots (box + density in one) -- considered but overlaid KDE lines are easier to compare across all samples on a single x-axis than side-by-side violins.
+
+**Impact:** One additional plot in the report (`density_plot`). Box plots and density plots use the same log2 working copy. No new parameters.
 
 ### 2026-03-27 -- PCA: Drop Missing Values Rather Than Impute
 
@@ -325,6 +356,16 @@ The log2(x+1) transformation (rather than log2(x)) handles any zero values witho
 **Alternatives considered:** Fixed 0-to-1 scale -- rejected because it wastes most of the color range on values that don't exist in the data.
 
 **Impact:** The color scale adapts to each dataset. The minimum value is labeled on the color bar for context.
+
+### 2026-04-06 -- Dendrogram-Ordered Correlation Clustermap
+
+**Decision:** The correlation heatmap uses hierarchical clustering (distance = 1 - Pearson r, average linkage) to determine sample ordering, with a dendrogram displayed above the heatmap. This replaces the previous fixed group-based ordering.
+
+**Rationale:** Fixed group ordering assumes the researcher already knows the expected grouping structure and imposes it on the visualization. Data-driven ordering lets the correlation structure speak for itself: if replicates cluster by condition, the block structure emerges naturally; if they do not (e.g., due to a sample swap or batch effect), the dendrogram makes this immediately visible. The dendrogram also provides quantitative information about relative similarity (branch heights) that a flat heatmap cannot convey. Average linkage (UPGMA) was chosen over single or complete linkage because it provides a balanced view that is neither excessively sensitive to outlier pairs (single) nor dominated by the most dissimilar pairs (complete).
+
+**Alternatives considered:** (1) Fixed group ordering (original approach) -- simple and makes expected block structure visually obvious, but cannot reveal unexpected clustering patterns. (2) Standalone dendrogram as a separate plot + group-ordered heatmap -- preserves the original heatmap while adding clustering information, but splits related information across two plots. The integrated clustermap was preferred because it combines both views in a single figure, and with 6 samples the dendrogram is compact enough to fit above the heatmap without clutter. (3) Complete or Ward linkage -- complete linkage tends to create compact clusters which can obscure gradual similarity gradients; Ward linkage minimizes within-cluster variance, which is more relevant for partitioning than for visualization. Average linkage is the most common choice for exploratory correlation-based clustering in proteomics QC.
+
+**Impact:** The correlation heatmap output file name is unchanged (`{run_id}.correlation_heatmap`). The correlation matrix Parquet output retains original (non-clustered) sample order so downstream consumers (outlier flagging) are unaffected. The visual layout now includes a dendrogram panel above the heatmap. No new parameters.
 
 ### 2026-03-27 -- No Module 02-Specific Parameters
 

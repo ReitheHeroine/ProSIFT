@@ -2,9 +2,10 @@
  * ProSIFT -- modules/local/prenorm_qc/main.nf
  * Process: PRENORM_QC
  * Module 02: Pre-normalization QC/EDA.
- * Computes per-sample summaries, box plots, Q-Q plot, PCA, and correlation
- * heatmap on the post-filter pre-normalization data. Produces per-sample
- * outlier flags and a consolidated HTML QC report. Does not modify any data.
+ * Computes per-sample summaries, box plots, density plots, Q-Q plot, PCA,
+ * and correlation clustermap on the post-filter pre-normalization data.
+ * Produces per-sample outlier flags and a consolidated HTML QC report.
+ * Does not modify any data.
  */
 
 nextflow.enable.dsl = 2
@@ -35,17 +36,19 @@ process PRENORM_QC {
     tuple val(meta), path("*.pca_results.parquet"),         emit: pca_results
     // Report
     tuple val(meta), path("*.prenorm_qc_report.html"),      emit: qc_report
-    // Plots (PNG + interactive HTML, 5 plot types)
+    // Plots (PNG + interactive HTML, 6 plot types)
     tuple val(meta), path("*.sample_intensity_summary.png"),  emit: plot_sample_summary_png
     tuple val(meta), path("*.sample_intensity_summary.html"), emit: plot_sample_summary_html
     tuple val(meta), path("*.intensity_boxplots.png"),        emit: plot_boxplots_png
     tuple val(meta), path("*.intensity_boxplots.html"),       emit: plot_boxplots_html
+    tuple val(meta), path("*.density_plot.png"),              emit: plot_density_png
+    tuple val(meta), path("*.density_plot.html"),             emit: plot_density_html
     tuple val(meta), path("*.qq_plot.png"),                   emit: plot_qq_png
     tuple val(meta), path("*.qq_plot.html"),                  emit: plot_qq_html
     tuple val(meta), path("*.pca_scatter.png"),               emit: plot_pca_png
     tuple val(meta), path("*.pca_scatter.html"),              emit: plot_pca_html
-    tuple val(meta), path("*.correlation_heatmap.png"),       emit: plot_corr_png
-    tuple val(meta), path("*.correlation_heatmap.html"),      emit: plot_corr_html
+    tuple val(meta), path("*.correlation_heatmap.png"),       emit: plot_clustermap_png
+    tuple val(meta), path("*.correlation_heatmap.html"),      emit: plot_clustermap_html
 
     script:
     """
@@ -71,6 +74,8 @@ process PRENORM_QC {
     touch ${meta.run_id}.sample_intensity_summary.html
     touch ${meta.run_id}.intensity_boxplots.png
     touch ${meta.run_id}.intensity_boxplots.html
+    touch ${meta.run_id}.density_plot.png
+    touch ${meta.run_id}.density_plot.html
     touch ${meta.run_id}.qq_plot.png
     touch ${meta.run_id}.qq_plot.html
     touch ${meta.run_id}.pca_scatter.png

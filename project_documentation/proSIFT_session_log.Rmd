@@ -33,6 +33,13 @@ output:
 
 # Active Session Log
 
+### 2026-04-07 (Claude Code)
+- **Module 05 zero-significant-proteins edge case tested:** Created synthetic input (CTXcyto DA results, `significant` = all False). ORA correctly skipped with warning; GSEA ran normally (409 GO_BP, 281 REACTOME significant terms). All 4 output files produced with valid schemas. No code changes needed. Acceptance criterion #10 updated from `IMPLEMENTED` to `DONE`.
+- **Module 05 spec updated:** Section 8.3 added with 8-check edge case test results table. Section 8.1 criterion #10 marked DONE. Two Change History entries added.
+- **Documentation restructuring completed for all module specs:** Added tiered Decision Register intro to Module 05 Section 5 (the last remaining module). Modules 01-05 now all have the consistent pattern.
+- **Files modified:** `project_documentation/modules/05_enrichment.Rmd` (Sections 5, 8.1, 8.3, 9)
+- **No code changes, no new files, no new parameters or dependencies.**
+
 ### 2026-04-04 (Claude Code)
 - Handoff maintenance: updated UNIPROT_MAPPING process notes and Module 01 last-touched date to reflect 2026-04-02 ortholog mapping implementation. Pushed all changes to GitHub.
 

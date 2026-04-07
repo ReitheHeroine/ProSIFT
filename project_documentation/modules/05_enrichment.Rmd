@@ -8,7 +8,7 @@ output:
     theme: default
 ---
 
-**Last Updated:** 2026-03-31
+**Last Updated:** 2026-04-04
 **Module Status:** Implemented and tested (2026-03-31)
 **Pipeline Position:** [Module 04: Differential Abundance] --> **Module 05: Enrichment Analysis** --> [Module 07: Results Assembly]
 
@@ -392,6 +392,8 @@ GSEA results:
 
 # 5. Design Decisions
 
+*This section documents module-internal design decisions. Cross-cutting decisions that affect multiple modules (e.g., separate runs for factorial designs, ortholog tracking strategy, module architecture and numbering) are in the project history (`proSIFT_project_history.Rmd`) Decision Register (Section 1). Where a decision has both pipeline-level and module-level implications, each document covers its own level and cross-references the other.*
+
 ### 2026-03-30 -- Single ENRICHMENT Process
 
 **Decision:** ORA and GSEA are bundled in a single Nextflow process (ENRICHMENT) rather than split into separate processes.
@@ -550,7 +552,7 @@ GSEA results:
 7. Summary text file reports correct counts and per-library results. **DONE** -- verified.
 8. Gene symbol preparation drops unmapped proteins and collapses duplicates. **DONE** -- 20 unmapped dropped, 249 duplicates collapsed.
 9. Wired into `workflows/prosift.nf`. **DONE**
-10. Zero-significant-proteins edge case: ORA skipped gracefully. **IMPLEMENTED** -- not tested (all CTXcyto contrasts have significant proteins). [FOLLOW-UP NEEDED]
+10. Zero-significant-proteins edge case: ORA skipped gracefully. **DONE** -- tested 2026-04-07 (see Section 8.3).
 
 ## 8.2 Spot-Check Results (CTXcyto benchmark, 2026-03-31)
 
@@ -572,6 +574,23 @@ GSEA results:
 | All output files produced | 4 data files + 4 lollipop pairs + 20 running score PNGs | PASS |
 
 **Biological note:** Top GSEA hits (mRNA processing, cytoplasmic translation, ribosome biogenesis, synaptic vesicle cycle) are enriched in the downregulated direction in KO. Top ORA hits (amino acid metabolism, mRNA processing, mitochondrion organization) overlap the same biology. Consistent with known SHANK3/synaptic KO phenotypes affecting translation and synaptic function.
+
+## 8.3 Edge Case Test: Zero Significant Proteins (2026-04-07)
+
+**Method:** CTXcyto DA results (8,403 proteins, 1 contrast) with `significant` column set to all `False`. This simulates a contrast with no significant proteins due to conservative thresholds or weak biological effect.
+
+| Check | Result | Status |
+|---|---|---|
+| Script exits cleanly | Exit code 0, no exceptions | PASS |
+| ORA skipped for both libraries | Warning logged: "no significant genes -- ORA skipped" (GO_BP, REACTOME) | PASS |
+| GSEA runs normally | GO_BP: 2,934 tested / 409 significant; REACTOME: 590 tested / 281 significant | PASS |
+| Enrichment results schema valid | 3,524 rows, 13 columns, all GSEA (0 ORA rows) | PASS |
+| No ORA lollipop plots produced | Correct -- only GSEA lollipop + running score plots generated | PASS |
+| Summary reports 0 significant genes | "Significant genes (ORA input): 0 / 8134", ORA sig terms = 0 for both libraries | PASS |
+| Protein-term mapping valid | 263,941 rows, 8 columns; `in_significant_set` = False for all rows | PASS |
+| GSEA results unaffected | GSEA results match normal run (same ranked list, same permutation results) | PASS |
+
+**Conclusion:** The zero-significant-proteins edge case is handled correctly. ORA is skipped gracefully with a logged warning; GSEA proceeds normally because it uses the full ranked list. All output files are produced with valid schemas. No code changes required.
 
 ---
 
@@ -618,3 +637,17 @@ GSEA results:
 **Reason:** Spec body was inconsistent with implementation; the change history documented the deviations but the spec text was never corrected.
 **Affected processes:** None (documentation only).
 **Downstream effects:** None.
+
+### 2026-04-07 -- Zero-Significant-Proteins Edge Case Tested
+
+**Change:** Acceptance criterion #10 (zero significant proteins) tested and confirmed passing. Test used CTXcyto DA results with `significant` column set to all `False`. ORA correctly skipped with logged warning for both libraries; GSEA ran normally using the full ranked list. All output files produced with valid schemas. Enrichment results table contained only GSEA rows (0 ORA). Protein-term mapping `in_significant_set` correctly `False` for all rows. Summary file correctly reported 0 significant genes. Section 8.3 added with full test results table; criterion #10 updated from `IMPLEMENTED` to `DONE`.
+**Reason:** Criterion #10 was the only untested acceptance criterion. CTXcyto benchmark data always has significant proteins, so a synthetic input was needed.
+**Affected processes:** None (testing and documentation only).
+**Downstream effects:** None.
+
+### 2026-04-07 -- Documentation Restructuring: Tiered Decision Register Intro
+
+**Change:** Added introductory note to Section 5 (Design Decisions) explaining the tiered Decision Register approach: module-internal decisions in this spec, cross-cutting decisions in `proSIFT_project_history.Rmd`. All 10 existing Module 05 design decisions are module-internal (enrichment-specific implementation choices), so no cross-references were needed.
+**Reason:** Completing the restructuring pattern established in Module 01 (2026-04-01) and already applied to Modules 02, 03a, 03b, and 04. Module 05 was the last module spec missing the introductory note.
+**Affected sections:** 5 (Design Decisions introductory note added), 9 (this entry).
+**Downstream effects:** None (documentation restructuring only). The restructuring pattern is now applied to all existing module specs (01-05) and will be used going forward for Modules 06-08.
