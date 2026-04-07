@@ -472,9 +472,7 @@ def assemble_results(
             break
 
     if gene_col is not None:
-        # ID mapping uses 'input_id' as the protein key (matches protein_id values)
-        id_col = "input_id" if "input_id" in id_mapping_df.columns else "protein_id"
-        sym_map = id_mapping_df.set_index(id_col)[gene_col]
+        sym_map = id_mapping_df.set_index('protein_id')[gene_col]
         out["gene_symbol"] = out["protein_id"].map(sym_map)
     else:
         logging.warning(

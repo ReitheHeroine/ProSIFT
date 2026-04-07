@@ -273,11 +273,11 @@ The pre-filter missingness overview captures the data state before filtering. Th
 
 ## 4.8 Mapping Table Output Schema
 
-*Updated 2026-04-02 to reflect populated ortholog columns.*
+*Updated 2026-04-07: renamed `input_id` to `protein_id` at source (see handoff task queue).*
 
 The mapping module produces a single table (Parquet file) with one row per input protein ID:
 
-- input_id: the original ID from the user's abundance matrix
+- protein_id: the original ID from the user's abundance matrix
 - uniprot_accession: canonical UniProt accession
 - gene_symbol_mouse: primary mouse gene symbol
 - entrez_id_mouse: NCBI Entrez Gene ID (mouse)

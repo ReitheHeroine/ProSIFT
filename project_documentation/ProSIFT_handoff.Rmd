@@ -10,7 +10,7 @@ output:
     theme: default
 ---
 
-**Last Updated:** 2026-04-07 (Module 05 edge case tested; documentation restructuring complete for all modules)
+**Last Updated:** 2026-04-07 (Module 06 design complete; implementation tasks queued)
 
 **Purpose:** Operational coordination across Claude sessions. Tracks current development state, active tasks, blockers, and data contracts. Updated every session.
 
@@ -103,9 +103,9 @@ Step [X] complete.
 | Phase 3 | Database integration layer | Not started | [See Project Documentation Section 6.3] |
 | Phase 4 | Interactive frontend | Not started | [See Project Documentation Section 6.4] |
 
-**Current phase:** Phase 2 in progress.
+**Current phase:** Phase 2 transitioning to Phase 3.
 
-**Current focus:** Module 03b (QC Report Assembly) implemented and tested (2026-04-07). Module 06 (Database Queries) design and implementation next.
+**Current focus:** Module 06 (Database Queries) Tasks 1-7 all complete. All five database query scripts implemented, tested, and wired into the Nextflow workflow. Ready for full pipeline run on cluster. Module 06 spec: `06_database_queries.Rmd`.
 
 ## 2.2 Module Status
 
@@ -123,7 +123,7 @@ Tracks implementation status of individual modules within and across phases. A m
 | QC Report Assembly | 2 | Functional | 2026-04-07 | bin/qc_report_assembly.py + Nextflow module. CTXcyto benchmark tested. Prerequisite imputation mask implemented. |
 | Module 04: Differential Abundance (DEqMS) | 2 | Complete | 2026-03-30 | bin/differential_abundance.py; limma+DEqMS via rpy2; 7 outputs; tested all 12 runs. |
 | Module 05: ORA / GSEA enrichment | 2 | Complete | 2026-03-31 | bin/enrichment.py; gseapy ORA + preranked GSEA; GO_BP + Reactome; lollipop + running score plots; standalone tested. |
-| Module 06: Database queries (all 5 databases) | 3 | Not started | -- | -- |
+| Module 06: Database queries (all 5 databases) | 3 | Complete | 2026-04-07 | All 7 tasks complete. Five scripts in bin/ (query_uniprot, query_pubmed, query_disgenet, query_dgidb, query_ctd). Caching module (prosift_cache.py, 27 tests). UniProt and CTD benchmark-tested (8403 proteins). PubMed tested (5 proteins, PMI scores verified). DGIdb and DisGeNET tested (correct gating). Ready for cluster run. |
 | Module 07: Results assembly (SQLite) | 3 | Not started | -- | -- |
 | Module 08: Interactive frontend | 4 | Not started | -- | Tech selection deferred |
 | Singularity definition | 1 | Not started | -- | Dependency list established; ready to write .def file |
@@ -144,6 +144,11 @@ Tracks which Nextflow processes exist and whether they are functional. Populated
 | DIFFERENTIAL_ABUNDANCE | 04 | Functional | bin/differential_abundance.py; limma + DEqMS via rpy2; volcano + MA plots; 7 named emit channels; tested all 12 runs (2026-03-30) |
 | QC_REPORT_ASSEMBLY | 03b | Functional | bin/qc_report_assembly.py; 13 Plotly plots; single HTML output; errorStrategy 'ignore'; CTXcyto benchmark tested (2026-04-07) |
 | ENRICHMENT | 05 | Functional | bin/enrichment.py; gseapy ORA + preranked GSEA; lollipop plots (Plotly PNG+HTML) + GSEA running score plots; 9 named emit channels; standalone tested (2026-03-31) |
+| QUERY_UNIPROT | 06 | Functional | bin/query_uniprot.py; REST API batch retrieval; per-protein cache; CTXcyto benchmark tested (8403 proteins, 100% success, 2026-04-07) |
+| QUERY_PUBMED | 06 | Functional | bin/query_pubmed.py; ESearch API; PMI normalization; per-symbol-term cache; tested 5 proteins (2026-04-07) |
+| QUERY_DISGENET | 06 | Functional | bin/query_disgenet.py; REST API; rate limited 50/min; min_score output filter; requires DISGENET_API_KEY; tested no-key path (2026-04-07) |
+| QUERY_DGIDB | 06 | Functional | bin/query_dgidb.py; GraphQL API; per-gene cache; tested ortholog gating (2026-04-07) |
+| QUERY_CTD | 06 | Functional | bin/query_ctd.py; bulk TSV filtering; organism-aware matching; CTXcyto benchmark tested (13032 interactions, 208 proteins, 2026-04-07) |
 
 ---
 
@@ -177,6 +182,139 @@ Tracks which Nextflow processes exist and whether they are functional. Populated
   4. Remaining plots (1, 2, 4) unaffected
 - **Dependencies:** The PARTIAL category has been implemented (2026-04-06). This task should account for PARTIAL proteins in the direction summary as well.
 
+### ~~Rename `input_id` to `protein_id` in Module 01 Mapping Table Output~~ DONE (2026-04-07)
+- **Assigned to:** Claude Code
+- **Priority:** High
+- **Phase:** 1
+- **Module:** Module 01, with downstream cleanup in Modules 04, 06
+- **Status:** Complete. Code changes applied; pending pipeline test on cluster.
+- **Description:** Rename the `input_id` column to `protein_id` in the Module 01 mapping table Parquet output (`bin/uniprot_mapping.py`). This column is the primary join key for every downstream module. Currently, Module 01 outputs `input_id`, but every consumer (Modules 04, 05, 06, and the future 07/08) uses `protein_id` in their schemas. Module 04's `differential_abundance.py` has a runtime detection workaround (`id_col = "input_id" if "input_id" in ... else "protein_id"`), and all five Module 06 scripts do a conditional rename. This task standardizes the column name at the source and removes the workaround code. Implementation: (1) In `bin/uniprot_mapping.py`, rename `input_id` to `protein_id` in the output DataFrame before writing Parquet. (2) Remove the conditional rename / detection logic from `bin/differential_abundance.py`. (3) Remove the conditional rename from all five `bin/query_*.py` scripts. (4) Update Module 01 spec Section 4.8 (mapping table schema) to show `protein_id`. (5) Verify that no other scripts reference `input_id` from the mapping table (the abundance matrix still uses whatever column name the user provides; this change only affects the mapping table output).
+- **Context/References:** Discovery logged in Claude Code session 2026-04-07 (Module 06 Tasks 1-4). Module 04 spec Section 9 (2026-03-30 change history) documents the original workaround. Module 01 spec Section 4.8 (mapping table schema). Module 06 spec Section 2.1 (input contract uses `protein_id`). Claude.ai design discussion 2026-04-07 concluded Option A (rename at source) is cleanest.
+- **Acceptance criteria:**
+  1. Module 01 mapping table Parquet contains `protein_id` column (not `input_id`)
+  2. Module 04 `differential_abundance.py` no longer has `input_id` detection logic
+  3. All five Module 06 `query_*.py` scripts no longer have conditional rename logic
+  4. Module 01 spec Section 4.8 updated
+  5. Full pipeline test passes (at least CTXcyto benchmark run)
+- **Dependencies:** None. Should be done before Tasks 5-7 to avoid propagating the workaround further.
+
+### Verify Ortholog Population on Cluster (Full Pipeline Run)
+- **Assigned to:** Rei
+- **Priority:** High
+- **Phase:** 3
+- **Module:** Module 01 (prerequisite for Module 06)
+- **Description:** Run the full pipeline on the cluster (at least the CTXcyto benchmark run) to verify that Module 01 Process 4.7 (BioMart ortholog mapping) populates the ortholog columns in the mapping table. The current published mapping tables have all-None ortholog columns (`human_ortholog_symbol`, `human_ortholog_entrez`, `ortholog_mapping_status`). Without populated orthologs, DGIdb and DisGeNET gate every protein as "no_ortholog" (producing no real results), and PubMed queries only mouse gene symbols (missing human ortholog literature). A fresh pipeline run will trigger BioMart ortholog resolution, which then flows into all five Module 06 database processes. This also serves as the end-to-end integration test for the `input_id` -> `protein_id` rename and the five new Module 06 Nextflow processes.
+- **Context/References:** Module 01 spec Section 4.7 (ortholog mapping). Module 06 spec Section 1 (ortholog gating rule). Discovery logged in Claude Code session 2026-04-07 (Module 06 testing).
+- **Acceptance criteria:**
+  1. Mapping table Parquet contains `protein_id` column (not `input_id`)
+  2. `ortholog_mapping_status` has values other than None (e.g., "one2one", "no_ortholog")
+  3. `human_ortholog_symbol` and `human_ortholog_entrez` populated for proteins with orthologs
+  4. All five Module 06 processes run and emit Parquet files in `results/{run_id}/databases/`
+  5. DGIdb and DisGeNET produce real results for proteins with orthologs (not all "no_ortholog")
+- **Dependencies:** None. Requires cluster access and rsync of current codebase.
+
+### Module 06 Task 1: Nextflow Wiring (Scaffold)
+- **Assigned to:** Claude Code
+- **Priority:** High
+- **Phase:** 3
+- **Module:** Module 06
+- **Description:** Create the five Module 06 process definitions in `modules/local/` (QUERY_UNIPROT, QUERY_PUBMED, QUERY_DISGENET, QUERY_DGIDB, QUERY_CTD) and wire them into `workflows/prosift.nf`. Each process takes the Module 01 mapping table channel as input and emits a Parquet file. Process bodies initially call placeholder scripts that read the mapping table and emit empty Parquet files with correct schemas (per Module 06 spec Sections 4.2-4.6). Add all Module 06 parameters to params.yml with defaults and comments (Module 06 spec Section 6).
+- **Context/References:** Module 06 spec (`06_database_queries.Rmd`) Sections 3, 4.1, 6. Existing Nextflow process patterns in `modules/local/`.
+- **Acceptance criteria:**
+  1. `nextflow run` with all five processes enabled produces five empty-but-schema-correct Parquet files in `results/{run_id}/databases/`
+  2. Disabling a database in `databases.enabled` skips that process
+  3. Module 06 processes start as soon as Module 01 completes, concurrent with Modules 02-05
+  4. All Module 06 parameters present in params.yml with defaults
+- **Dependencies:** None (Module 01 already complete).
+
+### Module 06 Task 2: Caching Infrastructure
+- **Assigned to:** Claude Code
+- **Priority:** High
+- **Phase:** 3
+- **Module:** Module 06
+- **Description:** Implement a shared caching utility (Python module in `bin/` or `lib/`) for all five database scripts. Handles cache directory creation, per-protein cache key lookup, JSON read/write, age-based invalidation (`databases.cache_days`), `force_requery` logic, and `_metadata.json` management. Two modes: per-protein JSON files (API databases) and whole-file (CTD bulk download). Raw API responses cached unfiltered; filtering applied at output time.
+- **Context/References:** Module 06 spec Section 4.7 (Caching Architecture).
+- **Acceptance criteria:**
+  1. Unit tests passing for: cache hit, cache miss, cache expiration, force_requery override, metadata file creation/reading
+  2. Cache directory structure matches spec layout
+  3. Module importable from all five database scripts
+- **Dependencies:** Task 1 (scaffold) for directory structure context, but can be implemented independently.
+
+### Module 06 Task 3: QUERY_UNIPROT Implementation
+- **Assigned to:** Claude Code
+- **Priority:** High
+- **Phase:** 3
+- **Module:** Module 06
+- **Description:** Implement `bin/query_uniprot.py`. Batch retrieval from UniProt REST API `/uniprotkb/search` endpoint for five annotation fields (protein_name, cc_function, cc_subcellular_location, cc_tissue_specificity, keyword). Uses caching module from Task 2. Emits Parquet with Module 06 spec Section 4.2 schema.
+- **Context/References:** Module 06 spec Section 4.2.
+- **Acceptance criteria:**
+  1. Run against CTX benchmark mapping table
+  2. Parquet has correct schema (7 columns), all proteins present
+  3. `uniprot_query_status` populated correctly
+  4. Second run hits cache (verify via log output)
+  5. Spot-check a few known proteins for correct annotation content
+- **Dependencies:** Tasks 1, 2.
+
+### Module 06 Task 4: QUERY_CTD Implementation
+- **Assigned to:** Claude Code
+- **Priority:** High
+- **Phase:** 3
+- **Module:** Module 06
+- **Description:** Implement `bin/query_ctd.py`. Reads pre-downloaded CTD bulk file (`CTD_chem_gene_ixns.tsv.gz`) from cache directory. Filters by gene identifiers (`entrez_id_mouse` + `human_ortholog_entrez`). Tracks query_organism (mouse/human) per hit. Emits Parquet with Module 06 spec Section 4.6 schema. Requires manual pre-download of CTD file to cache directory (document in script header).
+- **Context/References:** Module 06 spec Section 4.6. CTD download page: http://ctdbase.org/downloads/
+- **Acceptance criteria:**
+  1. Run against CTX benchmark mapping table
+  2. Parquet has correct schema (11 columns)
+  3. `query_organism` column correctly labels mouse vs. human hits
+  4. Spot-check known chemical-gene interactions for well-studied proteins
+- **Dependencies:** Tasks 1, 2. Manual CTD file download.
+
+### Module 06 Task 5: QUERY_DGIDB Implementation
+- **Assigned to:** Claude Code
+- **Priority:** High
+- **Phase:** 3
+- **Module:** Module 06
+- **Description:** Implement `bin/query_dgidb.py`. GraphQL queries to DGIdb per human ortholog symbol. Ortholog gating: skip proteins where `ortholog_mapping_status = "no_ortholog"`. Uses caching module. Emits Parquet with Module 06 spec Section 4.5 schema.
+- **Context/References:** Module 06 spec Section 4.5. DGIdb GraphQL API: https://dgidb.org/api
+- **Acceptance criteria:**
+  1. Run against CTX benchmark mapping table
+  2. Proteins with no ortholog have `dgidb_query_status = "no_ortholog"` and no interaction rows
+  3. Spot-check known druggable targets (e.g., a kinase with known inhibitors)
+  4. `approval_status` populated where available
+  5. Second run hits cache
+- **Dependencies:** Tasks 1, 2.
+
+### Module 06 Task 6: QUERY_DISGENET Implementation
+- **Assigned to:** Claude Code
+- **Priority:** Medium
+- **Phase:** 3
+- **Module:** Module 06
+- **Description:** Implement `bin/query_disgenet.py`. REST API queries per human ortholog (Entrez ID or gene symbol). Rate limiting (50 queries/min for Free Academic). API key handling (read from env var specified in `databases.api_keys.disgenet`). `min_score` output filtering (applied at Parquet emission, not during API query or caching). Uses caching module. Emits Parquet with Module 06 spec Section 4.4 schema.
+- **Context/References:** Module 06 spec Section 4.4. DisGeNET REST API docs: https://www.disgenet.com/api
+- **Acceptance criteria:**
+  1. Run against CTX benchmark (or small subset for time)
+  2. Rate limiting respected (verify via timing logs)
+  3. Missing API key produces clear error message at startup
+  4. `min_score` filtering: changing parameter without clearing cache produces different row counts but no API calls
+  5. Ortholog gating correct
+- **Dependencies:** Tasks 1, 2. DisGeNET academic registration and API key.
+
+### Module 06 Task 7: QUERY_PUBMED Implementation
+- **Assigned to:** Claude Code
+- **Priority:** Medium
+- **Phase:** 3
+- **Module:** Module 06
+- **Description:** Implement `bin/query_pubmed.py`. ESearch queries per protein per search term, both mouse and human symbols. Rate limiting (10/sec with API key). PMI computation with minimum publication threshold (`databases.pubmed.min_pubs_for_score`). Total PubMed article count query (single ESearch, cached per-run). Uses caching module. Emits Parquet with Module 06 spec Section 4.3 schema. Cache key is `{gene_symbol}_{search_term}`, enabling incremental querying when search terms are added.
+- **Context/References:** Module 06 spec Section 4.3. NCBI E-utilities docs: https://www.ncbi.nlm.nih.gov/books/NBK25501/
+- **Acceptance criteria:**
+  1. Run against CTX benchmark with 2-3 search terms
+  2. Parquet has correct schema (10 columns)
+  3. PMI scores null for proteins below `min_pubs_for_score`
+  4. Adding a search term and re-running queries only the new term (verify via cache hit/miss logs)
+  5. Spot-check PMI directionality for well-studied proteins
+  6. Rate limiting respected
+- **Dependencies:** Tasks 1, 2. NCBI API key.
+
 ## 3.2 Decisions and Designs for Review
 
 > Implementation choices, design tradeoffs, or prototype outputs produced by Claude Code
@@ -194,6 +332,7 @@ None currently.
 - Imputation mask added to IMPUTE process -- 2026-04-07 -- `bin/impute.py` extended with `build_imputation_mask()` and `write_imputation_mask()`. New output `{run_id}.imputation_mask.parquet` (per-cell: observed/mnar/mar). IMPUTE Nextflow module updated (new emit channel). Module 03a spec Section 2.2 updated. CTXcyto benchmark: mask shape (8403, 7), categories match imputation_summary exactly.
 - Module 03b QC Report Assembly implemented -- 2026-04-07 -- New `bin/qc_report_assembly.py` (15 CLI args, 13 Plotly plots, 6 report sections). New `modules/local/qc_report_assembly/main.nf` (errorStrategy 'ignore'). Re-renders all plots from upstream data; CSS grid paired layouts; CV density plot (new). CTXcyto benchmark tested: 2.6 MB report, all numbers verified against upstream files.
 - PARTIAL detection filter category implemented -- 2026-04-06 -- Option B (fifth category) chosen. Code: `filter_proteins.py` (classify + report), `missingness_report.py` (order, colors, heatmap), `impute.py` (mixed MNAR/MAR routing). Specs: Module 01 Section 4.4 + Decision Register, Module 03a Section 4.7. Category order: PASSED-PARTIAL-SINGLE-GROUP-SPARSE-ABSENT. CTXcyto rerun: 263 PARTIAL proteins (2.9%), previously misclassified. Module 01 fully rerun for CTXcyto_WT_vs_CTXcyto_KO (all 4 processes). Stale results_fulltest/ and results_test/ directories deleted.
+- Module 06 (Database Queries) design complete -- 2026-04-07 -- Claude.ai design session. Key decisions: (1) Five independent Nextflow processes (one per database), not monolithic. (2) Depends on Module 01 mapping table only; runs in parallel with Modules 02-05. (3) Access methods: UniProt REST API batch, PubMed ESearch API, DisGeNET REST API, DGIdb GraphQL API, CTD bulk TSV download. (4) Output: five Parquet files with fully specified schemas. (5) Two-tier caching (Nextflow + application-level per-protein JSON). (6) PubMed normalization: PMI with min publication threshold. (7) `databases.query_scope` supports only "all" for now; "significant" planned. Full spec: `06_database_queries.Rmd`. Seven implementation tasks queued in Section 3.1.
 
 ---
 
@@ -215,6 +354,9 @@ None currently.
 
 - 2026-03-26 -- UniProt cache dir on cluster must be on persistent storage. Currently `{params.outdir}/cache/id_mapping`. Confirm `params.outdir` resolves to a persistent mount (home2 or scratch, not a temp FS) before first cluster run. If outdir is on scratch, the cache may be deleted between submissions, defeating the point.
 - 2026-03-26 -- Input usability: current workflow requires 3 preprocessing scripts + samplesheet + per-run params/metadata before pipeline runs. Acceptable for development; not suitable for bench scientists. The usability layer sits entirely outside the pipeline and can be rewritten at any point without architectural changes. Deferred to post-Phase 1. [See also Project Documentation Section 6.5]
+- 2026-04-07 -- Master doc updates needed for Module 06 design: (1) SQLite schema (Section 4.7) should be updated to reflect enriched column sets from Module 06 output schemas (e.g., approval_status on drug_interactions, disease_type and evidence_index on disease_associations, interaction_actions on chemical_interactions). (2) Pipeline position diagram should show Module 06 fanning out from Module 01, not sitting after Module 04. (3) Decision Register entries needed for the key Module 06 decisions (five-process architecture, Module 01-only dependency, access methods, PMI normalization, caching architecture).
+- 2026-04-07 -- DisGeNET academic registration needed for QUERY_DISGENET. Requires application through disgenet.com with institutional affiliation. Script handles missing key gracefully (emits "no_api_key" status, pipeline continues). NCBI API key optional for PubMed (free with NCBI account); without it, rate drops from 10/sec to 3/sec.
+- 2026-04-07 -- Module 06 database cache directory: `databases.cache_dir` defaults to `./prosift_cache/databases/` (relative to Nextflow launch dir). On the cluster, confirm this resolves to persistent storage. The Nextflow module definitions currently set `cachedir` to `${params.outdir}/cache/databases/{db_name}` - verify this is consistent with the params.yml setting. The CTD bulk file lives at `databases/CTD_chem_gene_ixns.tsv.gz` in the repo; the CTD Nextflow process cachedir should point there (or the file should be copied/symlinked to the cache dir).
 
 ## 4.3 Resolved Questions
 

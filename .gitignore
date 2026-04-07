@@ -3,6 +3,9 @@ data/
 results/
 CTX_synaptosome_project_data/
 prosift_inputs/
+databases/
+literature/
+meeting_notes/
 
 # Rendered HTML
 *.html
@@ -30,6 +33,9 @@ results_test/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+
+# API keys
+.env
 
 # IDE files
 .vscode/

@@ -1214,6 +1214,10 @@ def main() -> None:
     # ----------------------------------------------------------
     # 7. Write outputs
     # ----------------------------------------------------------
+    # Rename 'input_id' to 'protein_id' so every downstream module gets a
+    # consistent join key without needing conditional rename logic.
+    mapping_df = mapping_df.rename(columns={'input_id': 'protein_id'})
+
     mapping_out = os.path.join(outdir, f'{run_id}.id_mapping.parquet')
     report_out  = os.path.join(outdir, f'{run_id}.validation_report_part3.txt')
 

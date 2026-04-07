@@ -33,6 +33,29 @@ output:
 
 # Active Session Log
 
+### 2026-04-07 (Claude Code, Session 3)
+- **Module 06 Tasks 5-7 completed + input_id rename + end-to-end testing + API key setup:**
+  - `query_dgidb.py`: full DGIdb GraphQL API integration, per-gene caching, ortholog gating. End-to-end tested (5 proteins with orthologs: 12 drug interactions across ADIPOQ/CD63/CDC42).
+  - `query_pubmed.py`: full NCBI ESearch API, PMI normalization, dual mouse/human symbol querying, rate limiting (9/sec with key, 2/sec without). End-to-end tested (8 proteins x 2 terms, PMI scores verified).
+  - `query_disgenet.py`: full DisGeNET REST API, 50/min rate limiting, 429 retry, min_score output filter. Updated to new API endpoint (api.disgenet.com/api/v1/gda/summary). Graceful no-key/auth-error handling. DisGeNET account needs confirmation on their website (403 "Confirm your account access").
+  - Renamed `input_id` to `protein_id` at Module 01 source (`uniprot_mapping.py`). Removed workaround from `differential_abundance.py`. All 5 query scripts retain compatibility shim for pre-rename mapping tables.
+  - Created `.env` / `.env.example` for API key management (gitignored). Added `databases/`, `literature/`, `meeting_notes/` to `.gitignore`.
+  - End-to-end test (8 proteins with populated orthologs): all 5 scripts pass, all 5 schemas verified correct.
+- **Files created:** `.env`, `.env.example`
+- **Files modified:** `bin/query_dgidb.py`, `bin/query_pubmed.py`, `bin/query_disgenet.py`, `bin/query_uniprot.py`, `bin/query_ctd.py`, `bin/uniprot_mapping.py`, `bin/differential_abundance.py`, `.gitignore`, handoff, Module 01 spec Section 4.8
+
+### 2026-04-07 (Claude Code, Session 2)
+- **Module 06 Tasks 1-4 completed (Nextflow scaffold, caching, UniProt, CTD):**
+  - Created 5 Nextflow process definitions in `modules/local/` and 5 Python scripts in `bin/`
+  - Created `bin/prosift_cache.py` with `ProteinCache` and `BulkFileCache` classes, 27 unit tests
+  - `query_uniprot.py`: full UniProt REST API batch retrieval, per-protein JSON caching, CTX benchmark (8,403 proteins, 2 min first run, 86% function coverage)
+  - `query_ctd.py`: bulk TSV filtering of CTD_chem_gene_ixns.tsv.gz in 100K-row chunks, organism-aware matching, CTX benchmark (13,032 interactions, 208 proteins, ~8 sec)
+  - Wired all 5 processes into `workflows/prosift.nf` with multiMap fan-out from UNIPROT_MAPPING output
+  - Added Module 06 parameters to all 12 `prosift_inputs/*/params.yml`
+- **Discovery:** Module 01 mapping table uses `input_id`, not `protein_id`. All 5 scripts include conditional rename as workaround. Decision (via Claude.ai): rename at source. Task queued in handoff Section 3.1.
+- **Files created:** `modules/local/query_{uniprot,pubmed,disgenet,dgidb,ctd}/main.nf`, `bin/query_{uniprot,pubmed,disgenet,dgidb,ctd}.py`, `bin/prosift_cache.py`, `tests/test_prosift_cache.py`
+- **Files modified:** `workflows/prosift.nf`, 12 params.yml files, handoff
+
 ### 2026-04-07 (Claude Code)
 - **Module 05 zero-significant-proteins edge case tested:** Created synthetic input (CTXcyto DA results, `significant` = all False). ORA correctly skipped with warning; GSEA ran normally (409 GO_BP, 281 REACTOME significant terms). All 4 output files produced with valid schemas. No code changes needed. Acceptance criterion #10 updated from `IMPLEMENTED` to `DONE`.
 - **Module 05 spec updated:** Section 8.3 added with 8-check edge case test results table. Section 8.1 criterion #10 marked DONE. Two Change History entries added.

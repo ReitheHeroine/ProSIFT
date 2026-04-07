@@ -26,6 +26,13 @@ include { DIFFERENTIAL_ABUNDANCE } from '../modules/local/differential_abundance
 // Module 05: Enrichment Analysis
 include { ENRICHMENT             } from '../modules/local/enrichment/main'
 
+// Module 06: Database Queries (five independent processes)
+include { QUERY_UNIPROT          } from '../modules/local/query_uniprot/main'
+include { QUERY_PUBMED           } from '../modules/local/query_pubmed/main'
+include { QUERY_DISGENET         } from '../modules/local/query_disgenet/main'
+include { QUERY_DGIDB            } from '../modules/local/query_dgidb/main'
+include { QUERY_CTD              } from '../modules/local/query_ctd/main'
+
 workflow PROSIFT {
 
     // --- Build per-run input channel from samplesheet ---
@@ -71,6 +78,12 @@ workflow PROSIFT {
             da_params:        [ meta, params_yml ]
             // enrich_params: params_yml for the ENRICHMENT join
             enrich_params:    [ meta, params_yml ]
+            // Module 06: one branch per database process
+            db_uniprot_params:  [ meta, params_yml ]
+            db_pubmed_params:   [ meta, params_yml ]
+            db_disgenet_params: [ meta, params_yml ]
+            db_dgidb_params:    [ meta, params_yml ]
+            db_ctd_params:      [ meta, params_yml ]
         }
         .set { ch_input }
 
@@ -103,6 +116,46 @@ workflow PROSIFT {
         .set { ch_mapping_input }
 
     UNIPROT_MAPPING(ch_mapping_input)
+
+    // --- Module 06: Database Queries (parallel with Modules 02-05) ---
+    // Each database process takes the mapping table + params_yml.
+    // Individual databases can be toggled via databases.enabled in params.yml.
+    // All five fan out from Module 01 and converge into Module 07.
+
+    // QUERY_UNIPROT
+    UNIPROT_MAPPING.out.mapping_table
+        .join(ch_input.db_uniprot_params)
+        .set { ch_db_uniprot_input }
+
+    QUERY_UNIPROT(ch_db_uniprot_input)
+
+    // QUERY_PUBMED
+    UNIPROT_MAPPING.out.mapping_table
+        .join(ch_input.db_pubmed_params)
+        .set { ch_db_pubmed_input }
+
+    QUERY_PUBMED(ch_db_pubmed_input)
+
+    // QUERY_DISGENET
+    UNIPROT_MAPPING.out.mapping_table
+        .join(ch_input.db_disgenet_params)
+        .set { ch_db_disgenet_input }
+
+    QUERY_DISGENET(ch_db_disgenet_input)
+
+    // QUERY_DGIDB
+    UNIPROT_MAPPING.out.mapping_table
+        .join(ch_input.db_dgidb_params)
+        .set { ch_db_dgidb_input }
+
+    QUERY_DGIDB(ch_db_dgidb_input)
+
+    // QUERY_CTD
+    UNIPROT_MAPPING.out.mapping_table
+        .join(ch_input.db_ctd_params)
+        .set { ch_db_ctd_input }
+
+    QUERY_CTD(ch_db_ctd_input)
 
     // --- Module 02: Pre-normalization QC/EDA ---
     // Joins: filtered_matrix (post-filter) + validated_metadata + id_mapping + params_yml
