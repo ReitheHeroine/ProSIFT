@@ -63,8 +63,9 @@ from prosift_cache import ProteinCache, is_database_enabled, load_db_params
 # ============================================================
 
 # DisGeNET migrated to api.disgenet.com in 2025. The old www.disgenet.org/api
-# endpoint returns HTML. Use the v1 API with Bearer token authentication.
-DISGENET_API_URL = 'https://api.disgenet.com/api/v1/gda/gene'
+# endpoint returns HTML. The v1 API uses the raw API key in the Authorization
+# header (no "Bearer" prefix) and gene_ncbi_id as a query parameter.
+DISGENET_API_URL = 'https://api.disgenet.com/api/v1/gda/summary'
 
 # Rate limit: 50 queries/min on Free Academic plan
 RATE_LIMIT_PER_MIN = 50
@@ -141,11 +142,11 @@ class DisGeNETClient:
         self._rate_limit_wait()
 
         headers = {
-            'Authorization': f'Bearer {self.api_key}',
+            'Authorization': self.api_key,
             'accept': 'application/json',
         }
 
-        params = {'gene_id': gene_id}
+        params = {'gene_ncbi_id': gene_id}
 
         delay = INITIAL_RETRY_DELAY
         for attempt in range(1, MAX_RETRIES + 1):
@@ -209,12 +210,15 @@ class DisGeNETClient:
 
 
 def parse_disgenet_associations(raw: list) -> List[dict]:
-    """Parse raw DisGeNET API response into structured rows.
+    """Parse raw DisGeNET API v1 response into structured rows.
+
+    The v1 API (api.disgenet.com) uses camelCase field names:
+      diseaseUMLSCUI, diseaseName, diseaseType, score, ei, numPMIDs, el
 
     Parameters
     ----------
     raw : list
-        Raw API response (list of association dicts).
+        Raw API response (list of association dicts from /gda/summary).
 
     Returns
     -------
@@ -224,17 +228,25 @@ def parse_disgenet_associations(raw: list) -> List[dict]:
     associations = []
 
     for assoc in raw:
-        disease_id = assoc.get('diseaseid') or assoc.get('disease_id')
-        disease_name = assoc.get('disease_name') or assoc.get('diseaseName')
-        disease_type = assoc.get('disease_type') or assoc.get('diseaseType') or assoc.get('disease_class_name')
-        gda_score = assoc.get('score') or assoc.get('gene_dsi')
-        evidence_index = assoc.get('ei') or assoc.get('evidence_index')
-        n_pubs = assoc.get('n_pmids') or assoc.get('nPmids') or assoc.get('pmid_count', 0)
+        # Disease identifier: UMLS CUI is the primary ID in DisGeNET
+        disease_id = assoc.get('diseaseUMLSCUI')
 
-        # Source databases
-        source = assoc.get('source')
-        if isinstance(source, list):
-            source = '; '.join(source)
+        disease_name = assoc.get('diseaseName')
+
+        # Disease type: e.g., "[disease]", "[phenotype]"
+        disease_type = assoc.get('diseaseType')
+
+        # GDA score (0-1)
+        gda_score = assoc.get('score')
+
+        # Evidence index (0-1)
+        evidence_index = assoc.get('ei')
+
+        # Number of supporting publications
+        n_pubs = assoc.get('numPMIDs', 0)
+
+        # Evidence level (e.g., "Definitive", "Limited")
+        source = assoc.get('el')
 
         associations.append({
             'disease_id': disease_id,
@@ -475,7 +487,13 @@ def main() -> None:
 
     out = pd.DataFrame(rows)
 
-    # --- Enforce column types ---
+    # --- Enforce column order and types ---
+    col_order = [
+        'protein_id', 'human_symbol_queried', 'disease_id', 'disease_name',
+        'disease_type', 'gda_score', 'evidence_index', 'n_publications',
+        'source', 'disgenet_query_status',
+    ]
+    out = out[col_order]
     out['gda_score'] = out['gda_score'].astype('Float64')
     out['evidence_index'] = out['evidence_index'].astype('Float64')
     out['n_publications'] = out['n_publications'].astype('Int64')
