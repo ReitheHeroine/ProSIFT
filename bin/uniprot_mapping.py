@@ -1009,7 +1009,7 @@ def write_report(
     n_entrez    = int(mapped_df['entrez_id_mouse'].notna().sum())
     n_ensembl   = int(mapped_df['ensembl_gene_mouse'].notna().sum())
 
-    unmapped_ids = df.loc[df['mapping_status'] == 'unmapped', 'input_id'].tolist()
+    unmapped_ids = df.loc[df['mapping_status'] == 'unmapped', 'protein_id'].tolist()
     unmapped_preview = ', '.join(unmapped_ids[:10])
     if len(unmapped_ids) > 10:
         unmapped_preview += f' ... ({len(unmapped_ids) - 10} more)'
@@ -1092,9 +1092,9 @@ def write_report(
 
     if n_redirected > 0:
         redirected = df.loc[df['mapping_status'] == 'accession_redirected',
-                            ['input_id', 'uniprot_accession']]
+                            ['protein_id', 'uniprot_accession']]
         redirect_lines = [
-            f'    {row.input_id}  ->  {row.uniprot_accession}'
+            f'    {row.protein_id}  ->  {row.uniprot_accession}'
             for row in redirected.itertuples()
         ]
         lines += [
@@ -1102,7 +1102,7 @@ def write_report(
             '',
             f'  {n_redirected} protein(s) submitted as secondary or merged accessions.',
             '  UniProt returned a different canonical accession for each. Abundance',
-            '  data remains keyed on input_id; downstream annotation uses uniprot_accession.',
+            '  data remains keyed on protein_id; downstream annotation uses uniprot_accession.',
             '  This typically indicates the search database FASTA was built from an',
             '  older UniProt release.',
             '',
@@ -1110,7 +1110,7 @@ def write_report(
 
     if n_multi > 0:
         multi_ids = df.loc[
-            df['mapping_status'] == 'multiple_mappings', 'input_id'
+            df['mapping_status'] == 'multiple_mappings', 'protein_id'
         ].tolist()
         lines += [
             '--- Multiple-Mapping Protein IDs ---',
