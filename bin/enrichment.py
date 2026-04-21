@@ -4,7 +4,7 @@ Title:         enrichment.py
 Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 Author:        Reina Hastings (reinahastings13@gmail.com)
 Created:       2026-03-31
-Last Modified: 2026-03-31
+Last Modified: 2026-04-14
 Purpose:       Module 05 ENRICHMENT process. Runs overrepresentation analysis (ORA)
                via gseapy.enrich() and preranked GSEA via gseapy.prerank() against
                local MSigDB GMT files. Operates on gene symbols from Module 04's
@@ -43,6 +43,16 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import yaml
+
+# --- Optional rpy2 for rrvgo GO-term redundancy reduction (Section 4.13) ---
+try:
+    import rpy2.robjects as ro
+    from rpy2.robjects import pandas2ri
+    from rpy2.robjects.conversion import localconverter
+    from rpy2.robjects.packages import importr
+    _HAVE_RPY2 = True
+except ImportError:
+    _HAVE_RPY2 = False
 
 # ============================================================
 # ARGUMENT PARSING
@@ -891,6 +901,18 @@ def write_summary(
                     lines.append(f"  {lib:<12} {sig_count:<12} {top_str}")
                 lines.append("")
 
+            # --- GO clustering summary per analysis_type (GO libraries only) ---
+            go_cdf = cdf[cdf["library"].isin(["GO_BP", "GO_MF", "GO_CC"])]
+            if not go_cdf.empty and "cluster_id" in go_cdf.columns:
+                go_cl = go_cdf.dropna(subset=["cluster_id"])
+                if not go_cl.empty:
+                    lines.append("GO clustering (rrvgo, Rel similarity, threshold=0.7):")
+                    for (lib, atype), sub in go_cl.groupby(["library", "analysis_type"]):
+                        n_terms = len(sub)
+                        n_clust = int(sub["cluster_id"].nunique())
+                        lines.append(f"  {lib} {atype:<6} {n_terms:>4} terms -> {n_clust} clusters")
+                    lines.append("")
+
             if enr["run_gsea"]:
                 lines.append("GSEA results:")
                 lines.append(f"  {'Library':<12} {'Sig terms':<12} Top term (NES)")
@@ -914,6 +936,284 @@ def write_summary(
     out_path = outdir / f"{run_id}.enrichment_summary.txt"
     out_path.write_text("\n".join(lines) + "\n")
     logging.info("Summary written: %s", out_path)
+
+
+# ============================================================
+# GO-TERM REDUNDANCY REDUCTION (rrvgo via rpy2)
+# ============================================================
+
+# Map MSigDB GO collection prefix -> GO ontology code consumed by rrvgo
+_MSIGDB_GO_PREFIXES = {
+    'GO_BP': 'BP',
+    'GO_MF': 'MF',
+    'GO_CC': 'CC',
+}
+
+# Semantic similarity threshold for reduceSimMatrix.
+# rrvgo defaults to 0.7 (Wang similarity). Higher = fewer, larger clusters.
+_RRVGO_THRESHOLD = 0.7
+
+
+def _msigdb_name_to_go_lookup_phrase(term_id: str) -> str:
+    """
+    Convert an MSigDB GO term_id (e.g. 'GOBP_APOPTOTIC_PROCESS') to the
+    lowercase, space-separated phrase used as a GO.db TERM key
+    (e.g. 'apoptotic process'). The GOBP_/GOMF_/GOCC_ prefix is stripped
+    and underscores become spaces.
+    """
+    stripped = term_id
+    for p in ('GOBP_', 'GOMF_', 'GOCC_'):
+        if stripped.startswith(p):
+            stripped = stripped[len(p):]
+            break
+    return stripped.replace('_', ' ').lower()
+
+
+def cluster_go_terms(
+    enrichment_results: pd.DataFrame,
+    threshold: float = _RRVGO_THRESHOLD,
+    orgdb: str = 'org.Mm.eg.db',
+) -> pd.DataFrame:
+    """
+    Add cluster_id, is_representative, parent_term columns to the enrichment
+    results table using rrvgo's GO semantic similarity clustering.
+
+    Clustering is performed independently per (library, analysis_type, contrast)
+    group, and only for GO libraries (GO_BP, GO_MF, GO_CC). All three columns
+    are null for non-GO rows and for GO rows whose MSigDB term_id could not be
+    resolved to a GO ID.
+
+    Representative selection: within each cluster, the term with the lowest
+    adj_pvalue is flagged is_representative=True. parent_term is the term_id of
+    the representative for every non-representative row; null for representatives.
+
+    If rpy2/rrvgo is unavailable, returns the input DataFrame unchanged plus the
+    three columns filled with null values, and logs a warning.
+    """
+    # --- Initialize new columns as null (preserved when clustering is skipped) ---
+    out = enrichment_results.copy()
+    out['cluster_id'] = pd.Series([pd.NA] * len(out), dtype='Int64')
+    out['is_representative'] = pd.Series([pd.NA] * len(out), dtype='object')
+    out['parent_term'] = pd.Series([pd.NA] * len(out), dtype='object')
+
+    if out.empty:
+        return out
+
+    # --- Only cluster GO libraries ---
+    go_mask = out['library'].isin(_MSIGDB_GO_PREFIXES.keys())
+    if not go_mask.any():
+        logging.info('No GO-family libraries in results; skipping redundancy reduction.')
+        return out
+
+    if not _HAVE_RPY2:
+        logging.warning(
+            'rpy2 not available; GO term redundancy reduction skipped. '
+            'cluster_id, is_representative, parent_term will be null for all terms.'
+        )
+        return out
+
+    # --- Load rrvgo + GO.db + organism annotation (fail fast) ---
+    try:
+        importr('rrvgo')
+        importr('GO.db')
+        importr(orgdb)
+    except Exception as exc:
+        logging.warning(
+            'Failed to load R packages for GO clustering (%s): %s. '
+            'Proceeding with null cluster columns.', orgdb, exc,
+        )
+        return out
+
+    # --- Iterate (library, analysis_type, contrast) groups of GO rows ---
+    for (lib, atype, contrast), sub in out[go_mask].groupby(
+        ['library', 'analysis_type', 'contrast'], sort=False
+    ):
+        ont = _MSIGDB_GO_PREFIXES[lib]
+        n_terms = len(sub)
+        if n_terms < 2:
+            logging.info(
+                'Skipping clustering for %s/%s/%s: %d terms (need >=2).',
+                lib, atype, contrast, n_terms,
+            )
+            continue
+
+        # --- Build MSigDB term_id -> lookup phrase, pass to R ---
+        msigdb_ids = sub['term_id'].tolist()
+        lookup_phrases = [_msigdb_name_to_go_lookup_phrase(t) for t in msigdb_ids]
+        # rrvgo needs a score per GO term. Use -log10(adj_pvalue), capped at
+        # a large finite value if adj_pvalue is 0 or null.
+        raw_p = sub['adj_pvalue'].astype(float).to_numpy()
+        raw_p = np.where(np.isnan(raw_p), 1.0, raw_p)
+        raw_p = np.where(raw_p <= 0, 1e-300, raw_p)
+        scores = -np.log10(raw_p)
+
+        try:
+            # Fresh R environment per group to avoid cross-group contamination
+            ro.globalenv['prosift_msigdb_ids']   = ro.StrVector(msigdb_ids)
+            ro.globalenv['prosift_lookup']       = ro.StrVector(lookup_phrases)
+            ro.globalenv['prosift_scores']       = ro.FloatVector(scores.tolist())
+            ro.globalenv['prosift_ont']          = ro.StrVector([ont])
+            ro.globalenv['prosift_orgdb']        = ro.StrVector([orgdb])
+            ro.globalenv['prosift_threshold']    = ro.FloatVector([float(threshold)])
+
+            ro.r("""
+                suppressMessages({
+                    library(GO.db)
+                    library(rrvgo)
+                    library(AnnotationDbi)
+                })
+
+                # 1. MSigDB name -> GO ID via GO.db TERM table (case-insensitive).
+                #    MSigDB names are ALL-CAPS while GO.db stores canonical term
+                #    names with mixed case (e.g., "DNA binding"), so the match
+                #    must be case-insensitive. Some MSigDB names still will not
+                #    resolve (obsolete/renamed terms); those are dropped before
+                #    calculateSimMatrix.
+                all_terms_df <- tryCatch(
+                    AnnotationDbi::select(
+                        GO.db,
+                        keys     = AnnotationDbi::keys(GO.db, keytype="GOID"),
+                        keytype  = "GOID",
+                        columns  = c("TERM", "ONTOLOGY")
+                    ),
+                    error = function(e) { data.frame(TERM=character(), GOID=character(), ONTOLOGY=character()) }
+                )
+                # Restrict to the requested ontology
+                go_df <- all_terms_df[!is.na(all_terms_df$TERM)
+                                      & all_terms_df$ONTOLOGY == prosift_ont[1], , drop=FALSE]
+                go_df$TERM_LC <- tolower(go_df$TERM)
+
+                # De-duplicate on lowercased TERM
+                go_df <- go_df[!duplicated(go_df$TERM_LC), , drop=FALSE]
+
+                # Build aligned vectors: for each lookup phrase, find first matching GOID
+                match_idx <- match(tolower(prosift_lookup), go_df$TERM_LC)
+                resolved_mask <- !is.na(match_idx)
+                resolved_go   <- go_df$GOID[match_idx[resolved_mask]]
+                resolved_msig <- prosift_msigdb_ids[resolved_mask]
+                resolved_scores <- prosift_scores[resolved_mask]
+
+                prosift_cluster_ok <- FALSE
+                prosift_result <- data.frame(
+                    msigdb_id = character(), go_id = character(),
+                    cluster = integer(), parent_go = character()
+                )
+
+                if (length(resolved_go) >= 2 && length(unique(resolved_go)) >= 2) {
+                    # De-duplicate resolved GO IDs (keep highest score per GO ID)
+                    ord <- order(-resolved_scores)
+                    keep <- !duplicated(resolved_go[ord])
+                    keep_idx <- ord[keep]
+                    uniq_go     <- resolved_go[keep_idx]
+                    uniq_msig   <- resolved_msig[keep_idx]
+                    uniq_scores <- resolved_scores[keep_idx]
+
+                    names(uniq_scores) <- uniq_go
+
+                    sim <- tryCatch(
+                        rrvgo::calculateSimMatrix(
+                            uniq_go,
+                            orgdb  = prosift_orgdb[1],
+                            ont    = prosift_ont[1],
+                            method = "Rel"
+                        ),
+                        error = function(e) { NULL }
+                    )
+
+                    if (!is.null(sim) && nrow(sim) >= 2) {
+                        reduced <- tryCatch(
+                            rrvgo::reduceSimMatrix(
+                                sim,
+                                scores    = uniq_scores,
+                                threshold = prosift_threshold[1],
+                                orgdb     = prosift_orgdb[1]
+                            ),
+                            error = function(e) { NULL }
+                        )
+                        if (!is.null(reduced) && nrow(reduced) > 0) {
+                            # reduced columns: go, cluster, parent, parentTerm, score, size, term
+                            # Align back to MSigDB IDs
+                            reduced_msig <- uniq_msig[match(reduced$go, uniq_go)]
+                            parent_msig  <- uniq_msig[match(reduced$parent, uniq_go)]
+                            prosift_result <- data.frame(
+                                msigdb_id = reduced_msig,
+                                go_id     = as.character(reduced$go),
+                                cluster   = as.integer(reduced$cluster),
+                                parent_msigdb = parent_msig,
+                                stringsAsFactors = FALSE
+                            )
+                            prosift_cluster_ok <- TRUE
+                        }
+                    }
+                }
+            """)
+
+            cluster_ok = bool(ro.globalenv['prosift_cluster_ok'][0])
+            if not cluster_ok:
+                logging.warning(
+                    'rrvgo clustering produced no output for %s/%s/%s (n=%d). '
+                    'Leaving cluster columns null for this group.',
+                    lib, atype, contrast, n_terms,
+                )
+                continue
+
+            with localconverter(ro.default_converter + pandas2ri.converter):
+                reduced_df = ro.conversion.rpy2py(ro.globalenv['prosift_result'])
+
+        except Exception as exc:
+            logging.warning(
+                'R-side clustering failed for %s/%s/%s: %s. '
+                'Leaving cluster columns null for this group.',
+                lib, atype, contrast, exc,
+            )
+            continue
+
+        if reduced_df.empty:
+            continue
+
+        # --- Assign cluster_id + parent (as MSigDB term_id) to the full sub ---
+        # reduced_df: msigdb_id, go_id, cluster, parent_msigdb (one row per unique resolved GO)
+        cluster_map = dict(zip(reduced_df['msigdb_id'], reduced_df['cluster'].astype(int)))
+        parent_map  = dict(zip(reduced_df['msigdb_id'], reduced_df['parent_msigdb']))
+
+        # --- Determine representative per cluster (lowest adj_pvalue within cluster) ---
+        sub_ann = sub.copy()
+        sub_ann['cluster_id'] = sub_ann['term_id'].map(cluster_map).astype('Int64')
+
+        # For rows in an assigned cluster, find the row with minimum adj_pvalue
+        assigned = sub_ann.dropna(subset=['cluster_id']).copy()
+        if assigned.empty:
+            continue
+
+        # Global row index per (cluster_id -> representative term_id)
+        rep_per_cluster = (
+            assigned.sort_values('adj_pvalue', ascending=True, na_position='last')
+                    .drop_duplicates(subset='cluster_id', keep='first')
+                    .set_index('cluster_id')['term_id']
+                    .to_dict()
+        )
+
+        # --- Write back into `out` using the original index from `sub` ---
+        for idx in sub.index:
+            term_id = out.at[idx, 'term_id']
+            if term_id not in cluster_map:
+                continue
+            cid = int(cluster_map[term_id])
+            rep = rep_per_cluster.get(cid)
+            is_rep = (term_id == rep)
+            out.at[idx, 'cluster_id'] = cid
+            out.at[idx, 'is_representative'] = bool(is_rep)
+            out.at[idx, 'parent_term'] = pd.NA if is_rep else rep
+
+        n_clusters = int(sub_ann['cluster_id'].dropna().nunique())
+        n_assigned = int(sub_ann['cluster_id'].notna().sum())
+        logging.info(
+            'GO clustering %s/%s/%s: %d terms -> %d assigned to %d clusters '
+            '(%d unassigned: MSigDB->GO.db lookup miss).',
+            lib, atype, contrast, n_terms, n_assigned, n_clusters, n_terms - n_assigned,
+        )
+
+    return out
 
 
 # ============================================================
@@ -1032,7 +1332,14 @@ def main() -> None:
             "term_id", "term_name", "library", "analysis_type", "contrast",
             "pvalue", "adj_pvalue", "enrichment_score", "odds_ratio",
             "combined_score", "gene_set_size", "overlap_size", "overlap_genes",
+            "cluster_id", "is_representative", "parent_term",
         ])
+
+    # --- GO-term redundancy reduction (rrvgo via rpy2) ---
+    # Adds cluster_id, is_representative, parent_term columns for GO libraries.
+    # Non-GO libraries (REACTOME, KEGG, HALLMARK) get null values.
+    logging.info("Running GO term redundancy reduction (rrvgo)...")
+    enrichment_results = cluster_go_terms(enrichment_results)
 
     # --- Protein-term mapping ---
     logging.info("Building protein-term mapping table...")

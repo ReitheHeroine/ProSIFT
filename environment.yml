@@ -34,6 +34,10 @@ dependencies:
 
   # --- Enrichment analysis (Phase 2) ---
   - gseapy                            # ORA and GSEA via gseapy
+  - bioconductor-rrvgo                # GO-term redundancy reduction (Module 05, Section 4.13)
+  - bioconductor-gosemsim             # Semantic similarity backend for rrvgo
+  - bioconductor-go.db                # GO term DAG + MSigDB name-to-GO-ID lookup
+  - bioconductor-org.mm.eg.db         # Mouse annotation database used by rrvgo
 
   # --- Visualization (Phase 2 QC/EDA plots) ---
   - matplotlib
