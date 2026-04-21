@@ -34,9 +34,24 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 
+# QC tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
 # API keys
 .env
 
 # IDE files
 .vscode/
 .idea/
+
+# Claude Code local config
+.claude/
+CLAUDE.md
+
+# Project documentation (private)
+project_documentation/
+"SLURM and Anthill User Guide/"
