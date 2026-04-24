@@ -37,7 +37,6 @@ import argparse
 import sys
 import os
 from datetime import datetime
-from io import StringIO
 
 import pandas as pd
 import yaml
@@ -92,10 +91,16 @@ def infer_separator(filepath: str) -> str:
 # ============================================================
 
 class Report:
-    '''Accumulates validation report lines; writes to file at the end.'''
+    '''Accumulates validation report lines; writes to file at the end.
 
-    def __init__(self, run_id: str):
+    If `report_path` is supplied, `error_exit` will flush the accumulated
+    lines to that path before raising SystemExit so the user gets a partial
+    report on failure.
+    '''
+
+    def __init__(self, run_id: str, report_path: str | None = None):
         self.run_id = run_id
+        self._report_path = report_path
         self._lines: list[str] = []
         self._warnings: list[str] = []
 
@@ -120,11 +125,23 @@ class Report:
         self._lines.append(f'  {text}')
 
     def error_exit(self, text: str) -> None:
-        '''Log the error to the report then exit non-zero.'''
+        '''Log the error to the report, flush it to disk, then exit non-zero.'''
         self._lines.append(f'  ERROR: {text}')
         self._lines.append('')
         self._lines.append('Validation failed. Pipeline stopped.')
-        # write partial report before exiting so the user has context
+        # Flush partial report so the user has diagnostic context on failure.
+        if self._report_path is not None:
+            try:
+                parent = os.path.dirname(self._report_path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                self.write(self._report_path)
+            except OSError as exc:
+                print(
+                    f'WARNING: could not write partial report to '
+                    f'{self._report_path}: {exc}',
+                    file=sys.stderr,
+                )
         print(f'ERROR [{self.run_id}]: {text}', file=sys.stderr)
         raise SystemExit(1)
 
@@ -242,19 +259,26 @@ def validate_matrix(
     df[abund_cols] = df[abund_cols].apply(pd.to_numeric, errors='coerce')
 
     # --- Completely empty rows (all abundance values NA) ---
+    # Hard-stop per Module 01 spec Section 4.1: rows with no measurements
+    # carry no information and almost always indicate an upstream extraction
+    # or export error.
     all_na_rows = df[abund_cols].isna().all(axis=1)
     if all_na_rows.any():
-        report.warn(
-            f'{all_na_rows.sum()} protein row(s) have no abundance values '
-            f'across any sample -- these rows carry no information.'
+        report.error_exit(
+            f'{int(all_na_rows.sum())} protein row(s) have no abundance '
+            f'values across any sample. Remove these rows from the input or '
+            f'investigate the upstream export before re-running.'
         )
 
     # --- Completely empty columns ---
+    # Hard-stop per Module 01 spec Section 4.1: an entirely-NA sample column
+    # represents a user data-prep error (wrong column included, missing data,
+    # corrupted upload) and must be fixed before downstream analysis.
     all_na_cols = [c for c in abund_cols if df[c].isna().all()]
     if all_na_cols:
-        report.warn(
+        report.error_exit(
             f'{len(all_na_cols)} abundance column(s) are entirely NA: '
-            f'{all_na_cols}'
+            f'{all_na_cols}. Remove or correct these columns before re-running.'
         )
 
     # --- Minimum protein count ---
@@ -513,13 +537,13 @@ def write_outputs(
     metadata: pd.DataFrame,
     report: Report,
     run_id: str,
-    outdir: str
+    outdir: str,
+    report_path: str,
 ) -> None:
     os.makedirs(outdir, exist_ok=True)
 
     matrix_path = os.path.join(outdir, f'{run_id}.validated_matrix.parquet')
     meta_path = os.path.join(outdir, f'{run_id}.validated_metadata.parquet')
-    report_path = os.path.join(outdir, f'{run_id}.validation_report_part1.txt')
 
     matrix.to_parquet(matrix_path, index=False)
     metadata.to_parquet(meta_path, index=False)
@@ -541,7 +565,11 @@ def main() -> None:
     params = load_params(args.params)
     run_id = args.run_id
 
-    report = Report(run_id)
+    # Compute report path up front so Report can flush on error_exit.
+    report_path = os.path.join(
+        args.outdir, f'{run_id}.validation_report_part1.txt'
+    )
+    report = Report(run_id, report_path=report_path)
 
     # --- Report header ---
     report.line(f'ProSIFT Validation Report -- {run_id}')
@@ -570,7 +598,7 @@ def main() -> None:
     report.info('Status: PASSED -- proceed to detection filter (Part 2)')
 
     # --- Write outputs ---
-    write_outputs(matrix, metadata, report, run_id, args.outdir)
+    write_outputs(matrix, metadata, report, run_id, args.outdir, report_path)
     print(f'[{run_id}] Validation complete. '
           f'{report.warning_count} warning(s). '
           f'{matrix.shape[0]} proteins, {metadata.shape[0]} samples.')

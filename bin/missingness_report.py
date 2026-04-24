@@ -4,7 +4,7 @@ Title:         missingness_report.py
 Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 Author:        Reina Hastings (reinahastings13@gmail.com)
 Created:       2026-03-27
-Last Modified: 2026-04-06 (added: total protein count denominator to Plot 2 subtitle)
+Last Modified: 2026-04-23 (added: --params arg; group column sourced from design.group_column)
 Purpose:       Module 01, Process 4.10: Missingness visualization report.
                Reads the detection filter table (from FILTER_PROTEINS),
                validated abundance matrix, and validated metadata (both from
@@ -15,6 +15,7 @@ Inputs:
   --filter-table  {run_id}.detection_filter_table.csv  (FILTER_PROTEINS)
   --matrix        {run_id}.validated_matrix.parquet    (VALIDATE_INPUTS)
   --metadata      {run_id}.validated_metadata.parquet  (VALIDATE_INPUTS)
+  --params        per-run params.yml (used to resolve design.group_column)
   --run-id        run identifier string
   --outdir        output directory (default: current directory)
 Outputs:
@@ -29,6 +30,7 @@ Usage:
       --filter-table CTXcyto_WT_vs_CTXcyto_KO.detection_filter_table.csv \\
       --matrix       CTXcyto_WT_vs_CTXcyto_KO.validated_matrix.parquet \\
       --metadata     CTXcyto_WT_vs_CTXcyto_KO.validated_metadata.parquet \\
+      --params       CTXcyto_WT_vs_CTXcyto_KO_params.yml \\
       --run-id       CTXcyto_WT_vs_CTXcyto_KO \\
       --outdir       .
 """
@@ -42,6 +44,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import yaml
 
 # Color palette (D3, colorblind-friendly)
 _PALETTE = px.colors.qualitative.D3
@@ -74,6 +77,7 @@ def parse_args() -> argparse.Namespace:
             "      --filter-table run.detection_filter_table.csv \\\n"
             "      --matrix run.validated_matrix.parquet \\\n"
             "      --metadata run.validated_metadata.parquet \\\n"
+            "      --params run_params.yml \\\n"
             "      --run-id run --outdir ."
         ),
     )
@@ -83,6 +87,8 @@ def parse_args() -> argparse.Namespace:
                         help="Validated abundance matrix Parquet (from VALIDATE_INPUTS)")
     parser.add_argument("--metadata", required=True,
                         help="Validated metadata Parquet (from VALIDATE_INPUTS)")
+    parser.add_argument("--params", required=True,
+                        help="Per-run params.yml (used to resolve design.group_column)")
     parser.add_argument("--run-id", required=True,
                         help="Run identifier string (used for output file names)")
     parser.add_argument("--outdir", default=".",
@@ -174,6 +180,7 @@ def plot_filter_categories(filter_df: pd.DataFrame, run_id: str) -> go.Figure:
 def plot_per_sample_detection(
     matrix_df: pd.DataFrame,
     metadata_df: pd.DataFrame,
+    group_col: str,
     run_id: str,
     n_total_proteins: int | None = None,
 ) -> go.Figure:
@@ -192,8 +199,9 @@ def plot_per_sample_detection(
     detection.columns = ["col_name", "n_detected"]
     detection["sample_id"] = detection["col_name"].str.removeprefix("abundance_")
 
-    # Attach group labels
-    group_col = [c for c in metadata_df.columns if c != "sample_id"][0]
+    # Attach group labels using the explicitly-passed group column (not
+    # inferred from column position, which would misbehave when covariates
+    # or a batch column are present in metadata).
     detection = detection.merge(
         metadata_df[["sample_id", group_col]], on="sample_id", how="left"
     )
@@ -241,6 +249,7 @@ def plot_missingness_heatmap(
     filter_df: pd.DataFrame,
     matrix_df: pd.DataFrame,
     metadata_df: pd.DataFrame,
+    group_col: str,
     run_id: str,
 ) -> go.Figure:
     """Binary heatmap of filtered-out proteins x samples.
@@ -263,7 +272,6 @@ def plot_missingness_heatmap(
     # Abundance columns ordered by group.
     # Matrix columns may carry an abundance_ prefix; build a mapping from
     # bare sample_id -> actual column name so we can look them up correctly.
-    group_col = [c for c in metadata_df.columns if c != "sample_id"][0]
     all_abund_cols = {
         c.removeprefix("abundance_"): c
         for c in matrix_df.columns
@@ -280,11 +288,13 @@ def plot_missingness_heatmap(
     subset.columns = display_labels
     detected = subset.notna().astype(int)  # 1=detected, 0=missing
 
-    # Add sort keys from filter table
+    # Add sort keys from filter table.
+    # Always reindex by protein_id so the detection count aligns by key rather
+    # than by row position; equal lengths do not imply matching row order.
     cat_order_map = {c: i for i, c in enumerate(removed_categories)}
     filter_sub = filter_df[filter_df["protein_id"].isin(removed_ids)].copy()
     filter_sub["_cat_rank"] = filter_sub["filter_status"].map(cat_order_map)
-    filter_sub["_n_detected"] = detected.sum(axis=1).values if len(filter_sub) == len(detected) else (
+    filter_sub["_n_detected"] = (
         detected.reindex(filter_sub["protein_id"]).sum(axis=1).values
     )
     filter_sub = filter_sub.sort_values(["_cat_rank", "_n_detected"],
@@ -316,11 +326,6 @@ def plot_missingness_heatmap(
             cat_start = i
     if current_cat is not None:
         cat_midpoints.append((current_cat, (cat_start + len(sorted_proteins) - 1) / 2))
-
-    # Group color bar annotations above the heatmap
-    group_col_vals = metadata_df.set_index("sample_id")[group_col]
-    groups = metadata_df[group_col].unique().tolist()
-    group_color_map = {g: _PALETTE[i % len(_PALETTE)] for i, g in enumerate(groups)}
 
     colorscale = [[0, "#f8f8f8"], [1, "#1f77b4"]]
 
@@ -509,6 +514,14 @@ def main() -> None:
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
+    # --- Load params ---
+    # Resolve the metadata group column explicitly from params.yml. Inferring
+    # it as "first non-sample_id column" breaks when design.covariates or
+    # design.batch_column are populated in metadata.
+    with open(args.params, "r", encoding="utf-8") as f:
+        params = yaml.safe_load(f)
+    group_col = params["design"]["group_column"]
+
     # --- Load inputs ---
     filter_df, matrix_df, metadata_df = load_inputs(
         args.filter_table, args.matrix, args.metadata
@@ -522,10 +535,14 @@ def main() -> None:
     fig_categories = plot_filter_categories(filter_df, run_id)
 
     logging.info("Generating Plot 2: per-sample detection bar chart")
-    fig_sample_det = plot_per_sample_detection(matrix_df, metadata_df, run_id, n_total_proteins=n_proteins)
+    fig_sample_det = plot_per_sample_detection(
+        matrix_df, metadata_df, group_col, run_id, n_total_proteins=n_proteins
+    )
 
     logging.info("Generating Plot 3: missingness heatmap (filtered-out proteins)")
-    fig_heatmap = plot_missingness_heatmap(filter_df, matrix_df, metadata_df, run_id)
+    fig_heatmap = plot_missingness_heatmap(
+        filter_df, matrix_df, metadata_df, group_col, run_id
+    )
 
     logging.info("Generating Plot 4: per-protein missingness histogram")
     fig_histogram = plot_missingness_histogram(matrix_df, run_id)

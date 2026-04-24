@@ -4,7 +4,7 @@
 # author: Reina Hastings
 # contact: reinahastings13@gmail.com
 # date created: 2026-03-26
-# last modified: 2026-04-02
+# last modified: 2026-04-23
 #
 # purpose:
 #   Processes 4.5-4.9 of Module 01 (Input Validation). Takes the
@@ -119,11 +119,12 @@ _HUMAN_ENTREZ_COLS  = ['human_ensembl_gene', 'entrez_id']
 # 2026-03-26 about silent stale-cache serving after code changes.
 #   1 = original (null ortholog columns, Phase 1-2)
 #   2 = BioMart ortholog columns populated (2026-04-02)
-CURRENT_SCHEMA_VERSION = 2
+#   3 = id column renamed at source from 'input_id' to 'protein_id' (2026-04-23)
+CURRENT_SCHEMA_VERSION = 3
 
 # Output column schema (Process 4.8)
 SCHEMA_COLS = [
-    'input_id',
+    'protein_id',
     'uniprot_accession',
     'gene_symbol_mouse',
     'entrez_id_mouse',
@@ -448,7 +449,7 @@ def parse_json_results(api_results: list[dict], input_ids: list[str]) -> pd.Data
         if len(hits) == 0:
             # --- Unmapped ---
             rows.append({
-                'input_id':                 input_id,
+                'protein_id':               input_id,
                 'uniprot_accession':        None,
                 'gene_symbol_mouse':        None,
                 'entrez_id_mouse':          None,
@@ -470,19 +471,20 @@ def parse_json_results(api_results: list[dict], input_ids: list[str]) -> pd.Data
                 notes  = f'Isoform {input_id} collapsed to canonical {accession}.'
             elif is_redirected:
                 # Input was a secondary/merged accession; UniProt returned a
-                # different primary. The abundance data is still keyed on input_id
-                # but all annotation columns use the canonical accession.
+                # different primary. The abundance data is still keyed on
+                # protein_id but all annotation columns use the canonical
+                # accession.
                 status = 'accession_redirected'
                 notes  = (
                     f'Input accession {input_id} is a secondary or merged '
                     f'accession; UniProt canonical is {accession}. '
-                    f'Abundance data remains keyed on input_id.'
+                    f'Abundance data remains keyed on protein_id.'
                 )
             else:
                 status = 'mapped'
                 notes  = ''
             rows.append({
-                'input_id':                 input_id,
+                'protein_id':               input_id,
                 'uniprot_accession':        accession,
                 'gene_symbol_mouse':        gene_sym,
                 'entrez_id_mouse':          entrez,
@@ -501,7 +503,7 @@ def parse_json_results(api_results: list[dict], input_ids: list[str]) -> pd.Data
                 h.get('primaryAccession', '') for h in hits[1:]
             )
             rows.append({
-                'input_id':                 input_id,
+                'protein_id':               input_id,
                 'uniprot_accession':        accession,
                 'gene_symbol_mouse':        gene_sym,
                 'entrez_id_mouse':          entrez,
@@ -598,20 +600,27 @@ def _build_ortholog_xml(ids: list[str], filter_name: str) -> str:
     )
 
 
-def _query_orthologs_by_ensembl(ensembl_ids: list[str]) -> pd.DataFrame:
+def _query_orthologs_by_ensembl(
+    ensembl_ids: list[str],
+) -> tuple[pd.DataFrame, set[str]]:
     '''
     Query BioMart for mouse-to-human orthologs using mouse Ensembl gene IDs
     (primary join key from UniProt Layer 1 mapping).
 
-    Returns a DataFrame with columns _MOUSE_ORTHOLOG_COLS. Multiple rows per
-    mouse gene are expected when one-to-many orthologs exist. Rows where
-    human_ensembl_gene is empty/null indicate no human ortholog for that gene.
-    Processed in chunks of BIOMART_CHUNK_SIZE to keep POST bodies manageable.
+    Returns (results_df, failed_ids). `results_df` has columns
+    _MOUSE_ORTHOLOG_COLS; multiple rows per mouse gene are expected when
+    one-to-many orthologs exist; rows where human_ensembl_gene is empty/null
+    indicate no human ortholog for that gene. `failed_ids` contains the
+    Ensembl IDs whose chunk returned a malformed response (wrong column count)
+    and were therefore not resolved -- these should be marked with status
+    'ortholog_lookup_failed' downstream rather than silently falling through
+    to 'no_ortholog'. Processed in chunks of BIOMART_CHUNK_SIZE.
     '''
     if not ensembl_ids:
-        return pd.DataFrame(columns=_MOUSE_ORTHOLOG_COLS)
+        return pd.DataFrame(columns=_MOUSE_ORTHOLOG_COLS), set()
 
     all_chunks: list[pd.DataFrame] = []
+    failed_ids: set[str] = set()
     n_chunks = (len(ensembl_ids) + BIOMART_CHUNK_SIZE - 1) // BIOMART_CHUNK_SIZE
     for i in range(0, len(ensembl_ids), BIOMART_CHUNK_SIZE):
         chunk     = ensembl_ids[i:i + BIOMART_CHUNK_SIZE]
@@ -624,31 +633,42 @@ def _query_orthologs_by_ensembl(ensembl_ids: list[str]) -> pd.DataFrame:
             if len(chunk_df.columns) == len(_MOUSE_ORTHOLOG_COLS):
                 chunk_df.columns = _MOUSE_ORTHOLOG_COLS
             else:
-                print(f'  Warning: unexpected BioMart column count '
+                # Schema drift or partial outage: response came back but its
+                # shape is wrong. Mark this chunk's IDs as lookup failures so
+                # downstream code can distinguish "confirmed no ortholog" from
+                # "BioMart could not answer."
+                print(f'  ERROR: unexpected BioMart column count '
                       f'(expected {len(_MOUSE_ORTHOLOG_COLS)}, '
-                      f'got {len(chunk_df.columns)}). Skipping chunk.')
+                      f'got {len(chunk_df.columns)}). Marking {len(chunk)} '
+                      f'Ensembl IDs as ortholog_lookup_failed.')
+                failed_ids.update(chunk)
                 chunk_df = pd.DataFrame(columns=_MOUSE_ORTHOLOG_COLS)
         else:
             chunk_df = pd.DataFrame(columns=_MOUSE_ORTHOLOG_COLS)
         all_chunks.append(chunk_df)
 
-    return pd.concat(all_chunks, ignore_index=True)
+    return pd.concat(all_chunks, ignore_index=True), failed_ids
 
 
-def _query_orthologs_by_symbol(gene_symbols: list[str]) -> pd.DataFrame:
+def _query_orthologs_by_symbol(
+    gene_symbols: list[str],
+) -> tuple[pd.DataFrame, set[str]]:
     '''
     Fallback: query BioMart using mouse gene symbols for proteins where
     ensembl_gene_mouse is null (~3.4% from the CTXcyto benchmark, typically
     minor isoforms or poorly annotated UniProt entries).
 
-    A symbol can map to multiple Ensembl gene IDs (gene family members with
-    shared names). _resolve_orthologs() groups by gene_symbol_mouse_bm and
-    selects the highest-confidence ortholog from any resulting rows.
+    Returns (results_df, failed_symbols). See _query_orthologs_by_ensembl for
+    the semantics of `failed_symbols`. A symbol can map to multiple Ensembl
+    gene IDs (gene family members with shared names); _resolve_orthologs()
+    groups by gene_symbol_mouse_bm and selects the highest-confidence
+    ortholog from any resulting rows.
     '''
     if not gene_symbols:
-        return pd.DataFrame(columns=_MOUSE_ORTHOLOG_COLS)
+        return pd.DataFrame(columns=_MOUSE_ORTHOLOG_COLS), set()
 
     all_chunks: list[pd.DataFrame] = []
+    failed_symbols: set[str] = set()
     n_chunks = (len(gene_symbols) + BIOMART_CHUNK_SIZE - 1) // BIOMART_CHUNK_SIZE
     for i in range(0, len(gene_symbols), BIOMART_CHUNK_SIZE):
         chunk     = gene_symbols[i:i + BIOMART_CHUNK_SIZE]
@@ -661,15 +681,17 @@ def _query_orthologs_by_symbol(gene_symbols: list[str]) -> pd.DataFrame:
             if len(chunk_df.columns) == len(_MOUSE_ORTHOLOG_COLS):
                 chunk_df.columns = _MOUSE_ORTHOLOG_COLS
             else:
-                print(f'  Warning: unexpected BioMart column count '
+                print(f'  ERROR: unexpected BioMart column count '
                       f'(expected {len(_MOUSE_ORTHOLOG_COLS)}, '
-                      f'got {len(chunk_df.columns)}). Skipping chunk.')
+                      f'got {len(chunk_df.columns)}). Marking {len(chunk)} '
+                      f'symbols as ortholog_lookup_failed.')
+                failed_symbols.update(chunk)
                 chunk_df = pd.DataFrame(columns=_MOUSE_ORTHOLOG_COLS)
         else:
             chunk_df = pd.DataFrame(columns=_MOUSE_ORTHOLOG_COLS)
         all_chunks.append(chunk_df)
 
-    return pd.concat(all_chunks, ignore_index=True)
+    return pd.concat(all_chunks, ignore_index=True), failed_symbols
 
 
 def _query_human_entrez(human_ensembl_ids: list[str]) -> dict[str, Optional[str]]:
@@ -754,9 +776,14 @@ def _resolve_orthologs(
 
     Selection rule for one-to-many cases (multiple human rows per mouse gene):
       1. Prefer confidence == 1 (high confidence per Ensembl's classifier).
-      2. Among ties, prefer highest perc_id (% sequence identity, query gene).
-      3. The top-ranked ortholog is stored in human_ortholog_symbol/entrez.
-      4. All orthologs are listed in the notes field for downstream consumers
+      2. Among ties, prefer the cleaner structural relationship:
+         ortholog_one2one > ortholog_one2many > ortholog_many2many
+         (one2one is a cleaner 1:1 evolutionary correspondence; many2many
+         reflects gene family expansion and is less reliable even when
+         perc_id is high).
+      3. Among remaining ties, prefer highest perc_id (% sequence identity).
+      4. The top-ranked ortholog is stored in human_ortholog_symbol/entrez.
+      5. All orthologs are listed in the notes field for downstream consumers
          (e.g. PubMed module can optionally query all ortholog symbols).
 
     ortholog_mapping_status values assigned here:
@@ -786,9 +813,26 @@ def _resolve_orthologs(
     has_orth['perc_id'] = (
         pd.to_numeric(has_orth['perc_id'], errors='coerce').fillna(0.0)
     )
+    # Structural-quality rank for homology_type (lower is better).
+    # BioMart returns 'ortholog_one2one', 'ortholog_one2many', or
+    # 'ortholog_many2many'; unexpected values sort last.
+    _HOMOLOGY_TYPE_RANK = {
+        'ortholog_one2one':   0,
+        'ortholog_one2many':  1,
+        'ortholog_many2many': 2,
+    }
+    has_orth['_homology_rank'] = (
+        has_orth['homology_type'].map(_HOMOLOGY_TYPE_RANK).fillna(3).astype(int)
+    )
 
     for key_val, group in has_orth.groupby(join_key):
-        group   = group.sort_values(['confidence', 'perc_id'], ascending=[False, False])
+        # Tie-break order (spec Section 4.7): confidence DESC, then
+        # structural-quality rank ASC (one2one > one2many > many2many), then
+        # perc_id DESC as final tiebreaker.
+        group   = group.sort_values(
+            ['confidence', '_homology_rank', 'perc_id'],
+            ascending=[False, True, False],
+        )
         n       = len(group)
         primary = group.iloc[0]
 
@@ -838,6 +882,16 @@ def map_orthologs(mapping_df: pd.DataFrame) -> pd.DataFrame:
         symbol or Ensembl ID; their ortholog columns remain null rather than
         'no_ortholog', which would be misleading for proteins that couldn't
         even be mapped to UniProt.
+
+    ortholog_mapping_status values:
+      one_to_one, one_to_many, many_to_many -- BioMart returned a homolog.
+      no_ortholog                            -- BioMart returned no rows for
+                                                this gene (confirmed absence).
+      ortholog_lookup_failed                 -- BioMart returned a malformed
+                                                response (schema drift, partial
+                                                outage); the true state is
+                                                unknown and the protein should
+                                                be rechecked on the next run.
     '''
     df = mapping_df.copy()
 
@@ -863,7 +917,7 @@ def map_orthologs(mapping_df: pd.DataFrame) -> pd.DataFrame:
     ensembl_ids = list({vid.split('.')[0] for vid in ensembl_ids_versioned})
     print(f'  BioMart: primary lookup for {len(ensembl_ids)} unique Ensembl IDs '
           f'(version suffixes stripped)...')
-    ensembl_ortholog_df = _query_orthologs_by_ensembl(ensembl_ids)
+    ensembl_ortholog_df, failed_ensembl_ids = _query_orthologs_by_ensembl(ensembl_ids)
 
     # ----------------------------------------------------------------
     # Step 2: Fetch human Entrez IDs for all human Ensembl IDs found
@@ -904,6 +958,16 @@ def map_orthologs(mapping_df: pd.DataFrame) -> pd.DataFrame:
                 existing = df.at[idx, 'mapping_notes'] or ''
                 sep = ' ' if existing else ''
                 df.at[idx, 'mapping_notes'] = existing + sep + orth['notes']
+        elif key in failed_ensembl_ids:
+            # BioMart returned a malformed response for this chunk; we do not
+            # actually know whether an ortholog exists.
+            df.at[idx, 'ortholog_mapping_status'] = 'ortholog_lookup_failed'
+            existing = df.at[idx, 'mapping_notes'] or ''
+            sep = ' ' if existing else ''
+            df.at[idx, 'mapping_notes'] = existing + sep + (
+                'BioMart returned a malformed response for this chunk; '
+                'ortholog lookup could not be completed.'
+            )
         else:
             # Gene found in UniProt but BioMart returned no rows for it
             df.at[idx, 'ortholog_mapping_status'] = 'no_ortholog'
@@ -923,7 +987,7 @@ def map_orthologs(mapping_df: pd.DataFrame) -> pd.DataFrame:
         symbols = null_ensembl_df['gene_symbol_mouse'].dropna().unique().tolist()
         print(f'  BioMart (gene symbol fallback): {len(null_ensembl_df)} proteins '
               f'with null Ensembl ID, {len(symbols)} unique symbols...')
-        sym_ortholog_df = _query_orthologs_by_symbol(symbols)
+        sym_ortholog_df, failed_symbols = _query_orthologs_by_symbol(symbols)
 
         # Fetch Entrez IDs only for human Ensembl IDs not already in entrez_map
         sym_human_ensembl = (
@@ -958,6 +1022,14 @@ def map_orthologs(mapping_df: pd.DataFrame) -> pd.DataFrame:
                 existing = df.at[idx, 'mapping_notes'] or ''
                 sep = ' ' if existing else ''
                 df.at[idx, 'mapping_notes'] = existing + sep + fallback_note
+            elif sym and sym in failed_symbols:
+                df.at[idx, 'ortholog_mapping_status'] = 'ortholog_lookup_failed'
+                existing = df.at[idx, 'mapping_notes'] or ''
+                sep = ' ' if existing else ''
+                df.at[idx, 'mapping_notes'] = existing + sep + (
+                    'BioMart returned a malformed response for this chunk; '
+                    'ortholog lookup could not be completed.'
+                )
             else:
                 df.at[idx, 'ortholog_mapping_status'] = 'no_ortholog'
 
@@ -1208,16 +1280,12 @@ def main() -> None:
         # if proteins were re-ordered between runs with the same set of IDs)
         id_order = {pid: i for i, pid in enumerate(protein_ids)}
         mapping_df = mapping_df.copy()
-        mapping_df['_order'] = mapping_df['input_id'].map(id_order)
+        mapping_df['_order'] = mapping_df['protein_id'].map(id_order)
         mapping_df = mapping_df.sort_values('_order').drop(columns='_order')
 
     # ----------------------------------------------------------
     # 7. Write outputs
     # ----------------------------------------------------------
-    # Rename 'input_id' to 'protein_id' so every downstream module gets a
-    # consistent join key without needing conditional rename logic.
-    mapping_df = mapping_df.rename(columns={'input_id': 'protein_id'})
-
     mapping_out = os.path.join(outdir, f'{run_id}.id_mapping.parquet')
     report_out  = os.path.join(outdir, f'{run_id}.validation_report_part3.txt')
 

@@ -48,7 +48,7 @@ workflow PROSIFT {
     //   validate          -> VALIDATE_INPUTS
     //   filter_params     -> FILTER_PROTEINS (joined after validation)
     //   map_params        -> UNIPROT_MAPPING (joined after detection filter)
-    //   prenorm_params    -> PRENORM_QC (joined after ID mapping)
+    //   prenorm_params    -> PRENORM_QC (joined after detection filter)
     //   normalize_params  -> NORMALIZE (joined after QC)
     //   impute_params     -> IMPUTE (joined after NORMALIZE)
     Channel
@@ -66,6 +66,8 @@ workflow PROSIFT {
             validate:         [ meta, abund, meta_csv, params_yml ]
             // filter_params: params_yml for the FILTER_PROTEINS join
             filter_params:    [ meta, params_yml ]
+            // missingness_params: params_yml for the MISSINGNESS_REPORT join
+            missingness_params: [ meta, params_yml ]
             // map_params: params_yml for the UNIPROT_MAPPING join
             map_params:       [ meta, params_yml ]
             // prenorm_params: params_yml for the PRENORM_QC join
@@ -102,10 +104,11 @@ workflow PROSIFT {
 
     // --- Module 01, Process 4.10: Missingness report (advisory) ---
     // Joins: filter_table (FILTER_PROTEINS) + validated_matrix (pre-filter, VALIDATE_INPUTS)
-    //        + validated_metadata (VALIDATE_INPUTS).
+    //        + validated_metadata (VALIDATE_INPUTS) + params_yml (for design.group_column).
     FILTER_PROTEINS.out.filter_table
         .join(VALIDATE_INPUTS.out.matrix)
         .join(VALIDATE_INPUTS.out.metadata)
+        .join(ch_input.missingness_params)
         .set { ch_missingness_input }
 
     MISSINGNESS_REPORT(ch_missingness_input)
@@ -158,10 +161,9 @@ workflow PROSIFT {
     QUERY_CTD(ch_db_ctd_input)
 
     // --- Module 02: Pre-normalization QC/EDA ---
-    // Joins: filtered_matrix (post-filter) + validated_metadata + id_mapping + params_yml
+    // Joins: filtered_matrix (post-filter) + validated_metadata + params_yml
     FILTER_PROTEINS.out.matrix
         .join(VALIDATE_INPUTS.out.metadata)
-        .join(UNIPROT_MAPPING.out.mapping_table)
         .join(ch_input.prenorm_params)
         .set { ch_prenorm_input }
 

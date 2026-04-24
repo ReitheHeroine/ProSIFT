@@ -4,11 +4,11 @@
 # author: Reina Hastings
 # contact: reinahastings13@gmail.com
 # date created: 2026-03-26
-# last modified: 2026-03-26
+# last modified: 2026-04-23
 #
 # purpose:
 #   Module 01, Process 4.4. Applies the per-run detection filter to the
-#   validated abundance matrix. Classifies each protein as PASSED,
+#   validated abundance matrix. Classifies each protein as PASSED, PARTIAL,
 #   SINGLE-GROUP, SPARSE, or ABSENT based on per-group detection counts,
 #   removes proteins with insufficient signal, and produces a missingness
 #   overview and detection filter summary for the validation report.
@@ -77,8 +77,16 @@ def load_params(params_path: str) -> dict:
 # ============================================================
 
 class Report:
-    def __init__(self, run_id: str):
+    '''Accumulates validation report lines; writes to file at the end.
+
+    If `report_path` is supplied, `error_exit` will flush the accumulated
+    lines to that path before raising SystemExit so the user gets a partial
+    report on failure.
+    '''
+
+    def __init__(self, run_id: str, report_path: str | None = None):
         self.run_id = run_id
+        self._report_path = report_path
         self._lines: list[str] = []
         self._warnings: list[str] = []
 
@@ -103,9 +111,23 @@ class Report:
         self._lines.append(f'  {text}')
 
     def error_exit(self, text: str) -> None:
+        '''Log the error to the report, flush it to disk, then exit non-zero.'''
         self._lines.append(f'  ERROR: {text}')
         self._lines.append('')
         self._lines.append('Validation failed. Pipeline stopped.')
+        # Flush partial report so the user has diagnostic context on failure.
+        if self._report_path is not None:
+            try:
+                parent = os.path.dirname(self._report_path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                self.write(self._report_path)
+            except OSError as exc:
+                print(
+                    f'WARNING: could not write partial report to '
+                    f'{self._report_path}: {exc}',
+                    file=sys.stderr,
+                )
         print(f'ERROR [{self.run_id}]: {text}', file=sys.stderr)
         raise SystemExit(1)
 
@@ -124,7 +146,7 @@ class Report:
 # ============================================================
 
 def get_abundance_cols(matrix: pd.DataFrame, id_col: str,
-                       abund_prefix: str, pep_prefix: str | None) -> list[str]:
+                       pep_prefix: str | None) -> list[str]:
     '''Return the abundance column names from the matrix.'''
     return [c for c in matrix.columns
             if c != id_col
@@ -302,7 +324,6 @@ def write_missingness_overview_block(
     total_values = n_proteins * n_samples
     abund = matrix.set_index(id_col)[abund_cols]
     total_missing = abund.isna().sum().sum()
-    total_detected = total_values - total_missing
 
     sample_to_group: dict[str, str] = dict(
         zip(metadata['sample_id'].astype(str),
@@ -357,7 +378,11 @@ def main() -> None:
     params = load_params(args.params)
     run_id = args.run_id
 
-    report = Report(run_id)
+    # Compute report path up front so Report can flush on error_exit.
+    report_path = os.path.join(
+        args.outdir, f'{run_id}.validation_report_part2.txt'
+    )
+    report = Report(run_id, report_path=report_path)
     report.line(f'ProSIFT Validation Report -- {run_id}')
     report.line(f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
     report.line(f'Part 2 of 2: Detection Filter (Process 4.4)')
@@ -375,7 +400,7 @@ def main() -> None:
     group_col: str = params['design']['group_column']
     min_detections: int = params['qc']['min_detections_per_group']
 
-    abund_cols = get_abundance_cols(matrix, id_col, abund_prefix, pep_prefix)
+    abund_cols = get_abundance_cols(matrix, id_col, pep_prefix)
     n_input = len(matrix)
 
     # --- Pre-filter missingness overview (captures state before any removal) ---
@@ -393,7 +418,10 @@ def main() -> None:
     write_detection_filter_block(report, status, min_detections, n_input)
 
     # --- Warnings and hard stops ---
-    n_retained = (status.isin(['PASSED', 'SINGLE-GROUP'])).sum()
+    # NOTE: PARTIAL is retained (one group passes + non-meeting groups have
+    # some non-zero detections); see Section 4.4 of the module spec.
+    retain_mask = status.isin(['PASSED', 'PARTIAL', 'SINGLE-GROUP'])
+    n_retained = int(retain_mask.sum())
     n_removed = n_input - n_retained
     pct_removed = n_removed / n_input * 100
 
@@ -411,7 +439,6 @@ def main() -> None:
         )
 
     # --- Filter matrix ---
-    retain_mask = status.isin(['PASSED', 'SINGLE-GROUP'])
     filtered_matrix = matrix[matrix[id_col].isin(status[retain_mask].index)].copy()
 
     # --- Build detection filter summary table ---
@@ -434,7 +461,6 @@ def main() -> None:
 
     matrix_path = os.path.join(args.outdir, f'{run_id}.filtered_matrix.parquet')
     table_path = os.path.join(args.outdir, f'{run_id}.detection_filter_table.csv')
-    report_path = os.path.join(args.outdir, f'{run_id}.validation_report_part2.txt')
 
     filtered_matrix.to_parquet(matrix_path, index=False)
     filter_table.to_csv(table_path, index=False)

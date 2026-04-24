@@ -344,7 +344,10 @@ def main() -> None:
     logging.info('min_score filter: %.2f (applied at output time)', min_score)
 
     # --- Ortholog gating ---
-    has_ortholog = mapping['ortholog_mapping_status'] != 'no_ortholog'
+    # Skip both confirmed 'no_ortholog' and 'ortholog_lookup_failed' (BioMart
+    # outage / schema drift); neither carries a usable human_ortholog_entrez.
+    skip_statuses = {'no_ortholog', 'ortholog_lookup_failed'}
+    has_ortholog = ~mapping['ortholog_mapping_status'].isin(skip_statuses)
     queryable = mapping[has_ortholog]
     skipped = mapping[~has_ortholog]
     logging.info('Queryable (have ortholog): %d, Skipped (no ortholog): %d',

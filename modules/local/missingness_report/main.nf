@@ -20,7 +20,7 @@ process MISSINGNESS_REPORT {
         mode: 'copy'
 
     input:
-    tuple val(meta), path(filter_table), path(validated_matrix), path(validated_metadata)
+    tuple val(meta), path(filter_table), path(validated_matrix), path(validated_metadata), path(params_yml)
 
     output:
     tuple val(meta), path("*.missingness_report.html"),   emit: report,   optional: true
@@ -32,6 +32,7 @@ process MISSINGNESS_REPORT {
         --filter-table ${filter_table} \\
         --matrix       ${validated_matrix} \\
         --metadata     ${validated_metadata} \\
+        --params       ${params_yml} \\
         --run-id       ${meta.run_id} \\
         --outdir       .
     """
