@@ -4,7 +4,8 @@ Title:         prenorm_qc.py
 Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 Author:        Reina Hastings (reinahastings13@gmail.com)
 Created:       2026-03-27
-Last Modified: 2026-04-06 (added: density plot; clustermap with dendrogram; denominator note)
+Last Modified: 2026-04-24 (audit remediation: prefix validation, zero-variance
+               guards, dropped unused --mapping argument, HTML alert cleanup)
 Purpose:       Module 02 pre-normalization QC/EDA. Computes per-sample intensity summaries,
                intensity distribution box plots, Q-Q plots, PCA, and sample-to-sample
                correlations on the post-filter, pre-normalization abundance data. Synthesizes
@@ -13,7 +14,6 @@ Purpose:       Module 02 pre-normalization QC/EDA. Computes per-sample intensity
 Inputs:
   --matrix    {run_id}.filtered_matrix.parquet  (Module 01 FILTER_PROTEINS)
   --metadata  {run_id}.validated_metadata.parquet  (Module 01 VALIDATE_INPUTS)
-  --mapping   {run_id}.id_mapping.parquet  (Module 01 UNIPROT_MAPPING)
   --params    {run_id}_params.yml
 Outputs:
   {run_id}.sample_summary.parquet/.csv
@@ -30,7 +30,6 @@ Outputs:
 Usage:
   prenorm_qc.py --matrix CTXcyto_WT_vs_CTXcyto_KO.filtered_matrix.parquet \
                 --metadata CTXcyto_WT_vs_CTXcyto_KO.validated_metadata.parquet \
-                --mapping CTXcyto_WT_vs_CTXcyto_KO.id_mapping.parquet \
                 --params CTXcyto_WT_vs_CTXcyto_KO_params.yml \
                 --run-id CTXcyto_WT_vs_CTXcyto_KO \
                 --outdir .
@@ -86,7 +85,6 @@ def parse_args() -> argparse.Namespace:
             "  prenorm_qc.py \\\n"
             "    --matrix run.filtered_matrix.parquet \\\n"
             "    --metadata run.validated_metadata.parquet \\\n"
-            "    --mapping run.id_mapping.parquet \\\n"
             "    --params run_params.yml \\\n"
             "    --run-id run \\\n"
             "    --outdir ."
@@ -94,7 +92,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--matrix",   required=True, help="Filtered abundance matrix (Parquet)")
     parser.add_argument("--metadata", required=True, help="Validated metadata (Parquet)")
-    parser.add_argument("--mapping",  required=True, help="ID mapping table (Parquet)")
     parser.add_argument("--params",   required=True, help="Run params.yml")
     parser.add_argument("--run-id",   required=True, dest="run_id",
                         help="Run identifier (used as output file prefix)")
@@ -148,8 +145,18 @@ def prepare_abundance(
     if not abund_cols:
         raise ValueError("No abundance columns found in filtered matrix.")
 
-    # Parse sample IDs by stripping the abundance prefix
+    # Parse sample IDs by stripping the abundance prefix.
+    # Validate prefix consistency before stripping. Without this check, a
+    # column that does not start with the prefix would be silently truncated
+    # by N characters, producing a malformed sample ID that fails downstream
+    # with an opaque "sample not in metadata" error. Fail loudly instead.
     if abundance_prefix:
+        non_prefixed = [c for c in abund_cols if not c.startswith(abundance_prefix)]
+        if non_prefixed:
+            raise ValueError(
+                f"Abundance columns do not all start with the configured "
+                f"abundance_prefix='{abundance_prefix}': {non_prefixed}"
+            )
         sample_ids = [c[len(abundance_prefix):] for c in abund_cols]
     else:
         sample_ids = list(abund_cols)
@@ -319,6 +326,14 @@ def plot_qq(
         values = log2_df[sid].dropna().values
         n = len(values)
         if n < 2:
+            continue
+        # Guard against zero-variance samples. Standardization would divide
+        # by zero and silently produce NaN, which Plotly drops from the plot
+        # without warning -- the sample would just disappear from the figure.
+        if values.std(ddof=1) == 0:
+            logging.warning(
+                f"plot_qq: skipping {sid} (zero variance, cannot standardize)"
+            )
             continue
 
         # Standardize and sort observed values
@@ -544,19 +559,17 @@ def generate_html_report(
     flags_table_html = display_flags.to_html(index=False, border=0, classes="data-table")
 
     # --- Flag alert section ---
+    # Note on the baseline: flag_low_correlation is a global argmin with no
+    # magnitude threshold, so exactly one sample is flagged on every
+    # non-empty run. An n_flags == 1 result is therefore the expected "clean"
+    # state, not evidence of a problem. See 02_qc_eda.Rmd Section 4.6.
     max_flags = int(flags_df["n_flags"].max()) if len(flags_df) > 0 else 0
     n_flagged_2plus = int((flags_df["n_flags"] >= 2).sum())
 
-    if max_flags == 0:
+    if max_flags <= 1:
         alert_class = "alert-ok"
         alert_text = (
-            "No samples flagged (n_flags = 0 for all samples). "
-            "Data quality appears consistent across samples."
-        )
-    elif max_flags == 1:
-        alert_class = "alert-ok"
-        alert_text = (
-            "All samples have at most 1 flag. No sample flagged on multiple "
+            "All samples have at most 1 flag. No sample is flagged on multiple "
             "independent criteria. This is consistent with normal replicate variation."
         )
     elif max_flags == 2:
@@ -567,13 +580,23 @@ def generate_html_report(
             "Worth reviewing, but 2 flags alone is not conclusive evidence of a quality problem."
         )
     else:
-        flagged = flags_df.loc[flags_df["n_flags"] >= 3, "sample_id"].tolist()
+        # max_flags >= 3: Strong concern samples, and also list any 2-flag
+        # samples in the same dataset (spec Section 4.6: 2 flags = "worth noting",
+        # 3+ flags = "strong concern"; both are reported when both are present).
+        flagged_3plus = flags_df.loc[flags_df["n_flags"] >= 3, "sample_id"].tolist()
+        flagged_2 = flags_df.loc[flags_df["n_flags"] == 2, "sample_id"].tolist()
         alert_class = "alert-concern"
-        alert_text = (
-            f"Strong concern: {', '.join(flagged)} flagged on {max_flags} independent criteria. "
-            "Recommend investigating this sample. Consider re-running the pipeline "
-            "without it to assess impact on downstream results."
-        )
+        parts = [
+            f"Strong concern: {', '.join(flagged_3plus)} flagged on {max_flags} "
+            "independent criteria. Recommend investigating and considering "
+            "re-running the pipeline without these samples to assess impact "
+            "on downstream results."
+        ]
+        if flagged_2:
+            parts.append(
+                f"Also worth reviewing: {', '.join(flagged_2)} flagged on 2 criteria."
+            )
+        alert_text = " ".join(parts)
 
     # --- Plot HTML divs (embed plotly.js once in the first plot) ---
     plot_order = [
@@ -764,7 +787,6 @@ def main() -> None:
     logging.info("Loading input files...")
     matrix_df  = pd.read_parquet(args.matrix)
     metadata_df = pd.read_parquet(args.metadata)
-    mapping_df  = pd.read_parquet(args.mapping)  # available for protein annotation if needed
 
     # --- Prepare abundance data ---
     logging.info("Preparing abundance data...")

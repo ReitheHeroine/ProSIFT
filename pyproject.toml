@@ -1,0 +1,124 @@
+# ============================================================================
+# ProSIFT -- pyproject.toml
+# ============================================================================
+# Project metadata and development tooling configuration.
+# ============================================================================
+
+[project]
+name = "prosift"
+version = "0.1.0"
+description = "PROtein Statistical Integration and Filtering Tool"
+requires-python = ">=3.10"
+# Runtime dependencies go here as the pipeline is built:
+# dependencies = [
+#     "pandas>=2.0",
+#     "numpy>=1.24",
+#     ...
+# ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.5.0",
+    "mypy>=1.10",
+    "pandas-stubs",
+    "types-requests",
+    "types-PyYAML",
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+
+# ---- pytest --------------------------------------------------------------
+# Runs: `pytest` from the project root.
+# Scoped: `pytest tests/test_specific.py` or `pytest -k "keyword"`.
+# Markers: `pytest -m "not slow"` to skip slow tests.
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+markers = [
+    "slow: tests that take more than a few seconds (deselect with '-m \"not slow\"')",
+    "regression: tests that compare output against a reference dataset",
+    "integration: tests that exercise multiple modules end-to-end",
+    "requires_network: tests that hit external APIs (UniProt, PubMed, etc.)",
+    "requires_r: tests that require R / rpy2 (DEqMS, limma)",
+]
+filterwarnings = [
+    # Default: warnings print but do not fail the test.
+    "default",
+    # Fail on warnings that usually indicate real bugs in our code:
+    #   RuntimeWarning -- numerical issues (div-by-zero, log of negative, overflow)
+    #   UserWarning    -- code that explicitly warns about misuse
+    "error::RuntimeWarning",
+    "error::UserWarning",
+]
+
+
+# ---- ruff (linter + formatter) -------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+    ".venv",
+    "build",
+    "dist",
+    "data",
+    "results",
+    "*.ipynb_checkpoints",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+    "B",
+    "UP",
+    "RUF",
+    "SIM",
+    "N",
+]
+ignore = [
+    "E501",
+    "N803",
+    "N806",
+    "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["F401", "F811"]
+"**/__init__.py" = ["F401"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["prosift"]
+
+
+# ---- mypy ----------------------------------------------------------------
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+exclude = [
+    "build/",
+    "dist/",
+    "tests/fixtures/",
+]

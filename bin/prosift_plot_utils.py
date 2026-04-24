@@ -4,12 +4,13 @@ Title:         prosift_plot_utils.py
 Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 Author:        Reina Hastings (reinahastings13@gmail.com)
 Created:       2026-03-27
-Last Modified: 2026-04-06 (clustermap with dendrogram replaces fixed-order heatmap)
+Last Modified: 2026-04-24 (docstring sync; dead import removed)
 Purpose:       Shared Plotly plotting utilities used by Module 02 (prenorm_qc.py)
                and Module 03 (normalize.py). Provides color palette helpers, a
-               save_plot dispatcher (PNG + HTML), and the three diagnostic plots
+               save_plot dispatcher (PNG + HTML), and the four diagnostic plots
                that appear in both pre- and post-normalization QC: intensity box
-               plots, PCA scatter, and sample-to-sample correlation heatmap.
+               plots, per-sample density plots, PCA scatter, and
+               sample-to-sample correlation heatmap.
 Inputs:        (library module -- imported, not invoked directly)
 Outputs:       (library module -- no output files)
 Usage:
@@ -28,7 +29,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import scipy.stats
 from plotly.subplots import make_subplots
-from scipy.cluster.hierarchy import average, dendrogram, leaves_list
+from scipy.cluster.hierarchy import average, dendrogram
 from scipy.spatial.distance import squareform
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
@@ -175,6 +176,15 @@ def plot_density(
 
         values = log2_df[sid].dropna().values
         if len(values) < 2:
+            continue
+        # Guard against zero-variance samples (constant values). gaussian_kde
+        # would raise LinAlgError on a singular covariance matrix. This is
+        # vanishingly unlikely with post-filter proteomics data but the guard
+        # is one line and makes the failure mode loud rather than confusing.
+        if values.std(ddof=1) == 0:
+            logging.warning(
+                f'plot_density: skipping {sid} (zero variance, cannot fit KDE)'
+            )
             continue
 
         # Step 1: Compute KDE using scipy gaussian_kde (Scott's rule bandwidth)

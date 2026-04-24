@@ -23,7 +23,6 @@ process PRENORM_QC {
     tuple val(meta),
           path(filtered_matrix),
           path(validated_metadata),
-          path(id_mapping),
           path(params_yml)
 
     output:
@@ -55,7 +54,6 @@ process PRENORM_QC {
     prenorm_qc.py \\
         --matrix   ${filtered_matrix} \\
         --metadata ${validated_metadata} \\
-        --mapping  ${id_mapping} \\
         --params   ${params_yml} \\
         --run-id   ${meta.run_id} \\
         --outdir   .
