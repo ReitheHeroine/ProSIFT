@@ -323,6 +323,37 @@ class TestFlagExtremeMedian:
         flags = compute_sample_flags(summary, pca, corr, _N_TOTAL_PROTEINS)
         assert not flags['flag_extreme_median'].any()
 
+    def test_tied_max_deviations_flag_all_tied_samples(self):
+        '''
+        After 2026-04-24 normalization, all samples tied at the max
+        within-group deviation flag (not just the first encountered).
+
+        Construction: 5-sample group A with median_intensity =
+        [15, 22, 22, 23, 15]. Within-group median = 22; deviations =
+        [7, 0, 0, 1, 7]. MAD = median([0, 0, 1, 7, 7]) = 1; threshold =
+        2. Max deviation = 7, attained by both A1 and A5, exceeds the
+        threshold; both flag. Previously argmax returned only A1.
+        '''
+        summary = _make_summary_df(
+            n_detected=[95, 95, 95, 95, 95, 95, 95, 95],
+            median_intensity=[15.0, 22.0, 22.0, 23.0, 15.0, 22.0, 22.0, 22.0],
+            sample_ids=['A1', 'A2', 'A3', 'A4', 'A5', 'B1', 'B2', 'B3'],
+            groups=['A', 'A', 'A', 'A', 'A', 'B', 'B', 'B'],
+        )
+        pca = _make_pca_df(
+            pc1=[-1.0] * 5 + [1.0] * 3,
+            pc2=[0.0] * 8,
+            sample_ids=['A1', 'A2', 'A3', 'A4', 'A5', 'B1', 'B2', 'B3'],
+            groups=['A', 'A', 'A', 'A', 'A', 'B', 'B', 'B'],
+        )
+        corr = _make_corr_df(
+            ['A1', 'A2', 'A3', 'A4', 'A5', 'B1', 'B2', 'B3'],
+            off_diagonal=0.98,
+        )
+        flags = compute_sample_flags(summary, pca, corr, _N_TOTAL_PROTEINS)
+        flagged = set(flags.loc[flags['flag_extreme_median'], 'sample_id'])
+        assert flagged == {'A1', 'A5'}
+
 
 # ============================================================
 # SECTION 4: FLAG_PCA_OUTLIER
@@ -374,6 +405,36 @@ class TestFlagPcaOutlier:
         flagged = set(flags.loc[flags['flag_pca_outlier'], 'sample_id'])
         assert flagged == {'A3', 'B3'}
 
+    def test_tied_max_distance_flags_all_tied_samples(self):
+        '''
+        After 2026-04-24 normalization, all samples tied at the maximum
+        Euclidean distance from the group centroid flag (not just the
+        first encountered).
+
+        Construction: 4-sample group A with PC1 = [3, -3, 0, 0], PC2 = 0.
+        Centroid = (0, 0); distances = [3, 3, 0, 0]. Median distance =
+        1.5, threshold = 1.5 * 1.5 = 2.25. Max distance = 3 > 2.25.
+        Both A1 and A2 are at the maximum and both flag. Previously
+        idxmax returned only A1.
+        '''
+        summary = _make_summary_df(
+            n_detected=[95] * 7,
+            sample_ids=['A1', 'A2', 'A3', 'A4', 'B1', 'B2', 'B3'],
+            groups=['A', 'A', 'A', 'A', 'B', 'B', 'B'],
+        )
+        pca = _make_pca_df(
+            pc1=[3.0, -3.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            pc2=[0.0] * 7,
+            sample_ids=['A1', 'A2', 'A3', 'A4', 'B1', 'B2', 'B3'],
+            groups=['A', 'A', 'A', 'A', 'B', 'B', 'B'],
+        )
+        corr = _make_corr_df(
+            ['A1', 'A2', 'A3', 'A4', 'B1', 'B2', 'B3'], off_diagonal=0.98,
+        )
+        flags = compute_sample_flags(summary, pca, corr, _N_TOTAL_PROTEINS)
+        flagged = set(flags.loc[flags['flag_pca_outlier'], 'sample_id'])
+        assert flagged == {'A1', 'A2'}
+
 
 # ============================================================
 # SECTION 5: FLAG_LOW_CORRELATION
@@ -405,17 +466,22 @@ class TestFlagLowCorrelation:
         flagged = flags.loc[flags['flag_low_correlation'], 'sample_id'].tolist()
         assert flagged == ['A3']
 
-    def test_fires_on_exactly_one_sample_in_clean_data(self):
+    def test_uniform_correlation_data_flags_all_samples(self):
         '''
         DESIGN NOTE: flag_low_correlation has no magnitude threshold; it picks
-        the global argmin. In a perfectly uniform correlation matrix, all
-        samples tie at 0.98; Python's min() with a tie returns the first. This
-        test pins that behavior so future refactors do not silently change it.
-        See /review-code audit 2026-04-23 Finding #3.
+        the global argmin. After the 2026-04-24 follow-up audit, tie handling
+        is equality-based: in a perfectly uniform correlation matrix where
+        all samples tie at the same mean within-group correlation (here
+        0.98), every sample is at the global minimum and every sample
+        flags. Each gets n_flags = 1, which the alert treats as the
+        no-concern baseline (max_flags <= 1 branch). Real proteomics
+        correlations almost never tie exactly, so this is a theoretical
+        edge case; pinned here to prevent silent reversion to "flag first
+        only" behavior.
         '''
         summary, pca, corr = _clean_inputs()
         flags = compute_sample_flags(summary, pca, corr, _N_TOTAL_PROTEINS)
-        assert flags['flag_low_correlation'].sum() == 1
+        assert flags['flag_low_correlation'].sum() == len(flags)
 
     def test_global_min_spans_across_groups(self):
         # B2 has the worst within-group correlation, beating A's minimum.
@@ -491,16 +557,16 @@ class TestEdgeCases:
         # will never be the global argmin when other groups have real peers.
         assert not lonely['flag_low_correlation']
 
-    def test_tied_lows_in_3_sample_group_block_low_detection_flag(self):
+    def test_tied_lows_in_3_sample_group_flag_all_tied_samples(self):
         '''
-        GOTCHA: With 3 samples in a group and two tied for lowest, the group
-        median collapses onto the tie (median of [95, 85, 85] = 85 = min), so
-        gap = 0 and flag_low_detection cannot fire. Two failed samples in the
-        same triplicate group are invisible to this flag.
-
-        This is a real blind spot for the default proteomics design (n=3) but
-        pinned here as current behavior. Raised in /review-code audit
-        2026-04-24 as a finding to discuss.
+        After the 2026-04-24 follow-up audit, flag_low_detection uses the
+        group MAX (not median) as its reference statistic. In a 3-sample
+        group with two tied lows (e.g., n_detected = [95, 85, 85]), the
+        gap is now max - min = 95 - 85 = 10, which exceeds the 2-protein
+        threshold (2% of n_total = 100). Both tied minima flag. The
+        previous median-based logic returned median = 85 = min, gap = 0,
+        and produced a silent miss (a real 2/3 failure rate would not be
+        flagged). Pinned here to lock in the fix.
         '''
         summary = _make_summary_df(
             n_detected=[95, 85, 85, 95, 95, 95],  # A2 and A3 tied at 85
@@ -509,21 +575,19 @@ class TestEdgeCases:
         )
         _, pca, corr = _clean_inputs()
         flags = compute_sample_flags(summary, pca, corr, _N_TOTAL_PROTEINS)
-        assert not flags['flag_low_detection'].any()
+        flagged = set(flags.loc[flags['flag_low_detection'], 'sample_id'])
+        assert flagged == {'A2', 'A3'}
 
     def test_tied_lows_in_4_sample_group_flag_all_tied_samples(self):
         '''
-        INCONSISTENCY with other flags: flag_low_detection uses equality
-        (n_detected == min_val), so ALL tied minima flag when the group is
-        large enough that the median does not collapse onto the tie. The
-        other three flags (extreme_median, pca_outlier, low_correlation)
-        use argmax / idxmax / min-with-key, which return only the first
-        tied sample. Pinned here as current behavior.
+        flag_low_detection flags all tied minima. After the 2026-04-24
+        follow-up audit, all four flags use equality-based tie handling, so
+        this is the consistent project-wide convention rather than a
+        flag-specific quirk.
 
-        Construction: 4-sample group A with medians [95, 95, 85, 85].
-        Group median = 90, min = 85, gap = 5 > threshold of 2.
-        Both A3 and A4 are at the minimum, so both should flag.
-        Raised in /review-code audit 2026-04-24 as a finding to discuss.
+        Construction: 4-sample group A with n_detected = [95, 95, 85, 85].
+        Group max = 95, min = 85, gap = 10 > threshold of 2. Both A3 and
+        A4 are at the minimum, so both flag.
         '''
         summary = _make_summary_df(
             n_detected=[95, 95, 85, 85, 95, 95, 95],
@@ -543,6 +607,42 @@ class TestEdgeCases:
         flags = compute_sample_flags(summary, pca, corr, _N_TOTAL_PROTEINS)
         flagged = set(flags.loc[flags['flag_low_detection'], 'sample_id'])
         assert flagged == {'A3', 'A4'}
+
+    def test_single_high_outlier_falsely_flags_remaining_samples(self):
+        '''
+        KNOWN LIMITATION (2026-04-24 follow-up): the max-based group-center
+        statistic in flag_low_detection trades the 3-sample tied-lows
+        blind spot for a different failure mode: a single sample with
+        anomalously HIGH detection makes the gap appear large for the
+        remaining "normal" samples.
+
+        Construction: 4-sample group A with n_detected = [200, 95, 95, 95].
+        Group max = 200, min = 95, gap = 105 > threshold of 2 (with
+        n_total = 100). All three tied 95s flag, even though
+        scientifically the 200 is the outlier and the 95s are the norm.
+        Pinned here as documented behavior; see spec Section 7. A
+        researcher reading the flag table sees an unusual pattern (three
+        identical n_detected, all flagged) and can investigate the
+        actual outlier (the 200). Loud false positive is preferred over
+        the silent miss the previous median-based logic produced.
+        '''
+        summary = _make_summary_df(
+            n_detected=[200, 95, 95, 95, 95, 95, 95],
+            sample_ids=['A1', 'A2', 'A3', 'A4', 'B1', 'B2', 'B3'],
+            groups=['A', 'A', 'A', 'A', 'B', 'B', 'B'],
+        )
+        pca = _make_pca_df(
+            pc1=[-1.0] * 4 + [1.0] * 3,
+            pc2=[0.0] * 7,
+            sample_ids=['A1', 'A2', 'A3', 'A4', 'B1', 'B2', 'B3'],
+            groups=['A', 'A', 'A', 'A', 'B', 'B', 'B'],
+        )
+        corr = _make_corr_df(
+            ['A1', 'A2', 'A3', 'A4', 'B1', 'B2', 'B3'], off_diagonal=0.98,
+        )
+        flags = compute_sample_flags(summary, pca, corr, _N_TOTAL_PROTEINS)
+        flagged = set(flags.loc[flags['flag_low_detection'], 'sample_id'])
+        assert flagged == {'A2', 'A3', 'A4'}
 
     def test_preserves_input_sample_order(self):
         '''

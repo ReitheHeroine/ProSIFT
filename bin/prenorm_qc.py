@@ -4,8 +4,10 @@ Title:         prenorm_qc.py
 Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 Author:        Reina Hastings (reinahastings13@gmail.com)
 Created:       2026-03-27
-Last Modified: 2026-04-24 (audit remediation: prefix validation, zero-variance
-               guards, dropped unused --mapping argument, HTML alert cleanup)
+Last Modified: 2026-04-24 (audit remediation; followed by audit follow-ups:
+               flag_low_detection switched from median to max group center to
+               eliminate the n=3 tied-lows blind spot; the other three flags
+               normalized to equality-based tie handling)
 Purpose:       Module 02 pre-normalization QC/EDA. Computes per-sample intensity summaries,
                intensity distribution box plots, Q-Q plots, PCA, and sample-to-sample
                correlations on the post-filter, pre-normalization abundance data. Synthesizes
@@ -424,13 +426,21 @@ def compute_sample_flags(
     flags = summary_df[["sample_id", "group"]].copy().reset_index(drop=True)
 
     # --- flag_low_detection ---
+    # Reference statistic is the group MAX (best-detecting sample), not the
+    # median. With n=3 and two samples tied as the lowest (e.g.,
+    # [95, 85, 85]), the median collapses onto the tied minimum, the gap
+    # becomes 0, and the flag silently misses a real 2/3 failure rate.
+    # Using max keeps the gap meaningful in that case. Tradeoff: a single
+    # anomalously-HIGH sample can pull the gap up and flag the remaining
+    # "normal" samples (see spec Section 7 known limitation). Loud false
+    # positive is preferred over silent miss for a QC diagnostic.
     detection_threshold = DETECTION_FLAG_PCT * n_total_proteins
     low_det: dict[str, bool] = {}
     for grp in summary_df["group"].unique():
         grp_df = summary_df[summary_df["group"] == grp]
-        group_median = grp_df["n_detected"].median()
+        group_max = grp_df["n_detected"].max()
         min_val = grp_df["n_detected"].min()
-        gap = group_median - min_val
+        gap = group_max - min_val
         for _, row in grp_df.iterrows():
             sid = row["sample_id"]
             is_minimum = row["n_detected"] == min_val
@@ -439,6 +449,10 @@ def compute_sample_flags(
     flags["flag_low_detection"] = flags["sample_id"].map(low_det)
 
     # --- flag_extreme_median ---
+    # Equality-based tie handling: any sample whose deviation equals the
+    # within-group max deviation is flagged, not just the first encountered.
+    # Consistent with the other three flags after the 2026-04-24 audit
+    # follow-up; previously argmax returned only the first tied index.
     extreme_med: dict[str, bool] = {}
     for grp in summary_df["group"].unique():
         grp_df = summary_df[summary_df["group"] == grp]
@@ -447,10 +461,9 @@ def compute_sample_flags(
         deviations = np.abs(grp_medians - med_of_meds)
         group_mad = float(np.median(deviations))
         max_dev = float(deviations.max())
-        max_dev_pos = int(deviations.argmax())
         for i, (_, row) in enumerate(grp_df.iterrows()):
             sid = row["sample_id"]
-            is_most_extreme = i == max_dev_pos
+            is_most_extreme = bool(deviations[i] == max_dev)
             flagged = bool(
                 is_most_extreme
                 and group_mad > 0
@@ -461,6 +474,9 @@ def compute_sample_flags(
     flags["flag_extreme_median"] = flags["sample_id"].map(extreme_med)
 
     # --- flag_pca_outlier ---
+    # Equality-based tie handling: any sample whose distance equals the
+    # within-group max distance flags. Previously idxmax returned the first
+    # tied index only.
     pca_flag: dict[str, bool] = {}
     for grp in pca_df["group"].unique():
         grp_pca = pca_df[pca_df["group"] == grp].copy()
@@ -472,10 +488,9 @@ def compute_sample_flags(
         )
         median_dist = float(distances.median())
         max_dist = float(distances.max())
-        max_dist_idx = distances.idxmax()
         for idx in grp_pca.index:
             sid = grp_pca.loc[idx, "sample_id"]
-            is_max = idx == max_dist_idx
+            is_max = bool(distances[idx] == max_dist)
             flagged = bool(
                 is_max
                 and median_dist > 0
@@ -486,7 +501,13 @@ def compute_sample_flags(
     flags["flag_pca_outlier"] = flags["sample_id"].map(pca_flag)
 
     # --- flag_low_correlation ---
-    # Mean Pearson correlation with own-group replicates (excluding self)
+    # Mean Pearson correlation with own-group replicates (excluding self).
+    # Equality-based tie handling: any sample whose mean correlation equals
+    # the global minimum flags. In perfectly uniform correlation data, all
+    # samples tie and all flag (each gets n_flags = 1, which the alert
+    # already treats as the no-concern baseline). Previously min(...,
+    # key=...) returned only the first tied sample, which was arbitrary
+    # since "first" depends on row order rather than any scientific property.
     within_group_corr: dict[str, float] = {}
     for _, row in summary_df.iterrows():
         sid = row["sample_id"]
@@ -500,9 +521,9 @@ def compute_sample_flags(
         within_group_corr[sid] = mean_corr
 
     if within_group_corr:
-        min_corr_sample = min(within_group_corr, key=within_group_corr.get)
+        min_corr = min(within_group_corr.values())
         corr_flag: dict[str, bool] = {
-            sid: sid == min_corr_sample for sid in flags["sample_id"]
+            sid: within_group_corr[sid] == min_corr for sid in flags["sample_id"]
         }
     else:
         corr_flag = {sid: False for sid in flags["sample_id"]}
