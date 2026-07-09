@@ -28,11 +28,9 @@ process QC_REPORT_ASSEMBLY {
           path(sample_flags),
           path(normalized_matrix),
           path(cv_summary),
-          path(normalization_summary),
           path(imputed_matrix),
           path(imputation_mask),
           path(imputation_summary),
-          path(imputation_summary_txt),
           path(params_yml),
           path(missingness_report),
           path(prenorm_qc_report)
@@ -50,11 +48,9 @@ process QC_REPORT_ASSEMBLY {
         --sample-flags      ${sample_flags} \\
         --norm-matrix       ${normalized_matrix} \\
         --cv-summary        ${cv_summary} \\
-        --norm-summary      ${normalization_summary} \\
         --imputed-matrix    ${imputed_matrix} \\
         --imp-mask          ${imputation_mask} \\
         --imp-summary       ${imputation_summary} \\
-        --imp-summary-txt   ${imputation_summary_txt} \\
         --params            ${params_yml} \\
         --run-id            ${meta.run_id} \\
         --outdir            . \\

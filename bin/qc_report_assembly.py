@@ -18,11 +18,9 @@ Inputs:
   --sample-flags     {run_id}.sample_flags.parquet        (Module 02)
   --norm-matrix      {run_id}.normalized_matrix.parquet   (Module 03 NORMALIZE)
   --cv-summary       {run_id}.cv_summary.parquet          (Module 03 NORMALIZE)
-  --norm-summary     {run_id}.normalization_summary.txt   (Module 03 NORMALIZE)
   --imputed-matrix   {run_id}.imputed_matrix.parquet      (Module 03 IMPUTE)
   --imp-mask         {run_id}.imputation_mask.parquet     (Module 03 IMPUTE)
   --imp-summary      {run_id}.imputation_summary.parquet  (Module 03 IMPUTE)
-  --imp-summary-txt  {run_id}.imputation_summary.txt      (Module 03 IMPUTE)
   --params           {run_id}_params.yml
 Outputs:
   {run_id}.qc_report.html
@@ -35,11 +33,9 @@ Usage:
       --sample-flags CTXcyto_WT_vs_CTXcyto_KO.sample_flags.parquet \
       --norm-matrix CTXcyto_WT_vs_CTXcyto_KO.normalized_matrix.parquet \
       --cv-summary CTXcyto_WT_vs_CTXcyto_KO.cv_summary.parquet \
-      --norm-summary CTXcyto_WT_vs_CTXcyto_KO.normalization_summary.txt \
       --imputed-matrix CTXcyto_WT_vs_CTXcyto_KO.imputed_matrix.parquet \
       --imp-mask CTXcyto_WT_vs_CTXcyto_KO.imputation_mask.parquet \
       --imp-summary CTXcyto_WT_vs_CTXcyto_KO.imputation_summary.parquet \
-      --imp-summary-txt CTXcyto_WT_vs_CTXcyto_KO.imputation_summary.txt \
       --params CTXcyto_WT_vs_CTXcyto_KO_params.yml \
       --run-id CTXcyto_WT_vs_CTXcyto_KO \
       --outdir .
@@ -86,11 +82,9 @@ def parse_args() -> argparse.Namespace:
             '    --sample-flags run.sample_flags.parquet \\\n'
             '    --norm-matrix run.normalized_matrix.parquet \\\n'
             '    --cv-summary run.cv_summary.parquet \\\n'
-            '    --norm-summary run.normalization_summary.txt \\\n'
             '    --imputed-matrix run.imputed_matrix.parquet \\\n'
             '    --imp-mask run.imputation_mask.parquet \\\n'
             '    --imp-summary run.imputation_summary.parquet \\\n'
-            '    --imp-summary-txt run.imputation_summary.txt \\\n'
             '    --params run_params.yml \\\n'
             '    --run-id run \\\n'
             '    --outdir .'
@@ -110,16 +104,12 @@ def parse_args() -> argparse.Namespace:
                         help='Normalized abundance matrix (Parquet)')
     parser.add_argument('--cv-summary', required=True, dest='cv_summary',
                         help='Per-protein CV summary (Parquet)')
-    parser.add_argument('--norm-summary', required=True, dest='norm_summary',
-                        help='Normalization summary text file')
     parser.add_argument('--imputed-matrix', required=True, dest='imputed_matrix',
                         help='Imputed abundance matrix (Parquet)')
     parser.add_argument('--imp-mask', required=True, dest='imp_mask',
                         help='Imputation mask (Parquet)')
     parser.add_argument('--imp-summary', required=True, dest='imp_summary',
                         help='Imputation summary table (Parquet)')
-    parser.add_argument('--imp-summary-txt', required=True, dest='imp_summary_txt',
-                        help='Imputation summary text file')
     parser.add_argument('--params', required=True,
                         help='Run params.yml')
     parser.add_argument('--run-id', required=True, dest='run_id',
@@ -183,9 +173,12 @@ def extract_abundance(
     df = matrix_df.set_index('protein_id')[abund_cols].copy()
     df.columns = sample_ids
 
-    # Convert to log2 scale if raw
+    # Convert to log2 scale if raw. Non-positive values (<= 0) are not valid raw
+    # intensities (VALIDATE_INPUTS removes them upstream); mask them to NaN here
+    # as a defensive backstop so log2 does not emit -Inf (for 0) or a NaN with a
+    # RuntimeWarning (for negatives).
     if abundance_type == 'raw':
-        df = np.log2(df.replace(0, np.nan))
+        df = np.log2(df.mask(df <= 0))
 
     return df, sample_ids
 
@@ -202,8 +195,6 @@ def build_run_overview(
     cv_summary_df: pd.DataFrame,
     imp_summary_df: pd.DataFrame,
     params: dict,
-    norm_summary_path: Path,
-    imp_summary_txt_path: Path,
 ) -> str:
     """Build HTML for Section 1: Run Overview."""
     group_col = params['design']['group_column']
@@ -238,7 +229,7 @@ def build_run_overview(
     n_total_imp = int(imp_summary_df['n_imputed_total'].sum())
     n_proteins_imputed = int((imp_summary_df['n_imputed_total'] > 0).sum())
 
-    # Parse method info from text files
+    # Method info (read from params, not from the upstream summary text files)
     norm_method = params.get('normalization', {}).get('method', 'unknown')
     imp_mode = params.get('imputation', {}).get('mode', 'unknown')
     imp_mnar = params.get('imputation', {}).get('mnar_method', 'minprob')
@@ -890,7 +881,6 @@ def main() -> None:
     section1_html = build_run_overview(
         run_id, metadata_df, filter_df, sample_flags_df,
         cv_summary_df, imp_summary_df, params,
-        Path(args.norm_summary), Path(args.imp_summary_txt),
     )
 
     # --- Section 2: Missingness ---
