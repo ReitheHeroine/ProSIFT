@@ -1,0 +1,53 @@
+protein_id,class,true_log2fc,missingness_class,expected_filter_status,notes
+BENCH00000,true_up,1.5,complete,PASSED,
+BENCH00001,true_up,1.5,complete,PASSED,
+BENCH00002,true_up,1.5,complete,PASSED,
+BENCH00003,true_up,1.5,complete,PASSED,
+BENCH00004,true_up,1.5,complete,PASSED,
+BENCH00005,true_up,1.5,complete,PASSED,
+BENCH00006,true_up,1.5,complete,PASSED,
+BENCH00007,true_up,1.5,complete,PASSED,
+BENCH00008,true_up,1.5,complete,PASSED,
+BENCH00009,true_up,1.5,complete,PASSED,
+BENCH00010,true_down,-1.5,complete,PASSED,
+BENCH00011,true_down,-1.5,complete,PASSED,
+BENCH00012,true_down,-1.5,complete,PASSED,
+BENCH00013,true_down,-1.5,complete,PASSED,
+BENCH00014,true_down,-1.5,complete,PASSED,
+BENCH00015,true_down,-1.5,complete,PASSED,
+BENCH00016,true_down,-1.5,complete,PASSED,
+BENCH00017,true_down,-1.5,complete,PASSED,
+BENCH00018,true_down,-1.5,complete,PASSED,
+BENCH00019,true_down,-1.5,complete,PASSED,
+BENCH00020,true_null,0.0,complete,PASSED,
+BENCH00021,true_null,0.0,complete,PASSED,
+BENCH00022,true_null,0.0,complete,PASSED,
+BENCH00023,true_null,0.0,complete,PASSED,
+BENCH00024,true_null,0.0,complete,PASSED,
+BENCH00025,true_null,0.0,complete,PASSED,
+BENCH00026,true_null,0.0,complete,PASSED,
+BENCH00027,true_null,0.0,complete,PASSED,
+BENCH00028,true_null,0.0,complete,PASSED,
+BENCH00029,true_null,0.0,complete,PASSED,
+BENCH00030,true_null,0.0,complete,PASSED,
+BENCH00031,true_null,0.0,complete,PASSED,
+BENCH00032,true_null,0.0,complete,PASSED,
+BENCH00033,true_null,0.0,complete,PASSED,
+BENCH00034,true_null,0.0,complete,PASSED,
+BENCH00035,true_null,0.0,complete,PASSED,
+BENCH00036,true_null,0.0,complete,PASSED,
+BENCH00037,true_null,0.0,complete,PASSED,
+BENCH00038,true_null,0.0,complete,PASSED,
+BENCH00039,true_null,0.0,complete,PASSED,
+BENCH00040,true_null,0.0,complete,PASSED,
+BENCH00041,true_null,0.0,complete,PASSED,
+BENCH00042,true_null,0.0,complete,PASSED,
+BENCH00043,true_null,0.0,complete,PASSED,
+EDGE_CONST,edge,0.0,complete,PASSED,zero within-group variance PRE-norm only; exercises prenorm zero-variance guards
+EDGE_MNAR_WT,edge,,mnar_absent_in_WT,SINGLE-GROUP,missing entirely in WT (0 detections); MNAR
+EDGE_MNAR_KO,edge,,mnar_absent_in_KO,SINGLE-GROUP,missing entirely in KO (0 detections); MNAR
+EDGE_PARTIAL,edge,,partial,PARTIAL,"KO=3 obs, WT=1 obs (non-zero, sub-threshold); exercises PARTIAL retention path"
+EDGE_MAR,edge,0.0,mar_random,PASSED,1 random dropout per group; 2 obs per group == min_detections boundary (PASSED)
+EDGE_ZERO,edge,0.0,contains_zero,PASSED,literal 0 in KO-1; validation converts to NaN (peptide zeroed); KO keeps 2 obs -> PASSED
+EDGE_NEG,edge,0.0,contains_negative,PASSED,negative in WT-2; validation converts <=0 to NaN -> WT=2 obs -> PASSED; exercises the <=0 path
+EDGE_LOWDET,edge,0.0,low_detection,SPARSE,1 obs per group (< min_detections=2); below threshold -> SPARSE (dropped)

@@ -163,13 +163,18 @@ def validate_matrix(
     abundance_path: str,
     params: dict,
     report: Report
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     '''
     Read and validate the abundance matrix.
 
-    Returns a DataFrame with the protein_id column plus all abundance and
-    peptide_count columns. The protein_id column contains the representative
-    accession (first token of semicolon-delimited groups).
+    Returns (matrix, nonpositive_mask):
+      matrix           -- DataFrame with the protein_id column plus all
+                          abundance and peptide_count columns. The protein_id
+                          column contains the representative accession (first
+                          token of semicolon-delimited groups).
+      nonpositive_mask -- boolean DataFrame (protein_id + one column per
+                          abundance column) marking cells that were <= 0 on raw
+                          data and converted to NaN. All-False for non-raw data.
 
     Raises SystemExit on any hard validation failure.
     '''
@@ -237,6 +242,25 @@ def validate_matrix(
     report.ok(f'{len(abund_cols)} abundance columns identified '
               f'(prefix: "{abund_prefix}")')
 
+    # --- Abundance type (required; must not be guessed) ---
+    # abundance_type governs the non-positive handling below: on 'raw' data a
+    # value <= 0 is not a valid intensity and is treated as missing, whereas on
+    # 'log2'/'normalized' data 0 is a legitimate value. Because that decision is
+    # destructive, the type must be declared explicitly -- no silent default.
+    abundance_type_raw = params['input'].get('abundance_type')
+    if abundance_type_raw is None:
+        report.error_exit(
+            'input.abundance_type is required (one of: raw, log2, normalized). '
+            'Set it explicitly in params.yml -- ProSIFT will not guess the '
+            'scale, because non-positive handling depends on it.'
+        )
+    abundance_type = str(abundance_type_raw).lower()
+    if abundance_type not in {'raw', 'log2', 'normalized'}:
+        report.error_exit(
+            f"Unknown input.abundance_type '{abundance_type_raw}'. "
+            f"Valid options: raw, log2, normalized."
+        )
+
     # --- Abundance columns: numeric or NA ---
     bad_abund: list[str] = []
     for col in abund_cols:
@@ -279,6 +303,61 @@ def validate_matrix(
         report.error_exit(
             f'{len(all_na_cols)} abundance column(s) are entirely NA: '
             f'{all_na_cols}. Remove or correct these columns before re-running.'
+        )
+
+    # --- Non-positive abundance handling (raw only) ---
+    # Policy decision (2026-07-08): on raw intensity data a value <= 0 means
+    # not-quantified (no valid peak area / below detection), so treat it as
+    # missing. Preserve zeros for log2/normalized where 0 is a legitimate value.
+    # We record a provenance mask so downstream imputation can treat these as
+    # MNAR (below-detection) rather than random dropout. Runs AFTER the empty
+    # checks above (which catch originally-blank rows/cols) so that emptiness
+    # CREATED by this conversion is handled separately below.
+    if abundance_type == 'raw':
+        # NaN <= 0 evaluates to False, so already-missing cells are not marked.
+        nonpos_mask_bool = df[abund_cols] <= 0
+        n_nonpos = int(nonpos_mask_bool.to_numpy().sum())
+        if n_nonpos > 0:
+            df[abund_cols] = df[abund_cols].mask(nonpos_mask_bool)
+            report.warn(
+                f'{n_nonpos} non-positive abundance value(s) (<= 0) on raw data '
+                f'converted to NaN (treated as below-detection / missing).'
+            )
+            # Per-column detail, capped so a wide matrix does not flood the report.
+            per_col = nonpos_mask_bool.sum()
+            affected = per_col[per_col > 0]
+            for col, n in affected.head(10).items():
+                report.info(f'  {int(n)} converted in "{col}"')
+            if len(affected) > 10:
+                report.info(f'  ... and {len(affected) - 10} more column(s)')
+
+            # Emptiness created by the conversion is handled asymmetrically:
+            #   sample column now fully NaN -> failed sample -> hard-stop
+            #   protein row now fully NaN   -> below detection everywhere ->
+            #                                  warn; detection filter drops it.
+            new_all_na_cols = [c for c in abund_cols if df[c].isna().all()]
+            if new_all_na_cols:
+                report.error_exit(
+                    f'{len(new_all_na_cols)} sample column(s) became entirely '
+                    f'NaN after non-positive conversion: {new_all_na_cols}. A '
+                    f'sample with no usable measurements cannot be analyzed; '
+                    f'investigate the run before proceeding.'
+                )
+            new_all_na_rows = int(df[abund_cols].isna().all(axis=1).sum())
+            if new_all_na_rows > 0:
+                report.warn(
+                    f'{new_all_na_rows} protein(s) became entirely NaN after '
+                    f'non-positive conversion; these will be dropped as ABSENT '
+                    f'at the detection filter.'
+                )
+        else:
+            report.ok('No non-positive abundance values on raw data.')
+    else:
+        # log2 / normalized: zeros are real values; nothing is converted.
+        nonpos_mask_bool = pd.DataFrame(False, index=df.index, columns=abund_cols)
+        report.info(
+            f'abundance_type={abundance_type}: zeros preserved as valid values '
+            f'(non-positive conversion applies to raw data only).'
         )
 
     # --- Minimum protein count ---
@@ -331,6 +410,26 @@ def validate_matrix(
             )
         df[pep_cols] = df[pep_cols].apply(pd.to_numeric, errors='coerce')
         report.ok('All peptide count columns are numeric or NA')
+
+        # Keep peptide counts consistent with the abundance conversion above:
+        # a cell whose abundance became NaN has, by the pipeline convention
+        # (DEqMS summarize_peptide_counts: count 0 <-> no detection), no
+        # supporting peptides. Zero those counts so the count-based variance
+        # weighting is not fed a peptide count for a value that no longer exists.
+        if nonpos_mask_bool.to_numpy().any():
+            n_pep_zeroed = 0
+            for abund_col in abund_cols:
+                sid = abund_col[len(abund_prefix):]
+                pep_col = f'{pep_prefix}{sid}'
+                if pep_col in df.columns:
+                    cells = nonpos_mask_bool[abund_col]
+                    n_pep_zeroed += int(cells.sum())
+                    df.loc[cells, pep_col] = 0
+            if n_pep_zeroed > 0:
+                report.info(
+                    f'{n_pep_zeroed} peptide count(s) set to 0 to match '
+                    f'non-positive abundance conversion.'
+                )
     else:
         report.info('No peptide_count_prefix specified -- DEqMS weighting '
                     'will not be available; falling back to limma.')
@@ -339,11 +438,18 @@ def validate_matrix(
     keep_cols = [id_col] + abund_cols + pep_cols
     df = df[keep_cols].copy()
 
+    # --- Build provenance mask (protein_id + one bool column per abundance
+    #     column, using the SAME prefixed names as the matrix so a consumer can
+    #     align by direct column intersection). Rows align with df; write_outputs
+    #     reindexes to the post-cross-validate matrix. ---
+    nonpositive_mask = nonpos_mask_bool.copy()
+    nonpositive_mask.insert(0, id_col, df[id_col].values)
+
     report.line()
     report.info(f'Matrix validation complete: {len(df)} proteins, '
                 f'{len(abund_cols)} abundance columns'
                 + (f', {len(pep_cols)} peptide count columns' if pep_cols else ''))
-    return df
+    return df, nonpositive_mask
 
 
 # ============================================================
@@ -535,6 +641,7 @@ def cross_validate(
 def write_outputs(
     matrix: pd.DataFrame,
     metadata: pd.DataFrame,
+    nonpositive_mask: pd.DataFrame,
     report: Report,
     run_id: str,
     outdir: str,
@@ -544,15 +651,32 @@ def write_outputs(
 
     matrix_path = os.path.join(outdir, f'{run_id}.validated_matrix.parquet')
     meta_path = os.path.join(outdir, f'{run_id}.validated_metadata.parquet')
+    mask_path = os.path.join(outdir, f'{run_id}.nonpositive_mask.parquet')
 
     matrix.to_parquet(matrix_path, index=False)
     metadata.to_parquet(meta_path, index=False)
+
+    # Align the mask to the final (post-cross-validate) matrix: keep only the
+    # proteins and abundance columns that survived, filling any gap with False.
+    # id_col is the mask's first column (inserted in validate_matrix).
+    id_col = nonpositive_mask.columns[0]
+    final_abund_cols = [c for c in nonpositive_mask.columns
+                        if c != id_col and c in matrix.columns]
+    mask_out = (
+        nonpositive_mask.set_index(id_col)
+        .reindex(index=matrix[id_col], columns=final_abund_cols)
+        .fillna(False)
+        .astype(bool)
+        .reset_index()
+    )
+    mask_out.to_parquet(mask_path, index=False)
 
     # finalise report header before writing
     report.write(report_path)
 
     print(f'  Validated matrix:   {matrix_path}')
     print(f'  Validated metadata: {meta_path}')
+    print(f'  Non-positive mask:  {mask_path}')
     print(f'  Validation report:  {report_path}')
 
 
@@ -580,7 +704,7 @@ def main() -> None:
     print(f'[{run_id}] Validating inputs...')
 
     # --- Process 4.1: Validate matrix ---
-    matrix = validate_matrix(args.abundance, params, report)
+    matrix, nonpositive_mask = validate_matrix(args.abundance, params, report)
 
     # --- Process 4.2: Validate metadata ---
     metadata = validate_metadata(args.metadata, params, report)
@@ -598,7 +722,8 @@ def main() -> None:
     report.info('Status: PASSED -- proceed to detection filter (Part 2)')
 
     # --- Write outputs ---
-    write_outputs(matrix, metadata, report, run_id, args.outdir, report_path)
+    write_outputs(matrix, metadata, nonpositive_mask, report, run_id,
+                  args.outdir, report_path)
     print(f'[{run_id}] Validation complete. '
           f'{report.warning_count} warning(s). '
           f'{matrix.shape[0]} proteins, {metadata.shape[0]} samples.')

@@ -158,18 +158,23 @@ def apply_log2(
     warnings: list[str],
 ) -> pd.DataFrame:
     """
-    Apply log2(x) transformation. Zeros are converted to NaN with a warning
-    (the filtered matrix should not contain zeros, but we catch them defensively).
+    Apply log2(x) transformation. Non-positive values are converted to NaN with
+    a warning. Non-positive raw values are removed upstream at validation
+    (Module 01); reaching this branch means validation was bypassed, so we
+    convert defensively rather than emit -Inf (for 0) or NaN-with-RuntimeWarning
+    (for negatives).
     """
-    n_zeros = int((raw_df == 0).sum(skipna=True).sum())
-    if n_zeros > 0:
+    nonpos = raw_df <= 0
+    n_nonpos = int(nonpos.to_numpy().sum())
+    if n_nonpos > 0:
         msg = (
-            f"Found {n_zeros} zero value(s) in the abundance matrix. "
-            "Zeros converted to NaN before log2 transformation."
+            f"Found {n_nonpos} non-positive value(s) in the abundance matrix "
+            "(expected none after Module 01 validation). "
+            "Converted to NaN before log2 transformation."
         )
         logging.warning(msg)
         warnings.append(msg)
-        raw_df = raw_df.replace(0, np.nan)
+        raw_df = raw_df.mask(nonpos)
 
     return np.log2(raw_df)
 

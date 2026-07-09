@@ -24,6 +24,7 @@ process VALIDATE_INPUTS {
     output:
     tuple val(meta), path('*.validated_matrix.parquet'),    emit: matrix
     tuple val(meta), path('*.validated_metadata.parquet'),  emit: metadata
+    tuple val(meta), path('*.nonpositive_mask.parquet'),    emit: nonpositive_mask
     tuple val(meta), path('*.validation_report_part1.txt'), emit: report
 
     script:
@@ -40,6 +41,7 @@ process VALIDATE_INPUTS {
     """
     touch ${meta.run_id}.validated_matrix.parquet
     touch ${meta.run_id}.validated_metadata.parquet
+    touch ${meta.run_id}.nonpositive_mask.parquet
     touch ${meta.run_id}.validation_report_part1.txt
     """
 

@@ -126,10 +126,11 @@ def prepare_abundance(
     """
     Identify abundance columns, parse sample IDs, and build raw and log2 DataFrames.
 
-    The log2 working copy uses log2(x+1) when abundance_type is 'raw', and the
-    data as-is when it is already 'log2' or 'normalized'. The log2(x+1) shift
-    handles any zero values without producing -Inf, though the filtered matrix
-    should not contain true zeros.
+    The log2 working copy uses log2(x) when abundance_type is 'raw', and the
+    data as-is when it is already 'log2' or 'normalized'. Non-positive raw
+    values are converted to NaN upstream at validation (Module 01), so no
+    pseudocount is needed; plain log2(x) keeps this QC transform consistent
+    with the NORMALIZE process (which also uses log2(x)).
 
     Returns:
         raw_df   -- raw abundance values; index=protein_id, columns=sample_ids
@@ -167,15 +168,18 @@ def prepare_abundance(
     raw_df = matrix_df.set_index("protein_id")[abund_cols].copy()
     raw_df.columns = sample_ids
 
-    # Validate non-negative values before log2 transformation
+    # Non-positive raw values are removed at validation (Module 01), so by the
+    # time data reaches QC there should be none. Guard defensively: a <= 0 value
+    # here means validation was bypassed, and log2(x) would yield -Inf.
     if abundance_type == "raw":
         min_val = float(raw_df.min(skipna=True).min())
-        if min_val < 0:
+        if min_val <= 0:
             raise ValueError(
-                f"Negative abundance values found (min={min_val:.4f}) with "
-                "abundance_type='raw'. Cannot apply log2 transformation."
+                f"Non-positive abundance value(s) found (min={min_val:.4f}) with "
+                "abundance_type='raw'. These should be converted to NaN at "
+                "validation (Module 01); re-run VALIDATE_INPUTS on this input."
             )
-        log2_df = np.log2(raw_df + 1)
+        log2_df = np.log2(raw_df)
     else:
         log2_df = raw_df.copy()
 
