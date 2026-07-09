@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+# title: test_differential_abundance_r.py
+# project: ProSIFT (PROtein Statistical Integration and Filtering Tool)
+# author: Reina Hastings
+# contact: reinahastings13@gmail.com
+# date created: 2026-07-09
+# last modified: 2026-07-09
+#
+# purpose:
+#   CLUSTER integration test for Module 04's R statistical fit
+#   (_run_one_contrast_r: limma + DEqMS via rpy2). This exercises the real fit
+#   end to end on synthetic data with known spiked proteins, checking scientific
+#   correctness (fold-change direction, signal detection) rather than exact
+#   numbers.
+#
+#   WHERE THIS RUNS: only where rpy2 + an embedded R with limma and DEqMS are
+#   installed (the anthill cluster). On a dev machine without a working R,
+#   importing rpy2.robjects starts embedded R and SEGFAULTS -- which a normal
+#   `pytest.importorskip` cannot survive because the crash is native, not a
+#   Python exception. So this module PROBES importability in a SUBPROCESS (a
+#   segfault there cannot take down pytest) and skips the whole module if the
+#   probe fails. It is marked @pytest.mark.requires_r as well.
+#
+#   NOT VERIFIED ON THE DEV MACHINE. It was written to mirror main()'s exact
+#   call convention (differential_abundance.main); first real execution is on
+#   the cluster. If it fails there, that is the test doing its job -- inspect
+#   the fit, do not silence it.
+#
+# inputs:
+#   None (synthetic, seeded, in-memory).
+#
+# outputs:
+#   Test results (stdout via pytest). Skips entirely without rpy2 + R + limma + DEqMS.
+#
+# usage example (on the cluster, inside the prosift env):
+#   pytest tests/test_differential_abundance_r.py -v
+#
+#   copy/paste: pytest tests/test_differential_abundance_r.py -v
+
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+# ============================================================
+# Module-level gate: probe R availability in a subprocess
+# ============================================================
+
+def _r_stack_available() -> bool:
+    '''
+    True only if rpy2 + embedded R + limma + DEqMS all import cleanly. Run in a
+    SUBPROCESS so that a native crash (embedded-R segfault on a misconfigured
+    machine) cannot take down the pytest process -- we just get a nonzero return
+    code and skip.
+    '''
+    probe = (
+        'import rpy2.robjects; '
+        'from rpy2.robjects.packages import importr; '
+        'importr("limma"); importr("DEqMS")'
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, '-c', probe],
+            capture_output=True, timeout=180,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+if not _r_stack_available():
+    pytest.skip(
+        'rpy2 + R + limma + DEqMS not available (embedded R not importable); '
+        'this is a cluster-only integration test.',
+        allow_module_level=True,
+    )
+
+# Safe to import now: the probe confirmed embedded R starts without crashing.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'bin'))
+
+from differential_abundance import (  # noqa: E402
+    _run_one_contrast_r,
+    assemble_results,
+)
+
+pytestmark = pytest.mark.requires_r
+
+
+# ============================================================
+# Synthetic dataset with known spikes
+# ============================================================
+
+_SAMPLES = ['WT-1', 'WT-2', 'WT-3', 'KO-1', 'KO-2', 'KO-3']
+_GROUPS = ['WT', 'WT', 'WT', 'KO', 'KO', 'KO']
+_UNIQUE_GROUPS = sorted(set(_GROUPS))          # ['KO', 'WT'], matching main()
+
+_N_UP, _N_DOWN, _N_NULL = 10, 10, 30
+_SPIKE = 2.0                                    # |log2 FC| for spiked proteins
+_NOISE = 0.3                                    # within-group SD (log2)
+
+
+def _up_ids():
+    return [f'UP{i:02d}' for i in range(_N_UP)]
+
+
+def _down_ids():
+    return [f'DN{i:02d}' for i in range(_N_DOWN)]
+
+
+def _null_ids():
+    return [f'NULL{i:02d}' for i in range(_N_NULL)]
+
+
+def _synthetic_fit_inputs():
+    '''
+    Build a complete (no-NaN) log2 abundance matrix with spiked proteins, plus a
+    per-protein peptide-count Series, exactly as main() would hand them to
+    _run_one_contrast_r. Deterministic (seeded).
+      UP*   : higher in KO (log2 FC = +2)  -> logFC(KO - WT) > 0
+      DN*   : lower in KO  (log2 FC = -2)  -> logFC(KO - WT) < 0
+      NULL* : no genotype effect
+    '''
+    rng = np.random.default_rng(0)
+    protein_ids = _up_ids() + _down_ids() + _null_ids()
+
+    rows = []
+    for pid in protein_ids:
+        base = rng.uniform(18.0, 24.0)
+        fc = _SPIKE if pid.startswith('UP') else (-_SPIKE if pid.startswith('DN') else 0.0)
+        wt = base + rng.normal(0.0, _NOISE, size=3)
+        ko = base + fc + rng.normal(0.0, _NOISE, size=3)
+        rows.append(list(wt) + list(ko))
+
+    abund = pd.DataFrame(
+        rows, index=pd.Index(protein_ids, name='protein_id'), columns=_SAMPLES,
+    )
+    # Spread of peptide counts so DEqMS can fit its count-variance trend.
+    pep_counts = pd.Series(
+        rng.integers(2, 15, size=len(protein_ids)).astype('int64'),
+        index=abund.index, name='n_peptides',
+    )
+    return abund, pep_counts
+
+
+def _params(fdr=0.05, fc=1.0):
+    return {'differential_abundance': {'significance': {'fdr_threshold': fdr,
+                                                        'fc_threshold': fc}}}
+
+
+def _id_mapping(protein_ids):
+    return pd.DataFrame({'protein_id': protein_ids,
+                         'gene_symbol': [f'G_{p}' for p in protein_ids]})
+
+
+# ============================================================
+# Tests
+# ============================================================
+
+class TestDEqMSFit:
+
+    def test_deqms_runs_and_recovers_direction(self):
+        '''
+        DEqMS fit for KO - WT: method label, expected columns, and -- the key
+        scientific check -- fold-change SIGN matches the spike for every spiked
+        protein (deterministic: |FC|=2 >> noise 0.3).
+        '''
+        abund, pep_counts = _synthetic_fit_inputs()
+        raw, method = _run_one_contrast_r(
+            abund, _GROUPS, _UNIQUE_GROUPS, pep_counts, 'KO - WT', use_deqms=True,
+        )
+        assert method == 'DEqMS'
+        assert len(raw) == len(abund)
+        assert {'protein_id', 'logFC', 'sca.adj.pval', 'count'}.issubset(raw.columns)
+
+        raw_idx = raw.set_index('protein_id')
+        assert (raw_idx.loc[_up_ids(), 'logFC'] > 0).all()
+        assert (raw_idx.loc[_down_ids(), 'logFC'] < 0).all()
+
+    def test_deqms_separates_signal_from_null(self):
+        '''Spiked proteins have much smaller DEqMS adjusted p-values than nulls.'''
+        abund, pep_counts = _synthetic_fit_inputs()
+        raw, _ = _run_one_contrast_r(
+            abund, _GROUPS, _UNIQUE_GROUPS, pep_counts, 'KO - WT', use_deqms=True,
+        )
+        raw_idx = raw.set_index('protein_id')
+        spiked = _up_ids() + _down_ids()
+        spiked_med = raw_idx.loc[spiked, 'sca.adj.pval'].median()
+        null_med = raw_idx.loc[_null_ids(), 'sca.adj.pval'].median()
+        assert spiked_med < 0.05
+        assert spiked_med < null_med
+
+    def test_full_pipeline_calls_spiked_significant(self):
+        '''
+        Through assemble_results: spiked proteins are called significant with the
+        correct direction; null proteins are mostly not significant. Generous
+        margins (this cannot be tuned locally).
+        '''
+        abund, pep_counts = _synthetic_fit_inputs()
+        raw, method = _run_one_contrast_r(
+            abund, _GROUPS, _UNIQUE_GROUPS, pep_counts, 'KO - WT', use_deqms=True,
+        )
+        result = assemble_results(
+            raw, _id_mapping(abund.index.tolist()), _params(), method, 'KO_vs_WT',
+        ).set_index('protein_id')
+
+        # Every spiked protein called significant with the right direction.
+        assert (result.loc[_up_ids(), 'significant']).all()
+        assert (result.loc[_up_ids(), 'direction'] == 'up').all()
+        assert (result.loc[_down_ids(), 'significant']).all()
+        assert (result.loc[_down_ids(), 'direction'] == 'down').all()
+
+        # Nulls: allow a few false positives, but they must not dominate.
+        n_null_sig = int(result.loc[_null_ids(), 'significant'].sum())
+        assert n_null_sig <= max(2, int(0.15 * _N_NULL))
+
+
+class TestLimmaOnlyFit:
+
+    def test_limma_only_runs_and_recovers_direction(self):
+        '''limma-only path (use_deqms=False, pep_counts=None): no DEqMS columns,
+        correct fold-change direction.'''
+        abund, _ = _synthetic_fit_inputs()
+        raw, method = _run_one_contrast_r(
+            abund, _GROUPS, _UNIQUE_GROUPS, None, 'KO - WT', use_deqms=False,
+        )
+        assert method == 'limma'
+        assert 'sca.adj.pval' not in raw.columns          # no DEqMS output
+        assert {'protein_id', 'logFC', 'adj.P.Val'}.issubset(raw.columns)
+
+        raw_idx = raw.set_index('protein_id')
+        assert (raw_idx.loc[_up_ids(), 'logFC'] > 0).all()
+        assert (raw_idx.loc[_down_ids(), 'logFC'] < 0).all()
