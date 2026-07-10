@@ -33,6 +33,9 @@ include { QUERY_DISGENET         } from '../modules/local/query_disgenet/main'
 include { QUERY_DGIDB            } from '../modules/local/query_dgidb/main'
 include { QUERY_CTD              } from '../modules/local/query_ctd/main'
 
+// Module 07: Results Assembly (SQLite convergence point)
+include { RESULTS_ASSEMBLY       } from '../modules/local/results_assembly/main'
+
 workflow PROSIFT {
 
     // --- Build per-run input channel from samplesheet ---
@@ -86,6 +89,8 @@ workflow PROSIFT {
             db_disgenet_params: [ meta, params_yml ]
             db_dgidb_params:    [ meta, params_yml ]
             db_ctd_params:      [ meta, params_yml ]
+            // assembly_params: params_yml for the RESULTS_ASSEMBLY join (Module 07)
+            assembly_params:    [ meta, params_yml ]
         }
         .set { ch_input }
 
@@ -210,5 +215,29 @@ workflow PROSIFT {
         .set { ch_enrich_input }
 
     ENRICHMENT(ch_enrich_input)
+
+    // --- Module 07: Results Assembly (SQLite convergence point) ---
+    // Collects the analytical spine (Modules 01-05) and the database query
+    // layer (Module 06) into a single per-run input, keyed by meta [run_id].
+    // All upstream outputs are broadcast channels, so join() barriers here
+    // until every producing process has completed for this run. The join order
+    // matches the RESULTS_ASSEMBLY process input tuple exactly.
+    UNIPROT_MAPPING.out.mapping_table
+        .join(FILTER_PROTEINS.out.filter_table)
+        .join(PRENORM_QC.out.sample_flags)
+        .join(IMPUTE.out.imputed_matrix)
+        .join(IMPUTE.out.imputation_mask)
+        .join(DIFFERENTIAL_ABUNDANCE.out.results_table)
+        .join(ENRICHMENT.out.enrichment_results)
+        .join(ENRICHMENT.out.protein_term_mapping)
+        .join(QUERY_UNIPROT.out.uniprot_annotations)
+        .join(QUERY_PUBMED.out.pubmed_cooccurrence)
+        .join(QUERY_DISGENET.out.disgenet_associations)
+        .join(QUERY_DGIDB.out.dgidb_interactions)
+        .join(QUERY_CTD.out.ctd_interactions)
+        .join(ch_input.assembly_params)
+        .set { ch_assembly_input }
+
+    RESULTS_ASSEMBLY(ch_assembly_input)
 
 }
