@@ -32,7 +32,7 @@ process UNIPROT_MAPPING {
         --matrix   ${filtered_matrix} \\
         --params   ${params_yml} \\
         --run_id   ${meta.run_id} \\
-        --cachedir ${cachedir} \\
+        --cachedir "${cachedir}" \\
         --outdir   .
     """
 

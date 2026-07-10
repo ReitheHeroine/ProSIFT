@@ -26,12 +26,15 @@ process ENRICHMENT {
     tuple val(meta), path("*.enrichment_results.csv"),          emit: enrichment_results_csv
     tuple val(meta), path("*.protein_term_mapping.parquet"),    emit: protein_term_mapping
     tuple val(meta), path("*.enrichment_summary.txt"),          emit: summary_txt
-    // Plots: one pair per contrast per library (glob matches all combinations)
-    tuple val(meta), path("*.ora_lollipop.png"),                emit: ora_lollipop_png
-    tuple val(meta), path("*.ora_lollipop.html"),               emit: ora_lollipop_html
-    tuple val(meta), path("*.gsea_lollipop.png"),               emit: gsea_lollipop_png
-    tuple val(meta), path("*.gsea_lollipop.html"),              emit: gsea_lollipop_html
-    tuple val(meta), path("*.gsea_running_score.*.png"),        emit: gsea_running_score_png
+    // Plots: one pair per contrast per library (glob matches all combinations).
+    // optional: true -- a run may legitimately have zero significant ORA or
+    // GSEA terms, in which case that plot type is not produced. Marking these
+    // required would fail the whole run on an empty-but-valid result.
+    tuple val(meta), path("*.ora_lollipop.png"),         emit: ora_lollipop_png,       optional: true
+    tuple val(meta), path("*.ora_lollipop.html"),        emit: ora_lollipop_html,      optional: true
+    tuple val(meta), path("*.gsea_lollipop.png"),        emit: gsea_lollipop_png,      optional: true
+    tuple val(meta), path("*.gsea_lollipop.html"),       emit: gsea_lollipop_html,     optional: true
+    tuple val(meta), path("*.gsea_running_score.*.png"), emit: gsea_running_score_png, optional: true
 
     script:
     """
