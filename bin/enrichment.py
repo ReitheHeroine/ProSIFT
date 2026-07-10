@@ -44,15 +44,12 @@ import pandas as pd
 import plotly.graph_objects as go
 import yaml
 
-# --- Optional rpy2 for rrvgo GO-term redundancy reduction (Section 4.13) ---
-try:
-    import rpy2.robjects as ro
-    from rpy2.robjects import pandas2ri
-    from rpy2.robjects.conversion import localconverter
-    from rpy2.robjects.packages import importr
-    _HAVE_RPY2 = True
-except ImportError:
-    _HAVE_RPY2 = False
+# rpy2 (embedded R, for rrvgo GO-term redundancy reduction, Section 4.13) is
+# imported lazily inside cluster_go_terms, NOT at module top. Importing
+# rpy2.robjects starts embedded R, which segfaults where R is not linked -- an
+# uncatchable native crash that would make this module un-importable for the
+# pure-Python tests, --help, or CI. Lazy loading keeps the module import
+# side-effect-free; the R stack is only touched when clustering is actually run.
 
 # ============================================================
 # ARGUMENT PARSING
@@ -231,7 +228,7 @@ def prepare_gene_symbols(
 # GSEA RANKING METRIC
 # ============================================================
 
-def build_ranked_series(df: pd.DataFrame, ranking: str, pval_col: str) -> pd.Series:
+def build_ranked_series(df: pd.DataFrame, ranking: str) -> pd.Series:
     """
     Build the gene-symbol-indexed ranked Series for gseapy.prerank().
 
@@ -1005,7 +1002,15 @@ def cluster_go_terms(
         logging.info('No GO-family libraries in results; skipping redundancy reduction.')
         return out
 
-    if not _HAVE_RPY2:
+    # --- Import rpy2 lazily (see module header) ---
+    # Deferred to call time so that merely importing this module never starts
+    # embedded R. rpy2 objects (ro, importr, ...) are local to this function.
+    try:
+        import rpy2.robjects as ro
+        from rpy2.robjects import pandas2ri
+        from rpy2.robjects.conversion import localconverter
+        from rpy2.robjects.packages import importr
+    except ImportError:
         logging.warning(
             'rpy2 not available; GO term redundancy reduction skipped. '
             'cluster_id, is_representative, parent_term will be null for all terms.'
@@ -1262,7 +1267,6 @@ def main() -> None:
         ranked_series = build_ranked_series(
             contrast_df,
             ranking=enr["gsea_ranking"],
-            pval_col=stats["pval_col"],
         )
 
         for gmt_path, lib_name in zip(gmt_paths, library_names):

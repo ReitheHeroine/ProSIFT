@@ -43,14 +43,11 @@ import pandas as pd
 import plotly.graph_objects as go
 import yaml
 
-try:
-    import rpy2.robjects as ro
-    from rpy2.robjects import pandas2ri
-    from rpy2.robjects.conversion import localconverter
-    from rpy2.robjects.packages import importr
-    _HAVE_RPY2 = True
-except ImportError:
-    _HAVE_RPY2 = False
+# rpy2 (embedded R) is imported lazily inside _run_one_contrast_r, NOT at module
+# top. Importing rpy2.robjects starts embedded R, which segfaults where R is not
+# linked -- an uncatchable native crash that would make this module un-importable
+# for the pure-Python tests, --help, or CI. Lazy loading keeps the module import
+# side-effect-free; the R stack is only touched when a fit is actually run.
 
 from prosift_plot_utils import save_plot
 
@@ -309,11 +306,19 @@ def _run_one_contrast_r(
                   (plus sca.t, sca.P.Value, sca.adj.pval, count if DEqMS).
     method_used : "DEqMS" or "limma".
     """
-    if not _HAVE_RPY2:
+    # --- Import rpy2 lazily (see module header) ---
+    # Deferred to call time so that merely importing this module never starts
+    # embedded R. rpy2 objects (ro, importr, ...) are local to this function.
+    try:
+        import rpy2.robjects as ro
+        from rpy2.robjects import pandas2ri
+        from rpy2.robjects.conversion import localconverter
+        from rpy2.robjects.packages import importr
+    except ImportError as exc:
         raise RuntimeError(
             "rpy2 is not installed. Cannot run statistical analysis. "
             "Install rpy2 and ensure R (with limma and DEqMS) is accessible."
-        )
+        ) from exc
 
     # --- Load R packages (fail fast with informative message) ---
     try:

@@ -24,10 +24,10 @@
 #   needed) and check the calls exactly.
 #
 #   Not tested here: the plot_* Plotly functions, write_summary_txt, main, and
-#   the R fit (_run_one_contrast_r / limma+DEqMS). NOTE: importing this module
-#   starts embedded R via rpy2, which segfaults where R is not linked; the test
-#   neutralizes that import (see below), so the R fit must be validated by a
-#   cluster integration run, not this unit file.
+#   the R fit (_run_one_contrast_r / limma+DEqMS). The R fit is validated by a
+#   cluster integration run (test_differential_abundance_r.py), not this unit
+#   file. rpy2 is loaded lazily inside _run_one_contrast_r, so importing the
+#   module here is side-effect-free (no embedded R started).
 #
 # inputs:
 #   None (tests build inputs in-memory).
@@ -47,33 +47,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
-# Add bin/ to path.
+# Add bin/ to path. differential_abundance imports cleanly (rpy2 is loaded
+# lazily inside _run_one_contrast_r), so no import-time workaround is needed;
+# the pure functions tested here never touch R.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'bin'))
 
-# differential_abundance imports rpy2.robjects at module load, which starts an
-# embedded R. Where R is not properly linked (e.g. a dev laptop with a broken
-# rpy2/R), that import SEGFAULTS -- and the module's `except ImportError` guard
-# cannot catch a native crash. Neutralize the rpy2 import so the module loads
-# with _HAVE_RPY2=False (the pure functions under test do not use rpy2), then
-# restore sys.modules so other test files are unaffected. The real limma/DEqMS
-# fit is exercised by cluster integration runs, not this unit file.
-_RPY2_SENTINEL = object()
-_rpy2_saved = sys.modules.get('rpy2', _RPY2_SENTINEL)
-sys.modules['rpy2'] = None
-try:
-    from differential_abundance import (
-        assemble_results,
-        build_group_map,
-        extract_abundance_and_peptide_cols,
-        parse_and_validate_contrasts,
-        summarize_peptide_counts,
-    )
-finally:
-    if _rpy2_saved is _RPY2_SENTINEL:
-        sys.modules.pop('rpy2', None)
-    else:
-        sys.modules['rpy2'] = _rpy2_saved
-
+from differential_abundance import (
+    assemble_results,
+    build_group_map,
+    extract_abundance_and_peptide_cols,
+    parse_and_validate_contrasts,
+    summarize_peptide_counts,
+)
 
 # ============================================================
 # SHARED HELPERS
