@@ -55,3 +55,6 @@ CLAUDE.md
 # Project documentation (private)
 project_documentation/
 "SLURM and Anthill User Guide/"
+
+# Module 08 frontend local dev database (large; rebuilt from Module 07)
+frontend/.devdata/

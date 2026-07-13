@@ -9,9 +9,9 @@
 # purpose:
 #   Unit and integration tests for Module 07 (bin/results_assembly.py). Unit
 #   tests pin the pure builder/derivation functions (imputation_fraction,
-#   qc_flag_count, params flattening, table reshaping). The integration test
+#   params flattening, table reshaping). The integration test
 #   runs the full CLI against synthetic inputs and asserts on the assembled
-#   SQLite database: 12 tables, row counts, primary keys, foreign-key
+#   SQLite database: 13 tables, row counts, primary keys, foreign-key
 #   integrity, derived-column values, and the disabled-database empty-table
 #   case.
 #
@@ -54,10 +54,10 @@ def _mask_frame():
     '''
     Imputation mask (wide). Designed cells per protein:
       P1 observed everywhere            -> imp_frac 0.0
-      P2 observed only in unflagged     -> imp_frac 0.5, qc 0
+      P2 observed only in unflagged     -> imp_frac 0.5
       P3 observed incl. one flagged     -> imp_frac 0.5
       P4 SINGLE-GROUP (KO only observed)-> imp_frac 0.5
-      P5 all imputed                    -> imp_frac 1.0, qc 0
+      P5 all imputed                    -> imp_frac 1.0
     Sample flag layout (see _flags_frame): S_WT-1 fires extreme_median,
     S_KO-1 fires pca_outlier. So the two flag types are on different samples.
     '''
@@ -72,6 +72,13 @@ def _mask_frame():
     return pd.DataFrame(rows)
 
 
+# The four sample-level QC flag columns produced by Module 02 PRENORM_QC.
+_FLAG_COLS = [
+    'flag_low_detection', 'flag_extreme_median',
+    'flag_pca_outlier', 'flag_low_correlation',
+]
+
+
 def _flags_frame():
     df = pd.DataFrame({
         'sample_id': SAMPLES,
@@ -81,7 +88,7 @@ def _flags_frame():
         'flag_pca_outlier':     [False, False, True,  False],   # S_KO-1
         'flag_low_correlation': [False, False, False, False],
     })
-    df['n_flags'] = df[ra.FLAG_TYPES].sum(axis=1).astype('int64')
+    df['n_flags'] = df[_FLAG_COLS].sum(axis=1).astype('int64')
     return df
 
 
@@ -324,29 +331,6 @@ def test_imputation_fraction_values():
     assert frac['P5'] == pytest.approx(1.0)
 
 
-def test_qc_flag_count_union_of_observed_samples():
-    qc = ra.derive_qc_flag_count(_mask_frame(), _flags_frame())
-    # P1 observed in all 4 samples -> union {extreme_median (S_WT-1),
-    # pca_outlier (S_KO-1)} = 2.
-    assert qc['P1'] == 2
-    # P2 observed only in S_WT-2 and S_KO-2 (both unflagged) -> 0.
-    assert qc['P2'] == 0
-    # P5 all imputed -> 0.
-    assert qc['P5'] == 0
-
-
-def test_qc_flag_count_all_imputed_is_zero():
-    # A protein with no observed cell must score 0, not go missing.
-    mask = pd.DataFrame({'protein_id': ['X'], 'S_WT-1': ['mar'], 'S_KO-1': ['mnar']})
-    flags = pd.DataFrame({
-        'sample_id': ['S_WT-1', 'S_KO-1'], 'group': ['WT', 'KO'],
-        'flag_low_detection': [True, True], 'flag_extreme_median': [False, False],
-        'flag_pca_outlier': [False, False], 'flag_low_correlation': [False, False],
-    })
-    qc = ra.derive_qc_flag_count(mask, flags)
-    assert qc['X'] == 0
-
-
 # ============================================================
 # Section 2: Params flattening unit tests
 # ============================================================
@@ -386,7 +370,7 @@ def test_build_proteins_columns_and_detection_join():
     assert list(proteins.columns) == [
         'protein_id', 'gene_symbol', 'entrez_id_mouse', 'ensembl_gene_mouse',
         'human_ortholog_symbol', 'human_ortholog_entrez', 'ortholog_mapping_status',
-        'detection_category', 'qc_flag_count', 'imputation_fraction',
+        'detection_category', 'imputation_fraction',
     ]
     # gene_symbol_mouse was renamed; P4 is SINGLE-GROUP in the detection table.
     p4 = proteins[proteins['protein_id'] == 'P4'].iloc[0]
@@ -414,7 +398,7 @@ def test_build_sample_abundances_shape_and_group():
 # ============================================================
 
 EXPECTED_TABLES = {
-    'proteins', 'differential_abundance', 'sample_abundances',
+    'proteins', 'differential_abundance', 'sample_abundances', 'sample_qc_flags',
     'enrichment_results', 'protein_term_mapping',
     'uniprot_annotations', 'pubmed_cooccurrence', 'disease_associations',
     'drug_interactions', 'chemical_interactions',
@@ -422,14 +406,14 @@ EXPECTED_TABLES = {
 }
 
 
-def test_all_twelve_tables_created(assembled_db):
+def test_all_thirteen_tables_created(assembled_db):
     db_path, _ = assembled_db
     conn = sqlite3.connect(db_path)
     tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     conn.close()
     assert tables >= EXPECTED_TABLES
-    assert len(EXPECTED_TABLES) == 12
+    assert len(EXPECTED_TABLES) == 13
 
 
 def test_row_counts(assembled_db):
@@ -476,13 +460,30 @@ def test_fk_integrity_clean(assembled_db):
 def test_derived_columns_in_db(assembled_db):
     db_path, _ = assembled_db
     conn = sqlite3.connect(db_path)
-    df = pd.read_sql('SELECT protein_id, qc_flag_count, imputation_fraction '
+    df = pd.read_sql('SELECT protein_id, imputation_fraction '
                      'FROM proteins', conn).set_index('protein_id')
     conn.close()
-    assert df.loc['P1', 'qc_flag_count'] == 2
-    assert df.loc['P2', 'qc_flag_count'] == 0
+    # qc_flag_count was dropped (2026-07-13); QC flags now live in the
+    # sample_qc_flags table and are surfaced per-protein by the Module 08 card.
+    assert 'qc_flag_count' not in df.columns
     assert df.loc['P1', 'imputation_fraction'] == pytest.approx(0.0)
     assert df.loc['P5', 'imputation_fraction'] == pytest.approx(1.0)
+
+
+def test_sample_qc_flags_table(assembled_db):
+    db_path, _ = assembled_db
+    conn = sqlite3.connect(db_path)
+    # One row per sample, keyed by sample_id, carrying group + the four flags.
+    df = pd.read_sql('SELECT * FROM sample_qc_flags', conn).set_index('sample_id')
+    pk = [r[1] for r in conn.execute('PRAGMA table_info("sample_qc_flags")') if r[5] > 0]
+    conn.close()
+    assert pk == ['sample_id']
+    assert len(df) == 4                                   # 4 synthetic samples
+    for col in _FLAG_COLS + ['group', 'n_flags']:
+        assert col in df.columns
+    # S_WT-1 fires extreme_median; S_KO-1 fires pca_outlier (see _flags_frame).
+    assert bool(df.loc['S_WT-1', 'flag_extreme_median']) is True
+    assert bool(df.loc['S_KO-1', 'flag_pca_outlier']) is True
 
 
 def test_run_metadata_content(assembled_db):

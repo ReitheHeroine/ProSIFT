@@ -4,11 +4,11 @@ Title:         results_assembly.py
 Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 Author:        Reina Hastings (reinahastings13@gmail.com)
 Created:       2026-07-10
-Last Modified: 2026-07-10
+Last Modified: 2026-07-13
 Purpose:       Module 07 Results Assembly. The convergence point of the pipeline.
                Reads the Parquet/CSV outputs of the analytical spine (Modules
                01-05) and the database query layer (Module 06), assembles them
-               into a single SQLite database (12 tables), and writes CSV exports
+               into a single SQLite database (13 tables), and writes CSV exports
                plus a human-readable assembly summary. This is a pure ETL step:
                no statistics, no API calls, only type coercion and reshaping.
 Inputs:
@@ -27,7 +27,7 @@ Inputs:
   --ctd                   {run_id}.ctd_interactions.parquet       (Module 06 QUERY_CTD)
   --params                {run_id}_params.yml                     (pipeline configuration)
 Outputs (all under --outdir):
-  prosift_results.db                        SQLite database, 12 tables
+  prosift_results.db                        SQLite database, 13 tables
   {run_id}.diff_abundance_results.csv       Full differential abundance results
   {run_id}.enrichment_results.csv           Full enrichment results
   {run_id}.significant_proteins.csv         Proteins significant in >= 1 contrast
@@ -79,15 +79,6 @@ log = logging.getLogger('results_assembly')
 # ============================================================
 # CONSTANTS
 # ============================================================
-
-# The four sample-level QC flag columns produced by Module 02 PRENORM_QC.
-# Used to derive the per-protein qc_flag_count (see build_proteins).
-FLAG_TYPES = [
-    'flag_low_detection',
-    'flag_extreme_median',
-    'flag_pca_outlier',
-    'flag_low_correlation',
-]
 
 # Prefix on the per-sample abundance columns of the imputed matrix. The bare
 # sample_id is recovered by stripping this prefix.
@@ -279,59 +270,16 @@ def derive_imputation_fraction(mask: pd.DataFrame) -> pd.Series:
     return pd.Series(frac.values, index=mask['protein_id'].values, name='imputation_fraction')
 
 
-def derive_qc_flag_count(mask: pd.DataFrame, flags: pd.DataFrame) -> pd.Series:
-    '''
-    Per-protein count of distinct sample-level QC flag types.
-
-    The Module 02 QC flags are sample-level (flag_low_detection,
-    flag_extreme_median, flag_pca_outlier, flag_low_correlation), not
-    protein-level. This function projects them onto proteins: for a given
-    protein, it is the number of distinct flag types that fired on any sample
-    in which the protein was OBSERVED (non-imputed). A protein observed only in
-    unflagged samples scores 0; a protein observed in samples flagged for both
-    PCA and correlation scores 2.
-
-    Rationale: a protein whose real (non-imputed) signal depends on a
-    QC-suspect sample inherits that concern; imputed cells contribute no
-    observed signal from that sample and so are excluded. This matches the
-    Module 08 protein view intent ('QC flag count, with flag names if nonzero').
-    See Module 07 spec Section 4.3 and Design Decision 2026-07-10.
-
-    Indexed by protein_id (every protein in the mask, filled with 0).
-    '''
-    # Step 1: map each sample to the set of flag types that fired on it.
-    sample_flag_sets: dict = {}
-    for row in flags.itertuples(index=False):
-        fired = {ft for ft in FLAG_TYPES if bool(getattr(row, ft))}
-        sample_flag_sets[row.sample_id] = fired
-
-    # Step 2: melt the mask to long form and keep only observed cells.
-    mask_long = mask.melt(id_vars='protein_id', var_name='sample_id',
-                          value_name='status')
-    observed = mask_long[mask_long['status'] == 'observed']
-
-    # Step 3: for each protein, union the flag-type sets of its observed samples.
-    def _union_size(sample_ids) -> int:
-        acc: set = set()
-        for sid in sample_ids:
-            acc |= sample_flag_sets.get(sid, set())
-        return len(acc)
-
-    counts = observed.groupby('protein_id')['sample_id'].apply(_union_size)
-
-    # Step 4: reindex to every protein in the mask (all-imputed proteins -> 0).
-    counts = counts.reindex(mask['protein_id'].values, fill_value=0)
-    counts.name = 'qc_flag_count'
-    return counts.astype('int64')
-
-
 def build_proteins(data: dict) -> pd.DataFrame:
     '''
     Build the contrast-independent proteins table.
 
     Identity and ortholog columns come from the Module 01 mapping table;
     detection_category is left-joined from the Module 01 detection filter table;
-    qc_flag_count and imputation_fraction are derived (Section 4.3).
+    imputation_fraction is derived (Section 4.3). Sample-level QC flags are NOT
+    projected onto proteins here -- they are loaded verbatim as the
+    sample_qc_flags table (Section 4.3) and surfaced per-protein by the Module 08
+    profile card, which joins a protein's observed samples against that table.
     '''
     mapping = data['mapping']
     detection = data['detection']
@@ -348,17 +296,15 @@ def build_proteins(data: dict) -> pd.DataFrame:
         columns={'filter_status': 'detection_category'})
     proteins = proteins.merge(det, on='protein_id', how='left')
 
-    # Step 3: derived per-protein columns.
-    qc = derive_qc_flag_count(data['mask'], data['flags'])
+    # Step 3: derived per-protein column.
     frac = derive_imputation_fraction(data['mask'])
-    proteins['qc_flag_count'] = proteins['protein_id'].map(qc).astype('Int64')
     proteins['imputation_fraction'] = proteins['protein_id'].map(frac).astype('float64')
 
     # Step 4: fixed column order (matches spec Section 4.2).
     return cast(pd.DataFrame, proteins[[
         'protein_id', 'gene_symbol', 'entrez_id_mouse', 'ensembl_gene_mouse',
         'human_ortholog_symbol', 'human_ortholog_entrez', 'ortholog_mapping_status',
-        'detection_category', 'qc_flag_count', 'imputation_fraction',
+        'detection_category', 'imputation_fraction',
     ]])
 
 
@@ -596,7 +542,7 @@ def main() -> int:
     run_metadata = build_run_metadata(data, args, n_proteins, n_samples)
     run_parameters = build_run_parameters(data)
 
-    # --- 3. Create the database and load all 12 tables ---
+    # --- 3. Create the database and load all 13 tables ---
     log.info('Writing SQLite database: %s', db_path)
     if db_path.exists():
         db_path.unlink()
@@ -611,6 +557,13 @@ def main() -> int:
         row_counts['sample_abundances'] = create_and_load(
             conn, 'sample_abundances', sample_abundances,
             pk=['protein_id', 'sample_id'])
+        # Sample QC dimension: the Module 02 sample_flags table verbatim
+        # (one row per sample: group + the four boolean flags + n_flags). The
+        # Module 08 profile card joins a protein's observed samples against this
+        # to list the specific flags fired, and why, rather than a per-protein
+        # count (Section 4.3; supersedes the 2026-07-10 qc_flag_count decision).
+        row_counts['sample_qc_flags'] = create_and_load(
+            conn, 'sample_qc_flags', data['flags'], pk=['sample_id'])
         # Enrichment tables (pass-through)
         row_counts['enrichment_results'] = create_and_load(
             conn, 'enrichment_results', data['enrichment'])
