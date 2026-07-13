@@ -4,24 +4,29 @@ Title:         differential_abundance.py
 Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
 Author:        Reina Hastings (reinahastings13@gmail.com)
 Created:       2026-03-30
-Last Modified: 2026-03-30
+Last Modified: 2026-07-13
 Purpose:       Module 04 DIFFERENTIAL_ABUNDANCE process. Parses and validates
                contrasts from params.yml, fits a linear model per protein using
-               limma empirical Bayes via rpy2, applies DEqMS peptide-count-aware
-               variance correction, and produces a per-protein results table (14
-               columns), a plain-text summary, and volcano / MA diagnostic plots
-               (static PNG + interactive HTML) for each contrast.
+               limma empirical Bayes (trend=TRUE) via rpy2, applies DEqMS
+               peptide-count-aware variance correction, and produces a per-protein
+               results table (14 columns), a plain-text summary, and volcano / MA
+               diagnostic plots (static PNG + interactive HTML) for each contrast.
+               Supports optional mean-shift sample quarantine with dual
+               (primary/sensitivity) reporting (Section 4.9 of the module spec).
 Inputs:
   --matrix       {run_id}.imputed_matrix.parquet    (Module 03 IMPUTE)
   --metadata     {run_id}.validated_metadata.parquet (Module 01 VALIDATE_INPUTS)
   --id-mapping   {run_id}.id_mapping.parquet         (Module 01 UNIPROT_MAPPING)
   --params       {run_id}_params.yml
 Outputs:
-  {run_id}.diff_abundance_results.parquet
+  {run_id}.diff_abundance_results.parquet          (PRIMARY; consumed downstream)
   {run_id}.diff_abundance_results.csv
+  {run_id}.diff_abundance_results.sensitivity.*    (only when quarantine active)
   {run_id}.diff_abundance_summary.txt
-  {run_id}.{contrast}.volcano_plot.png/.html  (one pair per contrast)
-  {run_id}.{contrast}.ma_plot.png/.html       (one pair per contrast)
+  {run_id}.analysis_provenance.txt                 (always; records quarantine decision)
+  {run_id}.{contrast}.volcano_plot.png/.html  (one pair per contrast; primary)
+  {run_id}.{contrast}.ma_plot.png/.html       (one pair per contrast; primary)
+  {run_id}.{contrast}.{volcano,ma}_plot.sensitivity.*  (only when quarantine active)
 Usage:
   differential_abundance.py \
     --matrix     CTXcyto_WT_vs_CTXcyto_KO.imputed_matrix.parquet \
@@ -246,6 +251,163 @@ def parse_and_validate_contrasts(
 
 
 # ============================================================
+# SAMPLE QUARANTINE (mean-shift indicator) VALIDATION + PROVENANCE
+# ============================================================
+
+def normalize_quarantine_samples(raw: object) -> list[str]:
+    """
+    Coerce the params value to a de-duplicated, order-preserving list of
+    sample-id strings.
+
+    Accepts None (-> []), a bare string (-> single-element list, so a YAML
+    scalar like `quarantine_samples: HIPcyto_WT-3` does not explode into
+    characters), or a list/tuple. Any other type is a configuration error.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(
+            "differential_abundance.quarantine_samples must be a list of sample "
+            f"IDs (or a single string), got {type(raw).__name__}."
+        )
+    # dict.fromkeys preserves first-seen order while removing duplicates, which
+    # would otherwise create collinear indicator columns in the design matrix.
+    return list(dict.fromkeys(str(s) for s in raw))
+
+
+def parse_bool_param(value: object, default: bool = False) -> bool:
+    """
+    Parse a boolean parameter robustly. Guards against a quoted YAML scalar
+    (e.g. `robust_ebayes: "false"`) becoming a truthy non-empty string.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "on", "1")
+    return bool(value)
+
+
+def validate_quarantine(
+    quarantine_samples: list[str],
+    primary_analysis: str,
+    sample_ids: list[str],
+    group_map: dict[str, str],
+    contrasts: list[tuple[str, str, str, str]],
+    min_samples_per_group: int,
+) -> None:
+    """
+    Validate the mean-shift quarantine parameters (module spec Section 4.9).
+
+    Raises ValueError on: bad primary_analysis value; quarantine id not present
+    in the run; primary_analysis='quarantined' with no quarantined samples; or a
+    contrast group left with fewer than min_samples_per_group after quarantine.
+    """
+    # 1) primary_analysis must be a recognized value
+    if primary_analysis not in ("full", "quarantined"):
+        raise ValueError(
+            f"differential_abundance.primary_analysis must be 'full' or "
+            f"'quarantined', got '{primary_analysis}'."
+        )
+
+    # 2) every quarantined id must exist among this run's samples
+    unknown = [s for s in quarantine_samples if s not in set(sample_ids)]
+    if unknown:
+        raise ValueError(
+            f"quarantine_samples not found in this run's samples: {unknown}. "
+            f"Available: {sample_ids}"
+        )
+
+    # 3) 'quarantined' primary requires something to quarantine
+    if primary_analysis == "quarantined" and not quarantine_samples:
+        raise ValueError(
+            "primary_analysis='quarantined' requires a non-empty "
+            "quarantine_samples list."
+        )
+
+    # 4) each contrast group must retain enough samples after quarantine
+    if quarantine_samples:
+        qset = set(quarantine_samples)
+        for contrast_user, numerator, denominator, _ in contrasts:
+            for grp in (numerator, denominator):
+                remaining = [
+                    s for s in sample_ids
+                    if group_map.get(s) == grp and s not in qset
+                ]
+                if len(remaining) < min_samples_per_group:
+                    raise ValueError(
+                        f"Contrast '{contrast_user}': group '{grp}' has "
+                        f"{len(remaining)} sample(s) after quarantine "
+                        f"(minimum {min_samples_per_group}). Cannot quarantine a "
+                        f"group below estimability."
+                    )
+
+
+def write_provenance(
+    run_id: str,
+    outdir: Path,
+    quarantine_samples: list[str],
+    primary_key: str,
+    sample_ids: list[str],
+    groups: list[str],
+    method_used: str,
+    robust_ebayes: bool,
+) -> None:
+    """
+    Always-written analysis provenance record (module spec Section 4.9). Records
+    the quarantine decision so the exclusion travels with the results even when
+    no sample is quarantined ('no samples quarantined').
+    """
+    now  = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    qset = set(quarantine_samples)
+
+    def _counts(exclude: set) -> str:
+        counts: dict[str, int] = {}
+        for s, g in zip(sample_ids, groups):
+            if s not in exclude:
+                counts[g] = counts.get(g, 0) + 1
+        return ", ".join(f"{g}={counts[g]}" for g in sorted(counts))
+
+    lines = [
+        "========================================",
+        "ANALYSIS PROVENANCE",
+        "========================================",
+        "",
+        f"Run:                 {run_id}",
+        f"Date:                {now}",
+        f"Method:              {method_used}  "
+        f"(eBayes trend=TRUE, robust={'TRUE' if robust_ebayes else 'FALSE'})",
+        "",
+    ]
+    if quarantine_samples:
+        lines += [
+            f"Quarantined samples: {', '.join(quarantine_samples)}",
+            f"Primary analysis:    {primary_key}",
+            "Method note:         mean-shift indicator (per-sample 0/1 design "
+            "column); equivalent to case-deletion for the contrast (She & Owen 2011).",
+            "",
+            "n per group:",
+            f"  full:              {_counts(set())}",
+            f"  quarantined:       {_counts(qset)}",
+        ]
+    else:
+        lines += [
+            "Quarantined samples: none",
+            "Primary analysis:    full (single analysis)",
+            "",
+            "n per group:",
+            f"  full:              {_counts(set())}",
+        ]
+
+    path = outdir / f"{run_id}.analysis_provenance.txt"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    logging.info(f"  Saved: {path.name}")
+
+
+# ============================================================
 # PEPTIDE COUNT SUMMARIZATION
 # ============================================================
 
@@ -282,7 +444,9 @@ def _run_one_contrast_r(
     pep_counts: "pd.Series | None",
     r_contrast_str: str,
     use_deqms: bool,
-) -> tuple[pd.DataFrame, str]:
+    quarantine_ids: list[str],
+    robust_ebayes: bool,
+) -> tuple[dict[str, pd.DataFrame], str]:
     """
     Run limma + DEqMS (or limma only) for one contrast via rpy2.
 
@@ -299,9 +463,13 @@ def _run_one_contrast_r(
     r_contrast_str: R-side contrast expression, e.g. "KO - WT".
     use_deqms     : True to run spectraCounteBayes after eBayes.
 
+    quarantine_ids: bare sample_ids to model out via a mean-shift indicator (Q2).
+    robust_ebayes : pass robust=TRUE to eBayes (protein-level; default False).
+
     Returns
     -------
-    raw_df      : DataFrame with protein_id and raw R column names.
+    results     : dict mapping analysis name -> raw R-column DataFrame. Always has
+                  key "full"; also "quarantined" when quarantine_ids is non-empty.
                   Columns: protein_id, logFC, AveExpr, t, P.Value, adj.P.Val, B
                   (plus sca.t, sca.P.Value, sca.adj.pval, count if DEqMS).
     method_used : "DEqMS" or "limma".
@@ -333,19 +501,34 @@ def _run_one_contrast_r(
 
     n_proteins = len(abund_df)
     n_samples  = len(abund_df.columns)
+    run_deqms  = bool(use_deqms and pep_counts is not None)
 
     # --- Pass data to R global environment ---
     # Flatten in row-major (C) order; R matrix built with byrow=TRUE below.
     mat_flat = abund_df.values.astype(float).flatten(order="C")
 
-    ro.globalenv["prosift_mat_values"]    = ro.FloatVector(mat_flat.tolist())
-    ro.globalenv["prosift_protein_ids"]   = ro.StrVector(abund_df.index.tolist())
-    ro.globalenv["prosift_sample_ids"]    = ro.StrVector(list(abund_df.columns))
-    ro.globalenv["prosift_groups"]        = ro.StrVector(groups)
-    ro.globalenv["prosift_unique_groups"] = ro.StrVector(unique_groups)
-    ro.globalenv["prosift_contrast_str"]  = ro.StrVector([r_contrast_str])
+    ro.globalenv["prosift_mat_values"]     = ro.FloatVector(mat_flat.tolist())
+    ro.globalenv["prosift_protein_ids"]    = ro.StrVector(abund_df.index.tolist())
+    ro.globalenv["prosift_sample_ids"]     = ro.StrVector(list(abund_df.columns))
+    ro.globalenv["prosift_groups"]         = ro.StrVector(groups)
+    ro.globalenv["prosift_unique_groups"]  = ro.StrVector(unique_groups)
+    ro.globalenv["prosift_contrast_str"]   = ro.StrVector([r_contrast_str])
+    ro.globalenv["prosift_use_deqms"]      = ro.BoolVector([run_deqms])
+    ro.globalenv["prosift_robust"]         = ro.BoolVector([bool(robust_ebayes)])
+    ro.globalenv["prosift_quarantine_ids"] = ro.StrVector(list(quarantine_ids))
 
-    # --- Build design matrix and fit linear model ---
+    # Peptide counts (DEqMS path only), aligned to protein order
+    if run_deqms:
+        pep_aligned = pep_counts.reindex(abund_df.index).fillna(1).astype(int)
+        ro.globalenv["prosift_pep_counts"] = ro.IntVector(pep_aligned.tolist())
+        method_used = "DEqMS"
+    else:
+        method_used = "limma"
+
+    # --- Build matrix, base design, and a reusable per-analysis fit function ---
+    # trend=TRUE (limma-trend) is the pipeline default as of 2026-07-13; robust is
+    # opt-in via robust_ebayes. The quarantined analysis (Q2) appends one 0/1
+    # mean-shift indicator column per quarantined sample (module spec Section 4.9).
     ro.r(f"""
         # Reconstruct protein x sample matrix (row-major values, byrow=TRUE)
         prosift_mat <- matrix(
@@ -358,54 +541,60 @@ def _run_one_contrast_r(
         colnames(prosift_mat) <- prosift_sample_ids
 
         # Means model: one coefficient per group, no intercept
-        group_f <- factor(prosift_groups, levels = prosift_unique_groups)
-        design  <- model.matrix(~ 0 + group_f)
-        colnames(design) <- prosift_unique_groups
+        group_f     <- factor(prosift_groups, levels = prosift_unique_groups)
+        design_full <- model.matrix(~ 0 + group_f)
+        colnames(design_full) <- prosift_unique_groups
 
-        # Fit -> contrast -> empirical Bayes moderation
-        fit  <- limma::lmFit(prosift_mat, design)
-        cmat <- limma::makeContrasts(
-                    contrasts = prosift_contrast_str[1],
-                    levels    = design
-                )
-        fit2 <- limma::contrasts.fit(fit, cmat)
-        fit3 <- limma::eBayes(fit2)
+        # One analysis (Q1 or Q2) given a design matrix. makeContrasts references
+        # only the group columns, so nuisance (indicator) columns are weighted 0.
+        prosift_run_analysis <- function(dmat) {{
+            fit  <- limma::lmFit(prosift_mat, dmat)
+            cmat <- limma::makeContrasts(
+                        contrasts = prosift_contrast_str[1],
+                        levels    = dmat
+                    )
+            fit2 <- limma::contrasts.fit(fit, cmat)
+            fit3 <- limma::eBayes(fit2, trend = TRUE, robust = prosift_robust[1])
+            if (prosift_use_deqms[1]) {{
+                fit3$count <- as.integer(prosift_pep_counts)
+                fit4 <- DEqMS::spectraCounteBayes(fit3)
+                res  <- DEqMS::outputResult(fit4, coef_col = 1)
+            }} else {{
+                # sort.by="none" preserves protein order (rowname alignment)
+                res  <- limma::topTable(fit3, number = Inf, sort.by = "none", coef = 1)
+            }}
+            res$protein_id <- rownames(res)
+            res
+        }}
+
+        # Q1: full (all samples, full weight)
+        prosift_results_full <- prosift_run_analysis(design_full)
+
+        # Q2: quarantined (mean-shift indicator), only if any ids given
+        if (length(prosift_quarantine_ids) > 0) {{
+            ind <- vapply(
+                prosift_quarantine_ids,
+                function(s) as.numeric(prosift_sample_ids == s),
+                numeric(length(prosift_sample_ids))
+            )
+            ind <- matrix(ind, nrow = length(prosift_sample_ids))
+            colnames(ind) <- paste0("q_", make.names(prosift_quarantine_ids))
+            design_quar <- cbind(design_full, ind)
+            prosift_results_quar <- prosift_run_analysis(design_quar)
+        }}
     """)
 
-    # --- DEqMS peptide count correction or limma-only ---
-    if use_deqms and pep_counts is not None:
-        # Align peptide counts to the protein order in abund_df
-        pep_aligned = pep_counts.reindex(abund_df.index).fillna(1).astype(int)
-        ro.globalenv["prosift_pep_counts"] = ro.IntVector(pep_aligned.tolist())
+    # --- Convert R data frame(s) to pandas ---
+    def _fetch(name: str) -> pd.DataFrame:
+        with localconverter(ro.default_converter + pandas2ri.converter):
+            df = ro.conversion.rpy2py(ro.globalenv[name])
+        return df.reset_index(drop=True)
 
-        ro.r("""
-            fit3$count <- as.integer(prosift_pep_counts)
-            fit4 <- DEqMS::spectraCounteBayes(fit3)
-            prosift_results <- DEqMS::outputResult(fit4, coef_col = 1)
-            # Add protein_id as a column so it survives the rpy2 conversion
-            prosift_results$protein_id <- rownames(prosift_results)
-        """)
-        method_used = "DEqMS"
+    results = {"full": _fetch("prosift_results_full")}
+    if len(quarantine_ids) > 0:
+        results["quarantined"] = _fetch("prosift_results_quar")
 
-    else:
-        ro.r("""
-            # sort.by="none" preserves original protein order (rowname alignment)
-            prosift_results <- limma::topTable(
-                fit3,
-                number  = Inf,
-                sort.by = "none",
-                coef    = 1
-            )
-            prosift_results$protein_id <- rownames(prosift_results)
-        """)
-        method_used = "limma"
-
-    # --- Convert R data frame to pandas ---
-    with localconverter(ro.default_converter + pandas2ri.converter):
-        raw_df = ro.conversion.rpy2py(ro.globalenv["prosift_results"])
-    raw_df = raw_df.reset_index(drop=True)
-
-    return raw_df, method_used
+    return results, method_used
 
 
 # ============================================================
@@ -534,13 +723,18 @@ def write_summary_txt(
     method_used: str,
     params: dict,
     outdir: Path,
+    sensitivity_results: "list[tuple[str, str, str, pd.DataFrame]] | None" = None,
+    primary_key: str = "full",
+    quarantine_samples: "list[str] | None" = None,
 ) -> None:
     """
     Write a plain-text summary following the template in Section 4.6 of the
     Module 04 spec.
 
-    contrast_results is a list of (contrast_user, numerator, denominator, df)
-    for each contrast, in order.
+    contrast_results holds the PRIMARY analysis (contrast_user, numerator,
+    denominator, df) per contrast, in order. When quarantine is active,
+    sensitivity_results holds the other analysis and a compact SENSITIVITY block
+    is appended per contrast (module spec Section 4.9).
     """
     now     = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     da_cfg  = params.get("differential_abundance", {})
@@ -561,6 +755,17 @@ def write_summary_txt(
         f"Method:           {method_used}",
         "",
     ]
+
+    # Analysis-mode header (mean-shift quarantine / dual reporting, Section 4.9)
+    if quarantine_samples:
+        other_key = "full" if primary_key == "quarantined" else "quarantined"
+        lines += [
+            f"Analysis:         PRIMARY = {primary_key} (see below); "
+            f"SENSITIVITY = {other_key}",
+            f"Quarantined:      {', '.join(quarantine_samples)} "
+            f"(mean-shift indicator; see {run_id}.analysis_provenance.txt)",
+            "",
+        ]
 
     for contrast_user, numerator, denominator, df in contrast_results:
         n_proteins   = len(df)
@@ -642,6 +847,28 @@ def write_summary_txt(
             )
 
         lines.append("")
+
+    # --- Compact SENSITIVITY section (dual reporting, Section 4.9) ---
+    if sensitivity_results:
+        other_key = "full" if primary_key == "quarantined" else "quarantined"
+        lines += [
+            "----------------------------------------",
+            f"SENSITIVITY ANALYSIS ({other_key})",
+            "----------------------------------------",
+            "",
+        ]
+        for contrast_user, numerator, denominator, df in sensitivity_results:
+            n_proteins = len(df)
+            n_sig  = int(df["significant"].sum())
+            n_up   = int((df["direction"] == "up").sum())
+            n_down = int((df["direction"] == "down").sum())
+            pct    = f"{100 * n_sig / n_proteins:.1f}" if n_proteins > 0 else "0.0"
+            lines += [
+                f"CONTRAST: {contrast_user}  ({numerator} - {denominator})",
+                f"  Significant proteins:   {n_sig} / {n_proteins} ({pct}%)  "
+                f"[{n_up} up, {n_down} down]",
+                "",
+            ]
 
     lines.append("========================================")
 
@@ -879,6 +1106,27 @@ def main() -> None:
 
     logging.info(f"  Statistical method: {method_used}")
 
+    # --- Sample quarantine / dual-reporting parameters (spec Section 4.9) ---
+    quarantine_samples = normalize_quarantine_samples(da_cfg.get("quarantine_samples"))
+    primary_analysis   = str(da_cfg.get("primary_analysis", "full")).lower()
+    robust_ebayes      = parse_bool_param(da_cfg.get("robust_ebayes", False))
+    min_per_group      = int(params.get("qc", {}).get("min_samples_per_group", 2))
+
+    validate_quarantine(
+        quarantine_samples, primary_analysis, sample_ids,
+        group_map, contrasts, min_per_group,
+    )
+
+    has_quar    = len(quarantine_samples) > 0
+    primary_key = primary_analysis if has_quar else "full"
+    if has_quar:
+        logging.info(
+            f"  Quarantine (mean-shift): {quarantine_samples} | "
+            f"primary analysis: {primary_key}"
+        )
+    if robust_ebayes:
+        logging.info("  eBayes robust=TRUE enabled")
+
     # --- Summarize peptide counts (DEqMS path only) ---
     pep_counts: "pd.Series | None" = None
     if use_deqms:
@@ -889,63 +1137,98 @@ def main() -> None:
             f"median: {pep_counts.median():.1f}"
         )
 
-    # --- Run statistical analysis per contrast ---
-    contrast_results: list[tuple[str, str, str, pd.DataFrame]] = []
+    # --- Run statistical analysis per contrast (Q1 full + Q2 quarantined) ---
+    primary_results: list[tuple[str, str, str, pd.DataFrame]] = []
+    sensitivity_results: list[tuple[str, str, str, pd.DataFrame]] = []
+    sensitivity_key = "full" if primary_key == "quarantined" else "quarantined"
 
     for contrast_user, numerator, denominator, r_contrast_str in contrasts:
         logging.info(f"Running contrast: {contrast_user}  ({r_contrast_str})...")
 
-        raw_df, actual_method = _run_one_contrast_r(
+        raw_by_analysis, actual_method = _run_one_contrast_r(
             abund_df, groups, unique_groups,
             pep_counts, r_contrast_str, use_deqms,
+            quarantine_samples, robust_ebayes,
         )
 
-        result_df = assemble_results(
-            raw_df, mapping_df, params, actual_method, contrast_user
-        )
+        assembled = {
+            name: assemble_results(raw, mapping_df, params, actual_method, contrast_user)
+            for name, raw in raw_by_analysis.items()
+        }
 
-        n_sig  = int(result_df["significant"].sum())
-        n_up   = int((result_df["direction"] == "up").sum())
-        n_down = int((result_df["direction"] == "down").sum())
+        primary_df = assembled[primary_key]
+        primary_results.append((contrast_user, numerator, denominator, primary_df))
+
+        n_sig  = int(primary_df["significant"].sum())
+        n_up   = int((primary_df["direction"] == "up").sum())
+        n_down = int((primary_df["direction"] == "down").sum())
         logging.info(
-            f"  {n_sig}/{n_proteins} significant "
+            f"  [{primary_key}] {n_sig}/{n_proteins} significant "
             f"({n_up} up, {n_down} down)"
         )
 
-        contrast_results.append((contrast_user, numerator, denominator, result_df))
-
-        # --- Generate diagnostic plots ---
+        # --- Diagnostic plots (primary; existing filenames) ---
         logging.info(f"  Generating plots for {contrast_user}...")
-        volcano_fig = plot_volcano(result_df, contrast_user, run_id, params)
-        save_plot(volcano_fig, outdir / f"{run_id}.{contrast_user}.volcano_plot")
+        save_plot(plot_volcano(primary_df, contrast_user, run_id, params),
+                  outdir / f"{run_id}.{contrast_user}.volcano_plot")
+        save_plot(plot_ma(primary_df, contrast_user, run_id, params),
+                  outdir / f"{run_id}.{contrast_user}.ma_plot")
 
-        ma_fig = plot_ma(result_df, contrast_user, run_id, params)
-        save_plot(ma_fig, outdir / f"{run_id}.{contrast_user}.ma_plot")
+        if has_quar:
+            sens_df = assembled[sensitivity_key]
+            sensitivity_results.append((contrast_user, numerator, denominator, sens_df))
+            # Sensitivity plots, `.sensitivity` suffix so they never match the
+            # primary globs (module spec Section 2.2 filename constraint).
+            save_plot(plot_volcano(sens_df, contrast_user, run_id, params),
+                      outdir / f"{run_id}.{contrast_user}.volcano_plot.sensitivity")
+            save_plot(plot_ma(sens_df, contrast_user, run_id, params),
+                      outdir / f"{run_id}.{contrast_user}.ma_plot.sensitivity")
 
-    # --- Combine all contrast results ---
-    combined_df = pd.concat(
-        [df for _, _, _, df in contrast_results], ignore_index=True
-    )
-
-    # --- Write results table ---
+    # --- Write PRIMARY results table (existing name/schema; consumed downstream) ---
     logging.info("Writing outputs...")
+    combined_primary = pd.concat(
+        [df for _, _, _, df in primary_results], ignore_index=True
+    )
     pq_path  = outdir / f"{run_id}.diff_abundance_results.parquet"
     csv_path = outdir / f"{run_id}.diff_abundance_results.csv"
-    combined_df.to_parquet(pq_path,  index=False)
-    combined_df.to_csv(csv_path,     index=False)
+    combined_primary.to_parquet(pq_path, index=False)
+    combined_primary.to_csv(csv_path, index=False)
     logging.info(f"  Saved: {pq_path.name}")
     logging.info(f"  Saved: {csv_path.name}")
 
-    # --- Write text summary ---
-    write_summary_txt(contrast_results, run_id, method_used, params, outdir)
+    # --- Write SENSITIVITY results table (conditional; NOT consumed downstream) ---
+    if has_quar:
+        combined_sens = pd.concat(
+            [df for _, _, _, df in sensitivity_results], ignore_index=True
+        )
+        s_pq  = outdir / f"{run_id}.diff_abundance_results.sensitivity.parquet"
+        s_csv = outdir / f"{run_id}.diff_abundance_results.sensitivity.csv"
+        combined_sens.to_parquet(s_pq, index=False)
+        combined_sens.to_csv(s_csv, index=False)
+        logging.info(f"  Saved: {s_pq.name}")
+        logging.info(f"  Saved: {s_csv.name}")
+
+    # --- Write provenance (always) ---
+    write_provenance(
+        run_id, outdir, quarantine_samples, primary_key,
+        sample_ids, groups, method_used, robust_ebayes,
+    )
+
+    # --- Write text summary (dual-aware) ---
+    write_summary_txt(
+        primary_results, run_id, method_used, params, outdir,
+        sensitivity_results=(sensitivity_results if has_quar else None),
+        primary_key=primary_key,
+        quarantine_samples=(quarantine_samples if has_quar else None),
+    )
 
     # --- Final log ---
-    total_sig = int(combined_df["significant"].sum())
+    total_sig = int(combined_primary["significant"].sum())
     logging.info(
         f"Module 04 DIFFERENTIAL_ABUNDANCE complete. "
         f"{len(contrasts)} contrast(s), "
         f"{total_sig}/{n_proteins} proteins significant "
-        f"(method: {method_used})."
+        f"(primary: {primary_key}, method: {method_used})."
     )
 
 

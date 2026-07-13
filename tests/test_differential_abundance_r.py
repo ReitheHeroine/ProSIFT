@@ -4,7 +4,7 @@
 # author: Reina Hastings
 # contact: reinahastings13@gmail.com
 # date created: 2026-07-09
-# last modified: 2026-07-09
+# last modified: 2026-07-13
 #
 # purpose:
 #   CLUSTER integration test for Module 04's R statistical fit
@@ -168,9 +168,11 @@ class TestDEqMSFit:
         protein (deterministic: |FC|=2 >> noise 0.3).
         '''
         abund, pep_counts = _synthetic_fit_inputs()
-        raw, method = _run_one_contrast_r(
+        results, method = _run_one_contrast_r(
             abund, _GROUPS, _UNIQUE_GROUPS, pep_counts, 'KO - WT', use_deqms=True,
+            quarantine_ids=[], robust_ebayes=False,
         )
+        raw = results['full']
         assert method == 'DEqMS'
         assert len(raw) == len(abund)
         assert {'protein_id', 'logFC', 'sca.adj.pval', 'count'}.issubset(raw.columns)
@@ -182,9 +184,11 @@ class TestDEqMSFit:
     def test_deqms_separates_signal_from_null(self):
         '''Spiked proteins have much smaller DEqMS adjusted p-values than nulls.'''
         abund, pep_counts = _synthetic_fit_inputs()
-        raw, _ = _run_one_contrast_r(
+        results, _ = _run_one_contrast_r(
             abund, _GROUPS, _UNIQUE_GROUPS, pep_counts, 'KO - WT', use_deqms=True,
+            quarantine_ids=[], robust_ebayes=False,
         )
+        raw = results['full']
         raw_idx = raw.set_index('protein_id')
         spiked = _up_ids() + _down_ids()
         spiked_med = raw_idx.loc[spiked, 'sca.adj.pval'].median()
@@ -199,9 +203,11 @@ class TestDEqMSFit:
         margins (this cannot be tuned locally).
         '''
         abund, pep_counts = _synthetic_fit_inputs()
-        raw, method = _run_one_contrast_r(
+        results, method = _run_one_contrast_r(
             abund, _GROUPS, _UNIQUE_GROUPS, pep_counts, 'KO - WT', use_deqms=True,
+            quarantine_ids=[], robust_ebayes=False,
         )
+        raw = results['full']
         result = assemble_results(
             raw, _id_mapping(abund.index.tolist()), _params(), method, 'KO_vs_WT',
         ).set_index('protein_id')
@@ -223,9 +229,11 @@ class TestLimmaOnlyFit:
         '''limma-only path (use_deqms=False, pep_counts=None): no DEqMS columns,
         correct fold-change direction.'''
         abund, _ = _synthetic_fit_inputs()
-        raw, method = _run_one_contrast_r(
+        results, method = _run_one_contrast_r(
             abund, _GROUPS, _UNIQUE_GROUPS, None, 'KO - WT', use_deqms=False,
+            quarantine_ids=[], robust_ebayes=False,
         )
+        raw = results['full']
         assert method == 'limma'
         assert 'sca.adj.pval' not in raw.columns          # no DEqMS output
         assert {'protein_id', 'logFC', 'adj.P.Val'}.issubset(raw.columns)
@@ -233,3 +241,53 @@ class TestLimmaOnlyFit:
         raw_idx = raw.set_index('protein_id')
         assert (raw_idx.loc[_up_ids(), 'logFC'] > 0).all()
         assert (raw_idx.loc[_down_ids(), 'logFC'] < 0).all()
+
+
+class TestQuarantineMeanShift:
+    '''Mean-shift quarantine (spec Section 4.9): a discordant WT-3 is set aside
+    via an indicator column; the quarantined (Q2) analysis recovers signal that
+    the full (Q1) analysis dilutes.'''
+
+    def _discordant_inputs(self):
+        # Standard spiked fixture, then make WT-3 KO-like on the spiked proteins
+        # so it opposes its own group (mimics the real HIP WT-3 situation).
+        abund, pep_counts = _synthetic_fit_inputs()
+        for pid in _up_ids() + _down_ids():
+            abund.loc[pid, 'WT-3'] = abund.loc[pid, ['KO-1', 'KO-2', 'KO-3']].mean()
+        return abund, pep_counts
+
+    def test_dual_analysis_returned(self):
+        abund, pep_counts = self._discordant_inputs()
+        results, method = _run_one_contrast_r(
+            abund, _GROUPS, _UNIQUE_GROUPS, pep_counts, 'KO - WT', use_deqms=True,
+            quarantine_ids=['WT-3'], robust_ebayes=False,
+        )
+        assert method == 'DEqMS'
+        assert set(results.keys()) == {'full', 'quarantined'}
+        for key in ('full', 'quarantined'):
+            assert len(results[key]) == len(abund)
+            assert {'protein_id', 'logFC', 'sca.adj.pval'}.issubset(results[key].columns)
+
+    def test_quarantined_recovers_direction_and_signal(self):
+        abund, pep_counts = self._discordant_inputs()
+        results, _ = _run_one_contrast_r(
+            abund, _GROUPS, _UNIQUE_GROUPS, pep_counts, 'KO - WT', use_deqms=True,
+            quarantine_ids=['WT-3'], robust_ebayes=False,
+        )
+        q = results['quarantined'].set_index('protein_id')
+        f = results['full'].set_index('protein_id')
+        spiked = _up_ids() + _down_ids()
+        # Direction correct in the quarantined analysis.
+        assert (q.loc[_up_ids(), 'logFC'] > 0).all()
+        assert (q.loc[_down_ids(), 'logFC'] < 0).all()
+        # Quarantining the discordant sample sharpens the spiked signal.
+        assert (q.loc[spiked, 'sca.adj.pval'].median()
+                <= f.loc[spiked, 'sca.adj.pval'].median())
+
+    def test_empty_quarantine_returns_full_only(self):
+        abund, pep_counts = _synthetic_fit_inputs()
+        results, _ = _run_one_contrast_r(
+            abund, _GROUPS, _UNIQUE_GROUPS, pep_counts, 'KO - WT', use_deqms=True,
+            quarantine_ids=[], robust_ebayes=False,
+        )
+        assert set(results.keys()) == {'full'}

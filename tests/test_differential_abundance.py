@@ -4,7 +4,7 @@
 # author: Reina Hastings
 # contact: reinahastings13@gmail.com
 # date created: 2026-07-09
-# last modified: 2026-07-09
+# last modified: 2026-07-13
 #
 # purpose:
 #   Unit tests for Module 04 DIFFERENTIAL_ABUNDANCE (bin/differential_abundance.py).
@@ -56,8 +56,13 @@ from differential_abundance import (
     assemble_results,
     build_group_map,
     extract_abundance_and_peptide_cols,
+    normalize_quarantine_samples,
     parse_and_validate_contrasts,
+    parse_bool_param,
     summarize_peptide_counts,
+    validate_quarantine,
+    write_provenance,
+    write_summary_txt,
 )
 
 # ============================================================
@@ -292,3 +297,218 @@ class TestIOParsing:
         meta = pd.DataFrame({'sample_id': ['WT-1'], 'condition': ['WT']})
         with pytest.raises(ValueError, match="group_column 'genotype' not found"):
             build_group_map(meta, {'design': {'group_column': 'genotype'}})
+
+
+# ============================================================
+# Section 5: validate_quarantine (mean-shift quarantine, Section 4.9)
+# ============================================================
+
+import fnmatch  # noqa: E402  (grouped with the quarantine tests it supports)
+
+_QSAMPLES  = ['WT-1', 'WT-2', 'WT-3', 'KO-1', 'KO-2', 'KO-3']
+_QGROUPMAP = {s: ('WT' if s.startswith('WT') else 'KO') for s in _QSAMPLES}
+_QGROUPS   = [_QGROUPMAP[s] for s in _QSAMPLES]
+_QCONTRAST = [('KO_vs_WT', 'KO', 'WT', 'KO - WT')]
+
+
+class TestValidateQuarantine:
+
+    def test_empty_no_quarantine_ok(self):
+        # no exception
+        validate_quarantine([], 'full', _QSAMPLES, _QGROUPMAP, _QCONTRAST, 2)
+
+    def test_valid_single_quarantine_ok(self):
+        validate_quarantine(['WT-3'], 'quarantined', _QSAMPLES,
+                            _QGROUPMAP, _QCONTRAST, 2)
+
+    def test_bad_primary_analysis_value(self):
+        with pytest.raises(ValueError, match='primary_analysis'):
+            validate_quarantine([], 'nope', _QSAMPLES, _QGROUPMAP, _QCONTRAST, 2)
+
+    def test_unknown_sample_raises(self):
+        with pytest.raises(ValueError, match='not found'):
+            validate_quarantine(['WT-9'], 'full', _QSAMPLES,
+                                _QGROUPMAP, _QCONTRAST, 2)
+
+    def test_quarantined_primary_requires_samples(self):
+        with pytest.raises(ValueError, match='requires a non-empty'):
+            validate_quarantine([], 'quarantined', _QSAMPLES,
+                                _QGROUPMAP, _QCONTRAST, 2)
+
+    def test_group_below_min_after_quarantine_raises(self):
+        # quarantining 2 of 3 WT leaves n=1 < min 2
+        with pytest.raises(ValueError, match='after quarantine'):
+            validate_quarantine(['WT-2', 'WT-3'], 'quarantined', _QSAMPLES,
+                                _QGROUPMAP, _QCONTRAST, 2)
+
+    def test_group_at_min_after_quarantine_ok(self):
+        # quarantining 1 of 3 WT leaves n=2 == min 2 -> allowed
+        validate_quarantine(['WT-3'], 'quarantined', _QSAMPLES,
+                            _QGROUPMAP, _QCONTRAST, 2)
+
+
+# ============================================================
+# Section 6: write_provenance (always-written integrity record)
+# ============================================================
+
+class TestWriteProvenance:
+
+    def test_no_quarantine_records_none(self, tmp_path):
+        write_provenance('RUN', tmp_path, [], 'full',
+                         _QSAMPLES, _QGROUPS, 'DEqMS', False)
+        text = (tmp_path / 'RUN.analysis_provenance.txt').read_text()
+        assert 'none' in text                       # "Quarantined samples: none"
+        assert 'WT=3' in text and 'KO=3' in text
+        assert text.count('WT=') == 1               # only the 'full' n-per-group line
+        assert 'robust=FALSE' in text
+
+    def test_with_quarantine_records_both(self, tmp_path):
+        write_provenance('RUN', tmp_path, ['WT-3'], 'quarantined',
+                         _QSAMPLES, _QGROUPS, 'DEqMS', True)
+        text = (tmp_path / 'RUN.analysis_provenance.txt').read_text()
+        assert 'WT-3' in text
+        assert 'quarantined' in text.lower()
+        assert 'robust=TRUE' in text
+        assert 'She & Owen 2011' in text
+        # both n-per-group lines present: full WT=3, quarantined WT=2
+        assert text.count('WT=') == 2
+        assert 'WT=3' in text and 'WT=2' in text
+
+
+# ============================================================
+# Section 7: sensitivity-filename glob uniqueness (M3 guardrail)
+# ============================================================
+
+class TestSensitivityFilenameGlob:
+    """The sensitivity outputs must NOT be captured by the primary emit globs,
+    or Nextflow would route two files into a single-file downstream input."""
+
+    RUN = 'HIPcyto_WT_vs_HIPcyto_KO'
+    CON = 'KO_vs_WT'
+
+    def test_results_table_globs_are_single_file(self):
+        files = [
+            f'{self.RUN}.diff_abundance_results.parquet',
+            f'{self.RUN}.diff_abundance_results.sensitivity.parquet',
+            f'{self.RUN}.diff_abundance_results.csv',
+            f'{self.RUN}.diff_abundance_results.sensitivity.csv',
+        ]
+        pq  = [f for f in files if fnmatch.fnmatch(f, '*.diff_abundance_results.parquet')]
+        csv = [f for f in files if fnmatch.fnmatch(f, '*.diff_abundance_results.csv')]
+        assert pq  == [f'{self.RUN}.diff_abundance_results.parquet']
+        assert csv == [f'{self.RUN}.diff_abundance_results.csv']
+
+    def test_plot_globs_are_single_file(self):
+        files = [
+            f'{self.RUN}.{self.CON}.volcano_plot.png',
+            f'{self.RUN}.{self.CON}.volcano_plot.sensitivity.png',
+            f'{self.RUN}.{self.CON}.ma_plot.png',
+            f'{self.RUN}.{self.CON}.ma_plot.sensitivity.png',
+        ]
+        volc = [f for f in files if fnmatch.fnmatch(f, '*.volcano_plot.png')]
+        ma   = [f for f in files if fnmatch.fnmatch(f, '*.ma_plot.png')]
+        assert volc == [f'{self.RUN}.{self.CON}.volcano_plot.png']
+        assert ma   == [f'{self.RUN}.{self.CON}.ma_plot.png']
+
+
+# ============================================================
+# Section 8: parameter coercion helpers (config hardening)
+# ============================================================
+
+class TestNormalizeQuarantineSamples:
+
+    def test_none_returns_empty(self):
+        assert normalize_quarantine_samples(None) == []
+
+    def test_empty_list_returns_empty(self):
+        assert normalize_quarantine_samples([]) == []
+
+    def test_bare_string_becomes_single_element(self):
+        # a YAML scalar must NOT explode into characters
+        assert normalize_quarantine_samples('HIPcyto_WT-3') == ['HIPcyto_WT-3']
+
+    def test_list_passthrough(self):
+        assert normalize_quarantine_samples(['A', 'B']) == ['A', 'B']
+
+    def test_duplicates_removed_order_preserved(self):
+        assert normalize_quarantine_samples(['B', 'A', 'B', 'A']) == ['B', 'A']
+
+    def test_tuple_accepted(self):
+        assert normalize_quarantine_samples(('A', 'B')) == ['A', 'B']
+
+    def test_bad_type_raises(self):
+        with pytest.raises(ValueError, match='must be a list'):
+            normalize_quarantine_samples(42)
+
+
+class TestParseBoolParam:
+
+    def test_true_bool(self):
+        assert parse_bool_param(True) is True
+
+    def test_false_bool(self):
+        assert parse_bool_param(False) is False
+
+    def test_quoted_false_string_is_false(self):
+        # the footgun: bool("false") would be True; parse_bool_param must not
+        assert parse_bool_param('false') is False
+
+    def test_quoted_true_string_is_true(self):
+        assert parse_bool_param('true') is True
+
+    def test_one_string_is_true(self):
+        assert parse_bool_param('1') is True
+
+    def test_none_uses_default(self):
+        assert parse_bool_param(None, default=False) is False
+        assert parse_bool_param(None, default=True) is True
+
+
+# ============================================================
+# Section 9: write_summary_txt dual (primary + sensitivity) branch
+# ============================================================
+
+def _summary_frame(n_up, n_dn, n=10):
+    """A minimal assemble_results-shaped frame for summary rendering."""
+    rows = []
+    for i in range(n):
+        sig = i < (n_up + n_dn)
+        direction = 'ns' if not sig else ('up' if i < n_up else 'down')
+        rows.append({
+            'protein_id': f'P{i}', 'gene_symbol': f'G{i}',
+            'log2_fc': 2.0 if direction == 'up' else (-2.0 if direction == 'down' else 0.1),
+            'avg_abundance': 20.0,
+            'limma_t': 1.0, 'limma_pvalue': 0.01, 'limma_adj_pvalue': 0.02,
+            'deqms_t': 1.0, 'deqms_pvalue': 0.001,
+            'deqms_adj_pvalue': 0.001 if sig else 0.5,
+            'n_peptides': 5, 'significant': sig, 'direction': direction,
+            'contrast': 'KO_vs_WT',
+        })
+    return pd.DataFrame(rows)
+
+
+class TestWriteSummaryDual:
+
+    def test_dual_summary_renders_primary_and_sensitivity(self, tmp_path):
+        primary = [('KO_vs_WT', 'KO', 'WT', _summary_frame(3, 2))]   # 5 sig
+        sens    = [('KO_vs_WT', 'KO', 'WT', _summary_frame(1, 0))]   # 1 sig
+        write_summary_txt(
+            primary, 'RUN', 'DEqMS', _params(['KO_vs_WT']), tmp_path,
+            sensitivity_results=sens, primary_key='quarantined',
+            quarantine_samples=['HIPcyto_WT-3'],
+        )
+        text = (tmp_path / 'RUN.diff_abundance_summary.txt').read_text()
+        assert 'PRIMARY = quarantined' in text
+        assert 'SENSITIVITY ANALYSIS (full)' in text
+        assert 'HIPcyto_WT-3' in text
+        assert '5 / 10' in text            # primary count
+        assert '1 / 10' in text            # sensitivity count
+
+    def test_single_analysis_summary_has_no_sensitivity(self, tmp_path):
+        primary = [('KO_vs_WT', 'KO', 'WT', _summary_frame(3, 2))]
+        write_summary_txt(
+            primary, 'RUN', 'DEqMS', _params(['KO_vs_WT']), tmp_path,
+        )
+        text = (tmp_path / 'RUN.diff_abundance_summary.txt').read_text()
+        assert 'SENSITIVITY ANALYSIS' not in text
+        assert 'PRIMARY =' not in text
