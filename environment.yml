@@ -45,6 +45,14 @@ dependencies:
   - plotly
   - python-kaleido                     # Static PNG export from Plotly figures (Module 02+)
 
+  # --- Frontend (Phase 4, Module 08 R Shiny app in frontend/) ---
+  - r-shiny                            # Application framework
+  - r-dt                              # Sortable/filterable server-side tables
+  - r-plotly                          # Interactive plots (term/profile views)
+  - r-bslib                           # Bootstrap theming (teal accent)
+  - r-rsqlite                         # SQLite driver for the Module 07 results DB
+  - r-dbi                             # DB interface layer used by db.R
+
   # --- Testing ---
   - pytest>=7.4
   - pytest-cov>=4.1

@@ -1,6 +1,8 @@
 # Data (user-specific)
 data/
 results/
+results_cluster/
+results_mod1to5/
 CTX_synaptosome_project_data/
 prosift_inputs/
 databases/

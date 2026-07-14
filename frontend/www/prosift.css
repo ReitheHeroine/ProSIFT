@@ -1,0 +1,148 @@
+/* ==========================================================================
+   Title:         prosift.css
+   Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
+   Author:        Reina Hastings (reinahastings13@gmail.com)
+   Created:       2026-07-13
+   Purpose:       Module 08 frontend styling. Top bar, view controls, and table
+                  accents in the ProSIFT teal brand (#1D9E75). Visual reference:
+                  project_documentation/figures/prosift_frontend_mockup.html.
+   ========================================================================== */
+
+:root {
+  --prosift-teal: #1D9E75;
+  --prosift-up: #0F6E56;
+  --prosift-down: #A32D2D;
+  --prosift-muted: #8A8F98;
+}
+
+/* --- Top bar --- */
+.prosift-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 3px solid var(--prosift-teal);
+  margin-bottom: 8px;
+}
+.prosift-brand {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--prosift-teal);
+}
+.prosift-run .form-group { margin-bottom: 0; }
+
+/* --- Tabs: teal active indicator --- */
+.nav-tabs .nav-link.active {
+  color: var(--prosift-teal);
+  border-bottom: 2px solid var(--prosift-teal);
+  font-weight: 600;
+}
+
+/* --- View controls --- */
+.contrast-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 4px;
+}
+.contrast-bar label { margin-bottom: 0; font-weight: 600; }
+.contrast-bar .form-group { margin-bottom: 0; }
+
+.view-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin: 4px 0 8px;
+}
+.view-controls .form-group { margin-bottom: 0; }
+.row-count { color: var(--prosift-muted); font-size: 13px; }
+
+/* --- Placeholder panels (profile / process, pre-implementation) --- */
+.placeholder {
+  padding: 32px;
+  color: var(--prosift-muted);
+  text-align: center;
+}
+.placeholder h3 { color: #222; }
+
+/* --- Table tweaks --- */
+table.dataTable td { font-size: 13px; }
+table.dataTable th { font-size: 12px; text-transform: none; }
+
+/* --- Protein profile card (Section 4.2) --- */
+.profile { max-width: 900px; margin: 8px auto; padding: 0 12px 40px; }
+.profile-header-wrap { padding: 8px 0 4px; }
+.back-link {
+  color: var(--prosift-teal);
+  font-size: 13px;
+  cursor: pointer;
+  text-decoration: none;
+}
+.back-link:hover { text-decoration: underline; }
+.profile-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-top: 6px;
+}
+.profile-header h3 { margin: 0; color: #1a1a1a; }
+.gene-accession { color: var(--prosift-muted); font-family: monospace; font-size: 14px; }
+.profile-sub { color: #444; font-size: 14px; margin-top: 2px; }
+
+.section { margin-top: 22px; }
+.section-title {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--prosift-teal);
+  border-bottom: 1px solid #e4e7eb;
+  padding-bottom: 4px;
+  margin-bottom: 10px;
+}
+.section-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+.stat-card { background: #f7f9fa; border-radius: 6px; padding: 10px 12px; }
+.stat-label { font-size: 11px; color: var(--prosift-muted); text-transform: uppercase; }
+.stat-value { font-size: 18px; font-weight: 600; margin-top: 3px; }
+.val-up { color: var(--prosift-up); }
+.val-down { color: var(--prosift-down); }
+
+/* Badges */
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.badge-up { background: #e2f3ec; color: var(--prosift-up); }
+.badge-down { background: #f7e3e3; color: var(--prosift-down); }
+.badge-ns { background: #eceef0; color: var(--prosift-muted); }
+.det-badge { background: #e7f1fb; color: #1e5f9e; font-weight: 600; }
+
+/* Tables inside sections */
+.mini-table, .anno-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.mini-table th, .anno-table th { text-align: left; color: var(--prosift-muted); font-weight: 600; }
+.mini-table th, .mini-table td { padding: 4px 8px; border-bottom: 1px solid #eef1f3; }
+.anno-table th { width: 170px; vertical-align: top; padding: 4px 8px; }
+.anno-table td { padding: 4px 8px; }
+
+.empty-note { color: var(--prosift-muted); font-style: italic; font-size: 13px; }
+.count-note { color: var(--prosift-muted); font-size: 12px; margin-top: 6px; }
+.provenance { color: var(--prosift-muted); font-size: 12px; margin-bottom: 6px; }
+
+.qc-notes { margin: 4px 0; padding-left: 20px; }
+.qc-notes li { font-size: 13px; margin-bottom: 2px; }
+.qc-warn {
+  background: #fdf3e3;
+  border-left: 3px solid #d99a2b;
+  padding: 8px 12px;
+  font-size: 13px;
+  margin-top: 10px;
+  border-radius: 4px;
+}

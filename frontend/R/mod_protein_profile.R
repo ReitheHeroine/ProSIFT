@@ -1,0 +1,318 @@
+# =============================================================================
+# Title:         mod_protein_profile.R
+# Project:       ProSIFT (PROtein Statistical Integration and Filtering Tool)
+# Author:        Reina Hastings (reinahastings13@gmail.com)
+# Created:       2026-07-14
+# Last Modified: 2026-07-14
+# Purpose:       Module 08 Protein Profile View (spec Section 4.2). The
+#                per-protein 'baseball card': nine sections consolidating
+#                differential abundance, data-quality/QC-flag notes, UniProt
+#                annotation, enriched terms, disease/drug/chemical associations,
+#                and literature co-occurrence. Presentation only; SQL in db.R.
+# Inputs:        con              - reactive holding the active DBI connection.
+#                selected_protein - reactive giving the protein_id to show
+#                                   (NULL shows a 'select a protein' prompt).
+# Outputs:       UI + server. The server returns a list with `back`, a reactive
+#                that fires when the 'Back to database' link is clicked, so the
+#                parent can switch back to the database tab.
+# Usage:         mod_protein_profile_ui('profile')
+#                p <- mod_protein_profile_server('profile', con, selected)
+# =============================================================================
+
+# --- Constants / small formatters -------------------------------------------
+
+# Plain-language names for the four Module 02 sample-level QC flags. These are
+# heuristic QC signals, not verdicts (Module 08 spec Section 4.2.1, note 1).
+FLAG_LABELS <- c(
+  flag_low_detection   = 'low protein detection',
+  flag_extreme_median  = 'extreme median abundance',
+  flag_pca_outlier     = 'PCA outlier',
+  flag_low_correlation = 'low inter-sample correlation'
+)
+
+# Rows to show before truncating a long section (with a running total note).
+PROFILE_SECTION_CAP <- 15L
+
+fmt_fc <- function(x) if (is.na(x)) '-' else sprintf('%+.2f', x)
+fmt_p  <- function(x) if (is.na(x)) '-' else formatC(x, format = 'g', digits = 2)
+na_dash <- function(x) if (is.null(x) || length(x) == 0 || is.na(x) || !nzchar(as.character(x))) '-' else as.character(x)
+
+# Direction / detection coloured badges (styling in prosift.css).
+dir_badge <- function(d) {
+  d <- if (is.na(d)) 'ns' else d
+  cls <- switch(d, up = 'badge-up', down = 'badge-down', 'badge-ns')
+  shiny::span(class = paste('badge', cls), d)
+}
+det_badge <- function(cat) {
+  cat <- na_dash(cat)
+  shiny::span(class = 'badge det-badge', cat)
+}
+
+# A labelled statistic card and a titled section wrapper.
+stat_card <- function(label, value) {
+  shiny::div(class = 'stat-card',
+    shiny::div(class = 'stat-label', label),
+    shiny::div(class = 'stat-value', value))
+}
+section <- function(title, ...) {
+  shiny::div(class = 'section',
+    shiny::div(class = 'section-title', title),
+    shiny::tagList(...))
+}
+empty_note <- function(msg) shiny::div(class = 'empty-note', msg)
+
+# Build an HTML table from a data.frame slice, capped, with a total-count note.
+# `cells` is a function(row_df_1) returning a list of <td> tags.
+capped_table <- function(df, headers, cells, cap = PROFILE_SECTION_CAP) {
+  n <- nrow(df)
+  shown <- utils::head(df, cap)
+  tbl <- shiny::tags$table(class = 'mini-table',
+    shiny::tags$thead(shiny::tags$tr(lapply(headers, shiny::tags$th))),
+    shiny::tags$tbody(lapply(seq_len(nrow(shown)), function(i) shiny::tags$tr(cells(shown[i, ])))))
+  if (n > cap) {
+    shiny::tagList(tbl, shiny::div(class = 'count-note',
+      sprintf('Showing %d of %d.', cap, n)))
+  } else {
+    tbl
+  }
+}
+
+
+# --- QC flag notes (Section 3) ----------------------------------------------
+
+# Build the QC-flag notes block from the observed-sample flags data.frame.
+qc_notes_block <- function(qc, detection_category) {
+  items <- list()
+  if (nrow(qc) > 0) {
+    for (i in seq_len(nrow(qc))) {
+      row <- qc[i, ]
+      fired <- names(FLAG_LABELS)[vapply(names(FLAG_LABELS),
+        function(fc) isTRUE(as.logical(row[[fc]])), logical(1))]
+      if (length(fired) == 0) next
+      reasons <- paste(FLAG_LABELS[fired], collapse = ', ')
+      items[[length(items) + 1]] <- shiny::tags$li(
+        shiny::tags$strong(sprintf('%s (%s)', row$sample_id, na_dash(row$grp))),
+        sprintf(': %s', reasons))
+    }
+  }
+  body <- if (length(items) == 0) {
+    empty_note('No QC flags on the samples this protein was observed in.')
+  } else {
+    shiny::tagList(
+      shiny::tags$ul(class = 'qc-notes', items),
+      shiny::div(class = 'count-note',
+        'Heuristic sample-level QC signals, not verdicts. Only samples where this protein was observed are considered.'))
+  }
+  single_group <- identical(as.character(detection_category), 'SINGLE-GROUP')
+  if (single_group) {
+    body <- shiny::tagList(body, shiny::div(class = 'qc-warn',
+      'SINGLE-GROUP: this protein is detected in only one condition, so the other group\'s mean is entirely imputed. Interpret the fold change as a floor, not a point estimate.'))
+  }
+  body
+}
+
+
+# --- UI ---------------------------------------------------------------------
+
+mod_protein_profile_ui <- function(id) {
+  ns <- shiny::NS(id)
+  shiny::uiOutput(ns('content'))
+}
+
+
+# --- Server -----------------------------------------------------------------
+
+mod_protein_profile_server <- function(id, con, selected_protein) {
+  shiny::moduleServer(id, function(input, output, session) {
+    ns <- session$ns
+
+    output$content <- shiny::renderUI({
+      pid <- selected_protein()
+      if (is.null(pid)) {
+        return(shiny::div(class = 'placeholder',
+          'Select a protein from the database view.'))
+      }
+      shiny::req(con())
+      core <- db_protein_core(con(), pid)
+      if (nrow(core) == 0) {
+        return(shiny::div(class = 'placeholder',
+          sprintf('Protein %s not found in this run.', pid)))
+      }
+
+      # Null-gene fallback: use the accession as the display name (Module 08
+      # follow-up 2026-07-14 -- proteins without a gene symbol showed "NA").
+      gene <- if (is.na(core$gene_symbol) || !nzchar(core$gene_symbol)) {
+        pid
+      } else {
+        core$gene_symbol
+      }
+      ortholog <- na_dash(core$ortholog_mapping_status)
+      has_ortholog <- !identical(ortholog, 'no_ortholog') && ortholog != '-'
+
+      # Section 1: header.
+      header <- shiny::div(class = 'profile-header-wrap',
+        shiny::actionLink(ns('back_to_db'), '← Back to database',
+                          class = 'back-link'),
+        shiny::div(class = 'profile-header',
+          shiny::h3(gene),
+          shiny::span(class = 'gene-accession', core$protein_id)),
+        shiny::div(class = 'profile-sub',
+          na_dash(core$protein_name), ' · ',
+          shiny::a(href = sprintf('https://www.uniprot.org/uniprot/%s', core$protein_id),
+                   target = '_blank', 'UniProt')))
+
+      # Section 2: differential abundance (stat cards for 1 contrast, else table).
+      ct <- db_protein_contrasts(con(), pid)
+      da_body <- if (nrow(ct) == 0) {
+        empty_note('No differential abundance result for this protein.')
+      } else if (nrow(ct) == 1) {
+        shiny::div(class = 'section-grid',
+          stat_card('log2 fold change', shiny::span(
+            class = if (!is.na(ct$log2_fc) && ct$log2_fc < 0) 'val-down' else 'val-up',
+            fmt_fc(ct$log2_fc))),
+          stat_card('adj. p-value (DEqMS)', fmt_p(ct$adj_pvalue)),
+          stat_card('direction', dir_badge(ct$direction)),
+          stat_card('contrast', ct$contrast))
+      } else {
+        capped_table(ct, c('Contrast', 'log2 FC', 'Adj p', 'Direction'),
+          function(r) list(
+            shiny::tags$td(r$contrast), shiny::tags$td(fmt_fc(r$log2_fc)),
+            shiny::tags$td(fmt_p(r$adj_pvalue)), shiny::tags$td(dir_badge(r$direction))),
+          cap = 50L)
+      }
+
+      # Section 3: data quality + QC flag notes.
+      qc <- db_protein_qc_flags(con(), pid)
+      dq_body <- shiny::tagList(
+        shiny::div(class = 'section-grid',
+          stat_card('detection', det_badge(core$detection_category)),
+          stat_card('% imputed', sprintf('%.1f%%', 100 * core$imputation_fraction))),
+        qc_notes_block(qc, core$detection_category))
+
+      # Section 4: UniProt annotation.
+      up <- db_protein_uniprot(con(), pid)
+      anno_rows <- list(
+        c('Function', if (nrow(up)) up$function_description else NA),
+        c('Subcellular location', if (nrow(up)) up$subcellular_location else NA),
+        c('Tissue expression', if (nrow(up)) up$tissue_expression else NA),
+        c('Keywords', if (nrow(up)) up$keywords else NA))
+      anno_body <- if (all(vapply(anno_rows, function(r) is.na(r[2]) || !nzchar(as.character(r[2])), logical(1)))) {
+        empty_note('No UniProt annotation available.')
+      } else {
+        shiny::tags$table(class = 'anno-table', shiny::tags$tbody(
+          lapply(anno_rows, function(r) shiny::tags$tr(
+            shiny::tags$th(r[1]), shiny::tags$td(na_dash(r[2]))))))
+      }
+
+      # Section 5: enriched terms containing this protein.
+      et <- db_protein_enriched_terms(con(), pid)
+      et_body <- if (nrow(et) == 0) {
+        empty_note('No enriched terms contain this protein.')
+      } else {
+        capped_table(et, c('Term', 'Library', 'Leading edge'),
+          function(r) list(
+            shiny::tags$td(clean_term_name(r$term_name)),
+            shiny::tags$td(r$library),
+            shiny::tags$td(if (isTRUE(as.logical(r$is_leading_edge))) 'yes' else '')),
+          cap = 25L)
+      }
+
+      # Section 6: diseases (ortholog-gated).
+      dis_body <- if (!has_ortholog) {
+        empty_note('No human ortholog available -- DisGeNET query not performed.')
+      } else {
+        dis <- db_protein_diseases(con(), pid)
+        if (nrow(dis) == 0) {
+          empty_note('No disease associations found.')
+        } else {
+          shiny::tagList(
+            shiny::div(class = 'provenance', 'Queried via human ortholog.'),
+            capped_table(dis, c('Disease', 'GDA score', 'Evidence', 'Pubs'),
+              function(r) list(
+                shiny::tags$td(r$disease_name),
+                shiny::tags$td(formatC(r$gda_score, format = 'g', digits = 2)),
+                shiny::tags$td(na_dash(r$evidence_index)),
+                shiny::tags$td(na_dash(r$n_publications)))))
+        }
+      }
+
+      # Section 7: drugs (ortholog-gated).
+      drug_body <- if (!has_ortholog) {
+        empty_note('No human ortholog available -- DGIdb query not performed.')
+      } else {
+        dr <- db_protein_drugs(con(), pid)
+        if (nrow(dr) == 0) {
+          empty_note('No drug interactions found.')
+        } else {
+          capped_table(dr, c('Drug', 'Interaction', 'Approval', 'Sources'),
+            function(r) list(
+              shiny::tags$td(r$drug_name), shiny::tags$td(na_dash(r$interaction_type)),
+              shiny::tags$td(na_dash(r$approval_status)), shiny::tags$td(na_dash(r$sources))),
+            cap = 25L)
+        }
+      }
+
+      # Section 8: chemical interactions (CTD, often long).
+      ch <- db_protein_chemicals(con(), pid)
+      chem_body <- if (nrow(ch) == 0) {
+        empty_note('No chemical-gene interactions found.')
+      } else {
+        capped_table(ch, c('Chemical', 'Actions', 'Pubs'),
+          function(r) list(
+            shiny::tags$td(r$chemical_name),
+            shiny::tags$td(na_dash(r$interaction_actions)),
+            shiny::tags$td(na_dash(r$n_publications))),
+          cap = 10L)
+      }
+
+      # Section 9: PubMed co-occurrence (external search links).
+      pm <- db_protein_pubmed(con(), pid)
+      pm_body <- if (nrow(pm) == 0) {
+        empty_note('No literature co-occurrence data.')
+      } else {
+        shiny::tags$table(class = 'mini-table',
+          shiny::tags$thead(shiny::tags$tr(
+            shiny::tags$th('Search term'), shiny::tags$th('Hits'),
+            shiny::tags$th('PMI score'), shiny::tags$th(''))),
+          shiny::tags$tbody(lapply(seq_len(nrow(pm)), function(i) {
+            r <- pm[i, ]
+            sym <- if (!is.na(r$human_symbol_used) && nzchar(r$human_symbol_used)) {
+              r$human_symbol_used
+            } else {
+              na_dash(r$mouse_symbol_used)
+            }
+            url <- sprintf('https://pubmed.ncbi.nlm.nih.gov/?term=%s+AND+%s',
+                           utils::URLencode(sym), utils::URLencode(r$search_term))
+            shiny::tags$tr(
+              shiny::tags$td(r$search_term),
+              shiny::tags$td(na_dash(r$hit_count)),
+              shiny::tags$td(fmt_p(r$normalized_score)),
+              shiny::tags$td(shiny::a(href = url, target = '_blank', 'PubMed')))
+          })))
+      }
+
+      shiny::div(class = 'profile',
+        header,
+        section('Differential abundance', da_body),
+        section('Data quality', dq_body),
+        section('Functional annotation (UniProt)', anno_body),
+        section('Enriched terms containing this protein', et_body),
+        section('Disease associations (DisGeNET)', dis_body),
+        section('Druggability (DGIdb)', drug_body),
+        section('Chemical interactions (CTD)', chem_body),
+        section('Literature co-occurrence (PubMed)', pm_body))
+    })
+
+    list(back = shiny::reactive(input$back_to_db))
+  })
+}
+
+
+# --- Helpers ----------------------------------------------------------------
+
+# MSigDB-style term names -> readable ("GOBP_ADAPTIVE_THERMOGENESIS" ->
+# "adaptive thermogenesis").
+clean_term_name <- function(x) {
+  x <- sub('^(GOBP|GOCC|GOMF|REACTOME|KEGG|WP|HP)_', '', x)
+  tolower(gsub('_', ' ', x))
+}
