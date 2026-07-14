@@ -139,6 +139,7 @@ mod_bio_process_server <- function(id, con, contrast, selected_term) {
         selection = 'single', class = 'stripe hover row-border',
         escape = FALSE,  # the Significant column is HTML dots
         options = list(pageLength = PROSIFT_PAGE_LENGTH, scrollX = TRUE,
+          stateSave = TRUE,  # keep sort/search/page across list<->profile (3.2)
           columnDefs = list(list(visible = FALSE, targets = hide)),
           order = list()))
       dt <- DT::formatSignif(dt, c('ORA p', 'GSEA p'), digits = 2)
@@ -255,7 +256,7 @@ mod_bio_process_server <- function(id, con, contrast, selected_term) {
       hide <- which(names(d) == 'protein_id') - 1L
       dt <- DT::datatable(d, rownames = FALSE, filter = 'top',
         selection = 'single', class = 'stripe hover row-border',
-        options = list(pageLength = 15, scrollX = TRUE,
+        options = list(pageLength = 15, scrollX = TRUE, stateSave = TRUE,
           columnDefs = list(list(visible = FALSE, targets = hide)),
           order = list()))
       dt <- DT::formatSignif(dt, 'Adj p', digits = 2)

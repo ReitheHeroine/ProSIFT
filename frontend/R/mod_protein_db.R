@@ -40,18 +40,24 @@ mod_protein_db_server <- function(id, protein_data) {
     display_data <- shiny::reactive({
       df <- protein_data()
       shiny::req(df)
+      # Column order here is the display order (identity, statistics, QC, then
+      # the annotation-richness indicators). protein_id and significant are
+      # hidden helpers (click-through + the significance filter).
       data.frame(
         protein_id   = df$protein_id,
-        Gene         = df$gene_symbol,
+        # Fall back to the accession when a protein has no gene symbol (matches
+        # the profile-header fallback), so the cell is never blank.
+        Gene         = ifelse(is.na(df$gene_symbol) | !nzchar(df$gene_symbol),
+                              df$protein_id, df$gene_symbol),
         `Protein name` = df$protein_name,
-        `log2 FC`    = df$log2_fc,
         `Adj p-value` = df$adj_pvalue,
+        `log2 FC`    = df$log2_fc,
         Direction    = ifelse(is.na(df$direction), 'ns', df$direction),
+        Detection    = df$detection_category,
+        `% imputed`  = round(df$imputation_fraction * 100, 1),
         Diseases     = df$disease_count,
         Drugs        = ifelse(!is.na(df$drug_count) & df$drug_count > 0, 'Yes', '--'),
         PubMed       = df$top_pmi,
-        Detection    = df$detection_category,
-        `% imputed`  = round(df$imputation_fraction * 100, 1),
         significant  = ifelse(is.na(df$significant), 0L, df$significant),
         check.names  = FALSE,
         stringsAsFactors = FALSE
@@ -76,6 +82,20 @@ mod_protein_db_server <- function(id, protein_data) {
     output$table <- DT::renderDT({
       d <- filtered_data()
       hide_targets <- which(names(d) %in% c('protein_id', 'significant')) - 1L
+      # Render NA in the richness columns as '--' at display time only, so the
+      # underlying value stays numeric and sorts correctly (spec Section 4.1.1).
+      dash_na <- DT::JS(
+        "function(data, type){return type === 'display' && data === null ? '--' : data;}")
+      pmi_na <- DT::JS(paste0(
+        "function(data, type){return type === 'display' ? ",
+        "(data === null ? '--' : Number(data).toFixed(2)) : data;}"))
+      diseases_col <- which(names(d) == 'Diseases') - 1L
+      pubmed_col <- which(names(d) == 'PubMed') - 1L
+      adjp_col <- which(names(d) == 'Adj p-value') - 1L
+      # Centre every column except the two text identifiers (and the hidden
+      # helpers), which read better left-aligned.
+      center_cols <- which(!names(d) %in%
+        c('protein_id', 'Gene', 'Protein name', 'significant')) - 1L
 
       dt <- DT::datatable(
         d,
@@ -87,8 +107,16 @@ mod_protein_db_server <- function(id, protein_data) {
           pageLength = PROSIFT_PAGE_LENGTH,
           lengthMenu = list(c(25, 50, 100, -1), c('25', '50', '100', 'All')),
           scrollX = TRUE,
-          columnDefs = list(list(visible = FALSE, targets = hide_targets)),
-          order = list()  # keep the SQL gene-symbol order by default
+          # Persist sort/search/page/column state so it survives tab switches
+          # and the view re-rendering (spec Section 3.2).
+          stateSave = TRUE,
+          columnDefs = list(
+            list(visible = FALSE, targets = hide_targets),
+            list(className = 'dt-center', targets = center_cols),
+            list(targets = diseases_col, render = dash_na),
+            list(targets = pubmed_col, render = pmi_na)),
+          # Default to most-significant-first (adjusted p-value ascending).
+          order = list(list(adjp_col, 'asc'))
         )
       )
 
@@ -105,7 +133,6 @@ mod_protein_db_server <- function(id, protein_data) {
       )
       # Adjusted p-value: two significant figures, numeric sort preserved.
       dt <- DT::formatSignif(dt, 'Adj p-value', digits = 2)
-      dt <- DT::formatRound(dt, 'PubMed', digits = 2)
       dt
     }, server = TRUE)
 

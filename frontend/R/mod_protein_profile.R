@@ -122,6 +122,22 @@ mod_protein_profile_server <- function(id, con, selected_protein) {
       ortholog <- na_dash(core$ortholog_mapping_status)
       has_ortholog <- !identical(ortholog, 'no_ortholog') && ortholog != '-'
 
+      # External gene-page links for the disease/drug sections (spec 4.4.2),
+      # keyed on the human ortholog and shown only when one exists. DisGeNET's
+      # public URL path survived its move to disgenet.com (verified 2026-07-14).
+      has_entrez <- has_ortholog && !is.na(core$human_ortholog_entrez) &&
+        nzchar(core$human_ortholog_entrez)
+      has_symbol <- has_ortholog && !is.na(core$human_ortholog_symbol) &&
+        nzchar(core$human_ortholog_symbol)
+      disgenet_link <- if (has_entrez) shiny::a(
+        class = 'section-link', target = '_blank',
+        href = sprintf('https://disgenet.com/browser/0/1/0/%s/', core$human_ortholog_entrez),
+        'DisGeNET ↗')
+      dgidb_link <- if (has_symbol) shiny::a(
+        class = 'section-link', target = '_blank',
+        href = sprintf('https://www.dgidb.org/genes/%s', core$human_ortholog_symbol),
+        'DGIdb ↗')
+
       # Section 1: header.
       header <- shiny::div(class = 'profile-header-wrap',
         shiny::actionLink(ns('back_to_db'), '← Back to database',
@@ -233,16 +249,12 @@ mod_protein_profile_server <- function(id, con, selected_protein) {
       }
 
       # Section 8: chemical interactions (CTD, often long).
-      ch <- db_protein_chemicals(con(), pid)
-      chem_body <- if (nrow(ch) == 0) {
+      # CTD interactions can run to thousands of rows, so this section is a
+      # paged/searchable DT (output$chem_table) rather than a capped table.
+      chem_body <- if (nrow(chem_data()) == 0) {
         empty_note('No chemical-gene interactions found.')
       } else {
-        capped_table(ch, c('Chemical', 'Actions', 'Pubs'),
-          function(r) list(
-            shiny::tags$td(r$chemical_name),
-            shiny::tags$td(na_dash(r$interaction_actions)),
-            shiny::tags$td(na_dash(r$n_publications))),
-          cap = 10L)
+        DT::DTOutput(ns('chem_table'))
       }
 
       # Section 9: PubMed co-occurrence (external search links).
@@ -262,7 +274,8 @@ mod_protein_profile_server <- function(id, con, selected_protein) {
               na_dash(r$mouse_symbol_used)
             }
             url <- sprintf('https://pubmed.ncbi.nlm.nih.gov/?term=%s+AND+%s',
-                           utils::URLencode(sym), utils::URLencode(r$search_term))
+                           utils::URLencode(sym, reserved = TRUE),
+                           utils::URLencode(r$search_term, reserved = TRUE))
             shiny::tags$tr(
               shiny::tags$td(r$search_term),
               shiny::tags$td(na_dash(r$hit_count)),
@@ -277,11 +290,34 @@ mod_protein_profile_server <- function(id, con, selected_protein) {
         section('Data quality', dq_body),
         section('Functional annotation (UniProt)', anno_body),
         section('Enriched terms containing this protein', et_body),
-        section('Disease associations (DisGeNET)', dis_body),
-        section('Druggability (DGIdb)', drug_body),
+        section(shiny::tagList('Disease associations (DisGeNET)', disgenet_link), dis_body),
+        section(shiny::tagList('Druggability (DGIdb)', dgidb_link), drug_body),
         section('Chemical interactions (CTD)', chem_body),
         section('Literature co-occurrence (PubMed)', pm_body))
     })
+
+    # Chemical interactions (Section 8) as a paged/searchable DT. Queried once
+    # here and shared with the renderUI empty-vs-table decision above.
+    chem_data <- shiny::reactive({
+      shiny::req(selected_protein(), con())
+      db_protein_chemicals(con(), selected_protein())
+    })
+
+    output$chem_table <- DT::renderDT({
+      d <- chem_data()
+      shiny::req(nrow(d) > 0)
+      disp <- data.frame(
+        Chemical = d$chemical_name,
+        Actions  = prettify_ctd_actions(d$interaction_actions),
+        Pubs     = d$n_publications,
+        check.names = FALSE, stringsAsFactors = FALSE)
+      DT::datatable(disp, rownames = FALSE, selection = 'none',
+        class = 'stripe hover row-border compact',
+        options = list(
+          pageLength = 10,
+          lengthMenu = list(c(10, 25, 50, -1), c('10', '25', '50', 'All')),
+          scrollX = TRUE, order = list()))
+    }, server = TRUE)
 
     list(
       back = shiny::reactive(input$back_to_db),
@@ -292,9 +328,11 @@ mod_protein_profile_server <- function(id, con, selected_protein) {
 
 # --- Helpers ----------------------------------------------------------------
 
-# MSigDB-style term names -> readable ("GOBP_ADAPTIVE_THERMOGENESIS" ->
-# "adaptive thermogenesis").
-clean_term_name <- function(x) {
-  x <- sub('^(GOBP|GOCC|GOMF|REACTOME|KEGG|WP|HP)_', '', x)
-  tolower(gsub('_', ' ', x))
+# CTD interaction_actions use a "qualifier^type" grammar joined by "|", e.g.
+# "decreases^expression|increases^abundance" -> "decreases expression;
+# increases abundance". Vectorised; NA -> "-".
+prettify_ctd_actions <- function(x) {
+  out <- gsub('\\|', '; ', gsub('\\^', ' ', x))
+  out[is.na(out)] <- '-'
+  out
 }

@@ -171,3 +171,13 @@ table.dataTable th { font-size: 12px; text-transform: none; }
 /* Clickable enriched-term links (protein profile Section 5) */
 .term-link { color: var(--prosift-teal); text-decoration: none; }
 .term-link:hover { text-decoration: underline; }
+
+/* External gene-page link in a section title (DisGeNET / DGIdb) */
+.section-link {
+  float: right;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--prosift-teal);
+  text-decoration: none;
+}
+.section-link:hover { text-decoration: underline; }
