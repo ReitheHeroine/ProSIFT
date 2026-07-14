@@ -242,3 +242,80 @@ db_protein_pubmed <- function(con, pid) {
   '
   DBI::dbGetQuery(con, sql, params = list(pid))
 }
+
+
+# --- Biological Process View (Module 08 Section 4.3) ------------------------
+# Enrichment is stored one row per (term, analysis_type, contrast). The term
+# list pivots the ORA and GSEA rows of a contrast onto one row per term. A term
+# is 'significant' at adj_pvalue < 0.05 (matches the Module 05 convention and
+# the Section 4.3.1 significance dots).
+
+#' Term list for one contrast: one row per GO/Reactome term with the ORA and
+#' GSEA statistics side by side, plus per-analysis significance flags. Terms
+#' with only an ORA or only a GSEA result still appear (LEFT JOINs).
+db_term_list <- function(con, contrast) {
+  sql <- r'(
+    SELECT t.term_id, t.term_name, t.library, t.size,
+           ora.adj_pvalue AS ora_adj_p, ora.odds_ratio, ora.overlap_size,
+           gsea.adj_pvalue AS gsea_adj_p, gsea.nes,
+           COALESCE(ora.sig, 0) AS ora_sig, COALESCE(gsea.sig, 0) AS gsea_sig
+    FROM (
+      SELECT term_id, MAX(term_name) AS term_name, MAX(library) AS library,
+             MAX(gene_set_size) AS size
+      FROM enrichment_results WHERE contrast = ? GROUP BY term_id
+    ) t
+    LEFT JOIN (
+      SELECT term_id, adj_pvalue, odds_ratio, overlap_size,
+             CASE WHEN adj_pvalue < 0.05 THEN 1 ELSE 0 END AS sig
+      FROM enrichment_results WHERE contrast = ? AND analysis_type = 'ORA'
+    ) ora ON ora.term_id = t.term_id
+    LEFT JOIN (
+      SELECT term_id, adj_pvalue, enrichment_score AS nes,
+             CASE WHEN adj_pvalue < 0.05 THEN 1 ELSE 0 END AS sig
+      FROM enrichment_results WHERE contrast = ? AND analysis_type = 'GSEA'
+    ) gsea ON gsea.term_id = t.term_id
+    ORDER BY t.term_name
+  )'
+  DBI::dbGetQuery(con, sql, params = list(contrast, contrast, contrast))
+}
+
+#' Term identity (name, id, library, size). One row.
+db_term_core <- function(con, term_id) {
+  sql <- '
+    SELECT term_id, MAX(term_name) AS term_name, MAX(library) AS library,
+           MAX(gene_set_size) AS size
+    FROM enrichment_results WHERE term_id = ? GROUP BY term_id
+  '
+  DBI::dbGetQuery(con, sql, params = list(term_id))
+}
+
+#' Per-term ORA + GSEA statistics across every contrast (one row per
+#' contrast x analysis_type). The module lays them out side by side.
+db_term_stats <- function(con, term_id) {
+  sql <- '
+    SELECT contrast, analysis_type, adj_pvalue, odds_ratio, overlap_size,
+           gene_set_size, enrichment_score AS nes
+    FROM enrichment_results
+    WHERE term_id = ?
+    ORDER BY contrast, analysis_type
+  '
+  DBI::dbGetQuery(con, sql, params = list(term_id))
+}
+
+#' Member proteins of a term for one contrast: the mini protein-database table
+#' (gene + DA stats + ORA-set / leading-edge flags). Membership and the flags
+#' come from protein_term_mapping; the stats from differential_abundance.
+db_term_members <- function(con, term_id, contrast) {
+  sql <- r'(
+    SELECT ptm.protein_id, ptm.gene_symbol,
+           d.log2_fc,
+           COALESCE(d.deqms_adj_pvalue, d.limma_adj_pvalue) AS adj_pvalue,
+           d.direction, ptm.in_significant_set, ptm.is_leading_edge
+    FROM protein_term_mapping ptm
+    LEFT JOIN differential_abundance d
+      ON d.protein_id = ptm.protein_id AND d.contrast = ?
+    WHERE ptm.term_id = ? AND ptm.contrast = ?
+    ORDER BY (ptm.gene_symbol IS NULL OR ptm.gene_symbol = ''), ptm.gene_symbol
+  )'
+  DBI::dbGetQuery(con, sql, params = list(contrast, term_id, contrast))
+}

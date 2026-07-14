@@ -31,35 +31,8 @@ FLAG_LABELS <- c(
 )
 
 # Rows to show before truncating a long section (with a running total note).
+# Shared formatters/badges/section wrappers live in R/ui_helpers.R.
 PROFILE_SECTION_CAP <- 15L
-
-fmt_fc <- function(x) if (is.na(x)) '-' else sprintf('%+.2f', x)
-fmt_p  <- function(x) if (is.na(x)) '-' else formatC(x, format = 'g', digits = 2)
-na_dash <- function(x) if (is.null(x) || length(x) == 0 || is.na(x) || !nzchar(as.character(x))) '-' else as.character(x)
-
-# Direction / detection coloured badges (styling in prosift.css).
-dir_badge <- function(d) {
-  d <- if (is.na(d)) 'ns' else d
-  cls <- switch(d, up = 'badge-up', down = 'badge-down', 'badge-ns')
-  shiny::span(class = paste('badge', cls), d)
-}
-det_badge <- function(cat) {
-  cat <- na_dash(cat)
-  shiny::span(class = 'badge det-badge', cat)
-}
-
-# A labelled statistic card and a titled section wrapper.
-stat_card <- function(label, value) {
-  shiny::div(class = 'stat-card',
-    shiny::div(class = 'stat-label', label),
-    shiny::div(class = 'stat-value', value))
-}
-section <- function(title, ...) {
-  shiny::div(class = 'section',
-    shiny::div(class = 'section-title', title),
-    shiny::tagList(...))
-}
-empty_note <- function(msg) shiny::div(class = 'empty-note', msg)
 
 # Build an HTML table from a data.frame slice, capped, with a total-count note.
 # `cells` is a function(row_df_1) returning a list of <td> tags.
@@ -209,9 +182,16 @@ mod_protein_profile_server <- function(id, con, selected_protein) {
       et_body <- if (nrow(et) == 0) {
         empty_note('No enriched terms contain this protein.')
       } else {
+        # Each term name is a link into the biological-process term profile: the
+        # onclick pushes the term_id to the module input `term_link`, which the
+        # server returns as `term_selected` for the app to navigate on.
         capped_table(et, c('Term', 'Library', 'Leading edge'),
           function(r) list(
-            shiny::tags$td(clean_term_name(r$term_name)),
+            shiny::tags$td(shiny::tags$a(
+              clean_term_name(r$term_name), class = 'term-link',
+              style = 'cursor: pointer;',
+              onclick = sprintf("Shiny.setInputValue('%s', '%s', {priority: 'event'})",
+                                ns('term_link'), r$term_id))),
             shiny::tags$td(r$library),
             shiny::tags$td(if (isTRUE(as.logical(r$is_leading_edge))) 'yes' else '')),
           cap = 25L)
@@ -303,7 +283,9 @@ mod_protein_profile_server <- function(id, con, selected_protein) {
         section('Literature co-occurrence (PubMed)', pm_body))
     })
 
-    list(back = shiny::reactive(input$back_to_db))
+    list(
+      back = shiny::reactive(input$back_to_db),
+      term_selected = shiny::reactive(input$term_link))
   })
 }
 

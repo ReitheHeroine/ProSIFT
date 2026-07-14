@@ -146,3 +146,28 @@ table.dataTable th { font-size: 12px; text-transform: none; }
   margin-top: 10px;
   border-radius: 4px;
 }
+
+/* --- Biological process view (Section 4.3) --- */
+.subsection-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #444;
+  margin-bottom: 6px;
+}
+
+/* Significance dots in the term list (purple ORA, teal GSEA) */
+.dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-right: 3px;
+  border: 1px solid #c4c9cf;
+}
+.dot-ora { background: #7B5EA7; border-color: #7B5EA7; }
+.dot-gsea { background: var(--prosift-teal); border-color: var(--prosift-teal); }
+.dot-empty { background: transparent; }
+
+/* Clickable enriched-term links (protein profile Section 5) */
+.term-link { color: var(--prosift-teal); text-decoration: none; }
+.term-link:hover { text-decoration: underline; }

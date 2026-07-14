@@ -109,11 +109,13 @@ mod_protein_db_server <- function(id, protein_data) {
       dt
     }, server = TRUE)
 
-    # Step 4: expose the clicked protein_id to the parent for navigation.
+    # Step 4: expose the clicked protein_id to the parent for navigation. Depend
+    # only on the selection event; read filtered_data() with isolate() so that
+    # toggling a filter with a row selected does not fire a spurious click.
     shiny::reactive({
       sel <- input$table_rows_selected
       if (length(sel) == 0) return(NULL)
-      filtered_data()$protein_id[sel]
+      shiny::isolate(filtered_data())$protein_id[sel]
     })
   })
 }

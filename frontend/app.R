@@ -66,11 +66,10 @@ ui <- shiny::fluidPage(
       mod_protein_profile_ui('profile')
     ),
 
-    # View 3: Biological process (placeholder until slice 3).
+    # View 3: Biological process.
     shiny::tabPanel(
       'Biological process', value = 'process',
-      shiny::div(class = 'placeholder',
-                 'Biological process view - coming in a later slice.')
+      mod_bio_process_ui('process')
     )
   )
 )
@@ -129,26 +128,53 @@ server <- function(input, output, session) {
     shiny::updateSelectInput(session, 'contrast', choices = contrasts)
   })
 
-  # Step 4: the protein-overview data for the current run + contrast.
+  # Step 4: app-owned navigation state. The currently viewed protein and term
+  # are held here (not inside a view module) so any view can drive navigation --
+  # the DB table, a term's member row, and a profile's term link all feed these.
+  # Reset on run switch (spec Section 4.4.1).
+  current_protein <- shiny::reactiveVal(NULL)
+  current_term <- shiny::reactiveVal(NULL)
+  shiny::observeEvent(con(), {
+    current_protein(NULL)
+    current_term(NULL)
+  })
+
+  # Step 5: the protein-overview data for the current run + contrast.
   protein_data <- shiny::reactive({
     shiny::req(con(), input$contrast)
     db_protein_table(con(), input$contrast)
   })
 
-  # Step 5: the Protein Database View module returns the clicked protein_id.
-  selected_protein <- mod_protein_db_server('db', protein_data)
-
-  # Step 6: click-through -> switch to the profile tab.
-  shiny::observeEvent(selected_protein(), {
-    shiny::req(selected_protein())
+  # Step 6: Protein Database View -> clicked protein sets current_protein.
+  db_clicked <- mod_protein_db_server('db', protein_data)
+  shiny::observeEvent(db_clicked(), {
+    current_protein(db_clicked())
     shiny::updateTabsetPanel(session, 'main_tabs', selected = 'profile')
   })
 
-  # Step 7: the Protein Profile View renders the selected protein's card and
-  # returns a `back` event; observing it returns the user to the database tab.
-  profile <- mod_protein_profile_server('profile', con, selected_protein)
+  # Step 7: Protein Profile View. `back` -> database tab; `term_selected` (a
+  # clicked enriched-term link) -> set current_term and open the process tab.
+  profile <- mod_protein_profile_server('profile', con, current_protein)
   shiny::observeEvent(profile$back(), {
     shiny::updateTabsetPanel(session, 'main_tabs', selected = 'db')
+  })
+  shiny::observeEvent(profile$term_selected(), {
+    shiny::req(profile$term_selected())
+    current_term(profile$term_selected())
+    shiny::updateTabsetPanel(session, 'main_tabs', selected = 'process')
+  })
+
+  # Step 8: Biological Process View. Reads current_term (NULL -> term list).
+  # `term_clicked` opens a term; `back_to_list` clears it; `protein_clicked`
+  # (a member row) sets current_protein and opens the profile tab -- completing
+  # the protein <-> term navigation triangle.
+  bio <- mod_bio_process_server('process', con,
+                                shiny::reactive(input$contrast), current_term)
+  shiny::observeEvent(bio$term_clicked(), current_term(bio$term_clicked()))
+  shiny::observeEvent(bio$back_to_list(), current_term(NULL))
+  shiny::observeEvent(bio$protein_clicked(), {
+    current_protein(bio$protein_clicked())
+    shiny::updateTabsetPanel(session, 'main_tabs', selected = 'profile')
   })
 }
 
