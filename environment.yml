@@ -56,6 +56,9 @@ dependencies:
   # --- Testing ---
   - pytest>=7.4
   - pytest-cov>=4.1
+  - r-testthat                        # Module 08 frontend unit + testServer tests
+  - r-shinytest2                      # Module 08 frontend end-to-end (headless Chrome)
+  - r-chromote                        # Headless Chrome driver for shinytest2
 
   # --- Linting / typing (QC component) ---
   - ruff>=0.5.0
