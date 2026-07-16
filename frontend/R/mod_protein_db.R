@@ -10,9 +10,12 @@
 #                protein profile. Presentation only; all SQL lives in db.R.
 # Inputs:        protein_data - a reactive returning the db_protein_table()
 #                data.frame for the current run + contrast.
+#                enabled_dbs  - a reactive giving the enabled Module 06 databases
+#                (NULL = unknown -> fail-open); disabled richness columns show 'n/q'.
 # Outputs:       UI + server. The server returns a reactive giving the
 #                protein_id of the clicked row (NULL when none selected).
-# Usage:         mod_protein_db_ui('db'); sel <- mod_protein_db_server('db', dat)
+# Usage:         mod_protein_db_ui('db')
+#                sel <- mod_protein_db_server('db', dat, enabled_dbs)
 # =============================================================================
 
 # --- UI ---------------------------------------------------------------------
@@ -23,7 +26,8 @@ mod_protein_db_ui <- function(id) {
     shiny::div(
       class = 'view-controls',
       shiny::checkboxInput(ns('sig_only'), 'Significant only', value = FALSE),
-      shiny::span(class = 'row-count', shiny::textOutput(ns('row_count'), inline = TRUE))
+      shiny::span(class = 'row-count', shiny::textOutput(ns('row_count'), inline = TRUE)),
+      shiny::uiOutput(ns('nq_legend'), inline = TRUE)
     ),
     DT::DTOutput(ns('table'))
   )
@@ -32,14 +36,25 @@ mod_protein_db_ui <- function(id) {
 
 # --- Server -----------------------------------------------------------------
 
-mod_protein_db_server <- function(id, protein_data) {
+mod_protein_db_server <- function(id, protein_data, enabled_dbs) {
   shiny::moduleServer(id, function(input, output, session) {
+
+    # Which annotation databases were disabled this run. Their richness columns
+    # render 'n/q' rather than '--', so 'not queried' is not read as a zero
+    # (spec 4.4). enabled_dbs() is NULL when unknown -> fail-open (all enabled).
+    db_off <- shiny::reactive({
+      e <- enabled_dbs()
+      list(disgenet = !db_enabled('disgenet', e),
+           dgidb = !db_enabled('dgidb', e),
+           pubmed = !db_enabled('pubmed', e))
+    })
 
     # Step 1: shape the raw query result into display columns. Kept separate
     # from the significance filter so the badge/format logic runs once.
     display_data <- shiny::reactive({
       df <- protein_data()
       shiny::req(df)
+      off <- db_off()
       # Column order here is the display order (identity, statistics, QC, then
       # the annotation-richness indicators). protein_id and significant are
       # hidden helpers (click-through + the significance filter).
@@ -56,7 +71,8 @@ mod_protein_db_server <- function(id, protein_data) {
         Detection    = df$detection_category,
         `% imputed`  = round(df$imputation_fraction * 100, 1),
         Diseases     = df$disease_count,
-        Drugs        = ifelse(!is.na(df$drug_count) & df$drug_count > 0, 'Yes', '--'),
+        Drugs        = if (off$dgidb) 'n/q' else
+                       ifelse(!is.na(df$drug_count) & df$drug_count > 0, 'Yes', '--'),
         PubMed       = df$top_pmi,
         significant  = ifelse(is.na(df$significant), 0L, df$significant),
         check.names  = FALSE,
@@ -75,6 +91,14 @@ mod_protein_db_server <- function(id, protein_data) {
       sprintf('%d proteins', nrow(filtered_data()))
     })
 
+    # Legend, shown only when a richness column is showing 'n/q'.
+    output$nq_legend <- shiny::renderUI({
+      if (any(unlist(db_off()))) {
+        shiny::span(class = 'nq-legend',
+                    'n/q = database not enabled for this run')
+      }
+    })
+
     # Step 3: render the DT table. Column 0 (protein_id) and the trailing
     # `significant` helper column are hidden; they back click-through and the
     # filter but are not shown. Server-side processing (the renderDT default)
@@ -89,6 +113,12 @@ mod_protein_db_server <- function(id, protein_data) {
       pmi_na <- DT::JS(paste0(
         "function(data, type){return type === 'display' ? ",
         "(data === null ? '--' : Number(data).toFixed(2)) : data;}"))
+      # A disabled database's whole column renders 'n/q' (not queried), distinct
+      # from the per-protein '--' zero.
+      nq <- DT::JS("function(data, type){return type === 'display' ? 'n/q' : data;}")
+      off <- db_off()
+      diseases_render <- if (off$disgenet) nq else dash_na
+      pubmed_render <- if (off$pubmed) nq else pmi_na
       diseases_col <- which(names(d) == 'Diseases') - 1L
       pubmed_col <- which(names(d) == 'PubMed') - 1L
       adjp_col <- which(names(d) == 'Adj p-value') - 1L
@@ -113,8 +143,8 @@ mod_protein_db_server <- function(id, protein_data) {
           columnDefs = list(
             list(visible = FALSE, targets = hide_targets),
             list(className = 'dt-center', targets = center_cols),
-            list(targets = diseases_col, render = dash_na),
-            list(targets = pubmed_col, render = pmi_na)),
+            list(targets = diseases_col, render = diseases_render),
+            list(targets = pubmed_col, render = pubmed_render)),
           # Default to most-significant-first (adjusted p-value ascending).
           order = list(list(adjp_col, 'asc'))
         )

@@ -83,7 +83,8 @@ server <- function(input, output, session) {
   runs <- discover_runs()
   if (nrow(runs) == 0) {
     shiny::showNotification(
-      'No prosift_results.db found. Set PROSIFT_RESULTS_DIR or stage a database in frontend/.devdata/.',
+      paste('No prosift_results.db found. Set PROSIFT_RESULTS_DIR or stage a',
+            'database in frontend/.devdata/.'),
       type = 'error', duration = NULL
     )
   } else {
@@ -145,8 +146,13 @@ server <- function(input, output, session) {
     db_protein_table(con(), input$contrast)
   })
 
+  # The Module 06 databases enabled for this run (NULL = unknown -> fail-open).
+  enabled_dbs <- shiny::reactive({
+    if (is.null(con())) NULL else db_enabled_dbs(con())
+  })
+
   # Step 6: Protein Database View -> clicked protein sets current_protein.
-  db_clicked <- mod_protein_db_server('db', protein_data)
+  db_clicked <- mod_protein_db_server('db', protein_data, enabled_dbs)
   shiny::observeEvent(db_clicked(), {
     current_protein(db_clicked())
     shiny::updateTabsetPanel(session, 'main_tabs', selected = 'profile')

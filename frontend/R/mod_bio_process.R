@@ -89,9 +89,18 @@ mod_bio_process_server <- function(id, con, contrast, selected_term) {
 
     # ---- Term list state ----------------------------------------------------
 
+    # The run's configured enrichment FDR threshold (default 0.05); drives the
+    # ORA/GSEA significance dots and the significance filter, so a non-default
+    # run is not silently scored at 0.05.
+    fdr <- shiny::reactive({
+      v <- suppressWarnings(as.numeric(
+        db_param(con(), 'enrichment.fdr_threshold', '0.05')))
+      if (is.na(v)) 0.05 else v
+    })
+
     term_data <- shiny::reactive({
       shiny::req(con(), contrast())
-      db_term_list(con(), contrast())
+      db_term_list(con(), contrast(), alpha = fdr())
     })
 
     # Keep the library filter choices in sync with the data.
@@ -227,8 +236,10 @@ mod_bio_process_server <- function(id, con, contrast, selected_term) {
     # exists on disk; the profile UI omits the imageOutput for terms outside the
     # plotted top-N, so req() here simply no-ops in that case.
     output$gsea_running_plot <- shiny::renderImage({
-      tid <- selected_term(); shiny::req(tid, con(), contrast())
-      core <- db_term_core(con(), tid); shiny::req(nrow(core) == 1)
+      tid <- selected_term()
+      shiny::req(tid, con(), contrast())
+      core <- db_term_core(con(), tid)
+      shiny::req(nrow(core) == 1)
       path <- gsea_running_score_png(con(), contrast(), core$library, tid)
       shiny::req(!is.na(path))
       list(src = path, contentType = 'image/png', width = '100%',

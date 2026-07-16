@@ -254,3 +254,105 @@ test_that('A16: open_results_db errors on empty / missing paths', {
   expect_error(open_results_db(NA_character_), 'non-empty database path')
   expect_error(open_results_db(tempfile('does_not_exist_')), 'not found')
 })
+
+
+# --- Fix 1: enrichment significance respects the alpha argument ---------------
+
+test_that('Fix 1: db_term_list ora_sig respects the alpha threshold', {
+  con <- fixture_con(); on.exit(close_results_db(con))
+  # GOBP_Y ORA adj_pvalue is exactly 0.05: not significant at 0.05 (strict <),
+  # significant at 0.10.
+  y05 <- db_term_list(con, 'KO_vs_WT', alpha = 0.05)
+  y10 <- db_term_list(con, 'KO_vs_WT', alpha = 0.10)
+  expect_equal(y05$ora_sig[y05$term_id == 'GOBP_Y'], 0)
+  expect_equal(y10$ora_sig[y10$term_id == 'GOBP_Y'], 1)
+  # Default arg is 0.05.
+  expect_equal(db_term_list(con, 'KO_vs_WT')$ora_sig[y05$term_id == 'GOBP_Y'], 0)
+})
+
+test_that('Fix 1: count(ora_sig) is monotonic non-decreasing in alpha', {
+  con <- fixture_con(); on.exit(close_results_db(con))
+  counts <- vapply(c(0.001, 0.05, 0.10, 0.5), function(a) {
+    sum(db_term_list(con, 'KO_vs_WT', alpha = a)$ora_sig)
+  }, numeric(1))
+  expect_false(is.unsorted(counts))
+})
+
+test_that('Fix 1: db_term_list is order-independent (metamorphic on row order)', {
+  base <- fixture_con(); on.exit(close_results_db(base))
+  ref <- db_term_list(base, 'KO_vs_WT')
+  # Build a DB whose enrichment_results rows are reversed; result must match.
+  p <- tempfile('prosift_fixture_shuffled_', fileext = '.db')
+  build_fixture_db(p)                       # standard tables, then overwrite one
+  con_w <- DBI::dbConnect(RSQLite::SQLite(), p)
+  er <- .fx_enrichment_results()
+  DBI::dbWriteTable(con_w, 'enrichment_results', er[rev(seq_len(nrow(er))), ],
+                    overwrite = TRUE)
+  DBI::dbDisconnect(con_w)
+  shuf <- open_results_db(p); on.exit(close_results_db(shuf), add = TRUE)
+  expect_equal(db_term_list(shuf, 'KO_vs_WT'), ref)
+})
+
+test_that('Fix 1: db_term_list / db_protein_table on an absent contrast are 0-row', {
+  con <- fixture_con(); on.exit(close_results_db(con))
+  expect_equal(nrow(db_term_list(con, 'NO_SUCH_CONTRAST')), 0L)
+  # proteins still LEFT-JOIN through (6 rows) but with NA stats -> exercises the
+  # empty-DA-for-contrast path without error.
+  expect_equal(nrow(db_protein_table(con, 'NO_SUCH_CONTRAST')), 6L)
+})
+
+
+# --- Fix 1/2: db_param robustness + run-parameter accessors -------------------
+
+test_that('db_param returns the default on a missing run_parameters table', {
+  con <- fixture_con('no_params'); on.exit(close_results_db(con))
+  expect_false(DBI::dbExistsTable(con, 'run_parameters'))
+  expect_equal(db_param(con, 'enrichment.fdr_threshold', '0.05'), '0.05')
+  expect_null(db_enabled_dbs(con))              # NULL -> fail-open
+})
+
+test_that('db_param returns the default on a missing key', {
+  con <- fixture_con(); on.exit(close_results_db(con))
+  expect_equal(db_param(con, 'no.such.key', 'DEF'), 'DEF')
+  expect_equal(db_param(con, 'enrichment.fdr_threshold', '0.05'), '0.05')
+})
+
+test_that('databases.enabled is stored/read in the real JSON wire format', {
+  con <- fixture_con(); on.exit(close_results_db(con))
+  raw <- db_param(con, 'databases.enabled')
+  expect_true(is.character(raw) && grepl('^\\[', raw))     # a JSON string array
+  parsed <- db_enabled_dbs(con)
+  expect_setequal(parsed, c('uniprot', 'pubmed', 'disgenet', 'dgidb', 'ctd'))
+  expect_true(db_enabled('dgidb', parsed))
+})
+
+test_that('the disabled variant omits dgidb from databases.enabled', {
+  con <- fixture_con('disabled'); on.exit(close_results_db(con))
+  enabled <- db_enabled_dbs(con)
+  expect_false(db_enabled('dgidb', enabled))
+  expect_true(db_enabled('disgenet', enabled))
+})
+
+test_that("db_enabled_dbs: empty array is all-disabled; JSON null fails open", {
+  set_enabled <- function(val) {
+    p <- tempfile('fx_dbenabled_', fileext = '.db')
+    build_fixture_db(p)
+    cw <- DBI::dbConnect(RSQLite::SQLite(), p)
+    DBI::dbExecute(
+      cw, "UPDATE run_parameters SET value = ? WHERE key = 'databases.enabled'",
+      params = list(val))
+    DBI::dbDisconnect(cw)
+    p
+  }
+  c_empty <- open_results_db(set_enabled('[]'))
+  c_null  <- open_results_db(set_enabled('null'))
+  on.exit({ close_results_db(c_empty); close_results_db(c_null) })
+
+  # '[]' -> a KNOWN empty list: every database is off (not fail-open).
+  expect_identical(db_enabled_dbs(c_empty), character(0))
+  expect_false(db_enabled('dgidb', db_enabled_dbs(c_empty)))
+
+  # 'null' -> unknown -> fail-open (NULL), so every database reads as enabled.
+  expect_null(db_enabled_dbs(c_null))
+  expect_true(db_enabled('dgidb', db_enabled_dbs(c_null)))
+})

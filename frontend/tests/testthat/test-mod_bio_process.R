@@ -99,3 +99,30 @@ test_that('C2: a term change does not fire a spurious protein_clicked', {
     expect_equal(fires, base)
   })
 })
+
+
+# --- Fix 1 wiring: the run's FDR threshold reaches the significance flags -----
+# Proves the chain db_param('enrichment.fdr_threshold') -> fdr() -> alpha, not
+# just the db-layer argument. GOBP_Y ORA adj_pvalue is exactly 0.05.
+
+test_that('Wiring: a 0.05-run does not flag GOBP_Y as ORA-significant', {
+  con <- fixture_con('default')     # run_parameters fdr = 0.05
+  on.exit(close_results_db(con))
+  testServer(mod_bio_process_server,
+             args = list(con = reactive(con), contrast = reactive('KO_vs_WT'),
+                         selected_term = reactive(NULL)), {
+    session$setInputs(sig_filter = 'ora', lib_filter = 'all')
+    expect_false('GOBP_Y' %in% term_filtered()$term_id)
+  })
+})
+
+test_that('Wiring: a 0.10-run (from run_parameters) flags GOBP_Y as ORA-significant', {
+  con <- fixture_con('threshold')   # run_parameters fdr = 0.10
+  on.exit(close_results_db(con))
+  testServer(mod_bio_process_server,
+             args = list(con = reactive(con), contrast = reactive('KO_vs_WT'),
+                         selected_term = reactive(NULL)), {
+    session$setInputs(sig_filter = 'ora', lib_filter = 'all')
+    expect_true('GOBP_Y' %in% term_filtered()$term_id)
+  })
+})

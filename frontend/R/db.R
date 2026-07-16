@@ -52,6 +52,49 @@ db_contrasts <- function(con) {
 }
 
 
+# --- Run parameters (Module 07 run_parameters key/value table) --------------
+# The frontend reads a few run-level params (the enrichment FDR threshold, the
+# list of enabled databases) to avoid hardcoding defaults or misreading a
+# disabled-database empty table as a biological zero. Everything here is
+# fail-open: a database that predates the run_parameters table (or lacks a key)
+# yields the caller's default, never an error.
+
+#' Return the raw string `value` for one run_parameters key, or `default` if the
+#' table or key is absent (or the query errors). Robust to a missing table so an
+#' older/partial DB degrades rather than crashing on every render.
+db_param <- function(con, key, default = NULL) {
+  if (!DBI::dbExistsTable(con, 'run_parameters')) return(default)
+  tryCatch({
+    v <- DBI::dbGetQuery(
+      con, 'SELECT value FROM run_parameters WHERE key = ? LIMIT 1',
+      params = list(key))$value
+    if (length(v) == 1 && !is.na(v)) v else default
+  }, error = function(e) default)
+}
+
+#' The list of Module 06 databases that ran, parsed from the JSON-string
+#' `databases.enabled` param. Returns a character vector, or NULL when the param
+#' is absent/unparseable (NULL = 'unknown', which callers treat as fail-open:
+#' every database is assumed enabled, never falsely reported 'not enabled').
+db_enabled_dbs <- function(con) {
+  raw <- db_param(con, 'databases.enabled', NULL)
+  if (is.null(raw)) return(NULL)
+  parsed <- tryCatch(jsonlite::fromJSON(raw), error = function(e) NULL)
+  # JSON null or a parse failure is 'unknown' -> fail-open (NULL). An empty
+  # array parses to a 0-length value -> character(0), i.e. all databases off.
+  if (is.null(parsed)) return(NULL)
+  as.character(parsed)
+}
+
+#' Was database `name` enabled for this run? TRUE when it is listed, FALSE when
+#' the list is known and `name` is absent, TRUE when the list is unknown (NULL,
+#' fail-open).
+db_enabled <- function(name, enabled_dbs) {
+  if (is.null(enabled_dbs)) return(TRUE)
+  name %in% enabled_dbs
+}
+
+
 # --- Protein Database View (Module 08 Section 4.1) --------------------------
 
 #' Assemble the protein-overview table for one contrast.
@@ -247,13 +290,15 @@ db_protein_pubmed <- function(con, pid) {
 # --- Biological Process View (Module 08 Section 4.3) ------------------------
 # Enrichment is stored one row per (term, analysis_type, contrast). The term
 # list pivots the ORA and GSEA rows of a contrast onto one row per term. A term
-# is 'significant' at adj_pvalue < 0.05 (matches the Module 05 convention and
-# the Section 4.3.1 significance dots).
+# is 'significant' at adj_pvalue < alpha, where alpha is the run's configured
+# enrichment.fdr_threshold (see db_param; Module 05 convention). Named SQL
+# parameters (:contrast, :alpha) avoid positional-binding hazards.
 
 #' Term list for one contrast: one row per GO/Reactome term with the ORA and
 #' GSEA statistics side by side, plus per-analysis significance flags. Terms
-#' with only an ORA or only a GSEA result still appear (LEFT JOINs).
-db_term_list <- function(con, contrast) {
+#' with only an ORA or only a GSEA result still appear (LEFT JOINs). `alpha` is
+#' the FDR cutoff for the significance flags (default 0.05).
+db_term_list <- function(con, contrast, alpha = 0.05) {
   sql <- r'(
     SELECT t.term_id, t.term_name, t.library, t.size,
            ora.adj_pvalue AS ora_adj_p, ora.odds_ratio, ora.overlap_size,
@@ -262,21 +307,21 @@ db_term_list <- function(con, contrast) {
     FROM (
       SELECT term_id, MAX(term_name) AS term_name, MAX(library) AS library,
              MAX(gene_set_size) AS size
-      FROM enrichment_results WHERE contrast = ? GROUP BY term_id
+      FROM enrichment_results WHERE contrast = :contrast GROUP BY term_id
     ) t
     LEFT JOIN (
       SELECT term_id, adj_pvalue, odds_ratio, overlap_size,
-             CASE WHEN adj_pvalue < 0.05 THEN 1 ELSE 0 END AS sig
-      FROM enrichment_results WHERE contrast = ? AND analysis_type = 'ORA'
+             CASE WHEN adj_pvalue < :alpha THEN 1 ELSE 0 END AS sig
+      FROM enrichment_results WHERE contrast = :contrast AND analysis_type = 'ORA'
     ) ora ON ora.term_id = t.term_id
     LEFT JOIN (
       SELECT term_id, adj_pvalue, enrichment_score AS nes,
-             CASE WHEN adj_pvalue < 0.05 THEN 1 ELSE 0 END AS sig
-      FROM enrichment_results WHERE contrast = ? AND analysis_type = 'GSEA'
+             CASE WHEN adj_pvalue < :alpha THEN 1 ELSE 0 END AS sig
+      FROM enrichment_results WHERE contrast = :contrast AND analysis_type = 'GSEA'
     ) gsea ON gsea.term_id = t.term_id
     ORDER BY t.term_name
   )'
-  DBI::dbGetQuery(con, sql, params = list(contrast, contrast, contrast))
+  DBI::dbGetQuery(con, sql, params = list(contrast = contrast, alpha = alpha))
 }
 
 #' Term identity (name, id, library, size). One row.

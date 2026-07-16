@@ -30,7 +30,8 @@ library(shiny)
 
 test_that('C1: toggling the filter with a row selected does not invalidate the click reactive', {
   testServer(mod_protein_db_server,
-             args = list(protein_data = reactive(.pdb_table)), {
+             args = list(protein_data = reactive(.pdb_table),
+                         enabled_dbs = reactive(NULL)), {
     session$setInputs(sig_only = FALSE, table_rows_selected = 1L)
 
     fires <- 0L
@@ -56,7 +57,8 @@ test_that('C1: toggling the filter with a row selected does not invalidate the c
 
 test_that('C3: sig_only filters to significant proteins and updates the count', {
   testServer(mod_protein_db_server,
-             args = list(protein_data = reactive(.pdb_table)), {
+             args = list(protein_data = reactive(.pdb_table),
+                         enabled_dbs = reactive(NULL)), {
     session$setInputs(sig_only = FALSE)
     expect_equal(nrow(filtered_data()), 6L)
     expect_equal(output$row_count, '6 proteins')
@@ -74,7 +76,8 @@ test_that('C3: sig_only filters to significant proteins and updates the count', 
 
 test_that('C4: clicked reactive returns the selected protein_id, NULL when none', {
   testServer(mod_protein_db_server,
-             args = list(protein_data = reactive(.pdb_table)), {
+             args = list(protein_data = reactive(.pdb_table),
+                         enabled_dbs = reactive(NULL)), {
     # No selection yet -> NULL.
     expect_null(session$returned())
 
@@ -86,4 +89,54 @@ test_that('C4: clicked reactive returns the selected protein_id, NULL when none'
     dd <- display_data()
     expect_equal(dd$Gene[dd$protein_id == 'P6'], 'P6')
   })
+})
+
+
+# --- Fix 2b: disabled-database richness column renders 'n/q', not '--' --------
+
+test_that("Fix 2b: a disabled database's column renders 'n/q', distinct from '--'", {
+  # dgidb absent from enabled_dbs -> the whole Drugs column is 'not queried'.
+  testServer(mod_protein_db_server,
+             args = list(protein_data = reactive(.pdb_table),
+                         enabled_dbs = reactive(c('disgenet', 'ctd', 'pubmed'))), {
+    session$setInputs(sig_only = FALSE)
+    dd <- display_data()
+    expect_true(all(dd$Drugs == 'n/q'))
+    expect_false(any(dd$Drugs %in% c('Yes', '--')))
+    expect_match(as.character(output$nq_legend), 'not enabled', all = FALSE)
+  })
+})
+
+test_that('Fix 2b: fail-open (enabled_dbs NULL) leaves the Drugs column normal', {
+  testServer(mod_protein_db_server,
+             args = list(protein_data = reactive(.pdb_table),
+                         enabled_dbs = reactive(NULL)), {
+    session$setInputs(sig_only = FALSE)
+    dd <- display_data()
+    expect_false(any(dd$Drugs == 'n/q'))
+    expect_true(all(dd$Drugs %in% c('Yes', '--')))
+  })
+})
+
+test_that('Fix 2b: disabled Diseases/PubMed columns use the n/q render (AC3)', {
+  # The rendered DT serializes its column renderers; the 'n/q' JS appears only
+  # for a disabled column. Diseases/PubMed disable at the render layer (their
+  # display_data stays numeric), Drugs at the R layer.
+  render_blob <- function(enabled) {
+    blob <- NULL
+    testServer(mod_protein_db_server,
+               args = list(protein_data = reactive(.pdb_table),
+                           enabled_dbs = reactive(enabled)), {
+      session$setInputs(sig_only = FALSE)
+      blob <<- paste(as.character(output$table), collapse = ' ')
+    })
+    blob
+  }
+  # dgidb-only enabled -> disgenet + pubmed off -> their columns render 'n/q'
+  # (Drugs is normal because dgidb is enabled here, so any 'n/q' is from the DT
+  # renderer, not the R-layer Drugs column).
+  expect_true(grepl('n/q', render_blob('dgidb'), fixed = TRUE))
+  # all enabled -> no column renders 'n/q'.
+  expect_false(grepl('n/q', render_blob(c('disgenet', 'dgidb', 'pubmed')),
+                     fixed = TRUE))
 })

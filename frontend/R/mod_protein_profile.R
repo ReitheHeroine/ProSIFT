@@ -73,13 +73,16 @@ qc_notes_block <- function(qc, detection_category) {
   } else {
     shiny::tagList(
       shiny::tags$ul(class = 'qc-notes', items),
-      shiny::div(class = 'count-note',
-        'Heuristic sample-level QC signals, not verdicts. Only samples where this protein was observed are considered.'))
+      shiny::div(class = 'count-note', paste(
+        'Heuristic sample-level QC signals, not verdicts. Only samples where',
+        'this protein was observed are considered.')))
   }
   single_group <- identical(as.character(detection_category), 'SINGLE-GROUP')
   if (single_group) {
-    body <- shiny::tagList(body, shiny::div(class = 'qc-warn',
-      'SINGLE-GROUP: this protein is detected in only one condition, so the other group\'s mean is entirely imputed. Interpret the fold change as a floor, not a point estimate.'))
+    body <- shiny::tagList(body, shiny::div(class = 'qc-warn', paste(
+      'SINGLE-GROUP: this protein is detected in only one condition, so the',
+      'other group\'s mean is entirely imputed. Interpret the fold change as a',
+      'floor, not a point estimate.')))
   }
   body
 }
@@ -121,6 +124,11 @@ mod_protein_profile_server <- function(id, con, selected_protein) {
       }
       ortholog <- na_dash(core$ortholog_mapping_status)
       has_ortholog <- !identical(ortholog, 'no_ortholog') && ortholog != '-'
+
+      # Which Module 06 databases ran this run (NULL = unknown -> fail-open, all
+      # assumed enabled). Lets the annotation sections distinguish 'database not
+      # enabled' from 'queried, found nothing' (spec 4.2.2 / 4.4).
+      enabled_dbs <- db_enabled_dbs(con())
 
       # External gene-page links for the disease/drug sections (spec 4.4.2),
       # keyed on the human ortholog and shown only when one exists. DisGeNET's
@@ -175,7 +183,8 @@ mod_protein_profile_server <- function(id, con, selected_protein) {
       dq_body <- shiny::tagList(
         shiny::div(class = 'section-grid',
           stat_card('detection', det_badge(core$detection_category)),
-          stat_card('% imputed', sprintf('%.1f%%', 100 * core$imputation_fraction))),
+          stat_card('% imputed', if (is.na(core$imputation_fraction)) '-' else
+                    sprintf('%.1f%%', 100 * core$imputation_fraction))),
         qc_notes_block(qc, core$detection_category))
 
       # Section 4: UniProt annotation.
@@ -185,7 +194,8 @@ mod_protein_profile_server <- function(id, con, selected_protein) {
         c('Subcellular location', if (nrow(up)) up$subcellular_location else NA),
         c('Tissue expression', if (nrow(up)) up$tissue_expression else NA),
         c('Keywords', if (nrow(up)) up$keywords else NA))
-      anno_body <- if (all(vapply(anno_rows, function(r) is.na(r[2]) || !nzchar(as.character(r[2])), logical(1)))) {
+      anno_blank <- function(r) is.na(r[2]) || !nzchar(as.character(r[2]))
+      anno_body <- if (all(vapply(anno_rows, anno_blank, logical(1)))) {
         empty_note('No UniProt annotation available.')
       } else {
         shiny::tags$table(class = 'anno-table', shiny::tags$tbody(
@@ -213,8 +223,10 @@ mod_protein_profile_server <- function(id, con, selected_protein) {
           cap = 25L)
       }
 
-      # Section 6: diseases (ortholog-gated).
-      dis_body <- if (!has_ortholog) {
+      # Section 6: diseases (database-gated, then ortholog-gated).
+      dis_body <- if (!db_enabled('disgenet', enabled_dbs)) {
+        empty_note('DisGeNET query was not enabled for this run.')
+      } else if (!has_ortholog) {
         empty_note('No human ortholog available -- DisGeNET query not performed.')
       } else {
         dis <- db_protein_diseases(con(), pid)
@@ -232,8 +244,10 @@ mod_protein_profile_server <- function(id, con, selected_protein) {
         }
       }
 
-      # Section 7: drugs (ortholog-gated).
-      drug_body <- if (!has_ortholog) {
+      # Section 7: drugs (database-gated, then ortholog-gated).
+      drug_body <- if (!db_enabled('dgidb', enabled_dbs)) {
+        empty_note('DGIdb query was not enabled for this run.')
+      } else if (!has_ortholog) {
         empty_note('No human ortholog available -- DGIdb query not performed.')
       } else {
         dr <- db_protein_drugs(con(), pid)
@@ -251,15 +265,23 @@ mod_protein_profile_server <- function(id, con, selected_protein) {
       # Section 8: chemical interactions (CTD, often long).
       # CTD interactions can run to thousands of rows, so this section is a
       # paged/searchable DT (output$chem_table) rather than a capped table.
-      chem_body <- if (nrow(chem_data()) == 0) {
+      chem_body <- if (!db_enabled('ctd', enabled_dbs)) {
+        empty_note('CTD query was not enabled for this run.')
+      } else if (nrow(chem_data()) == 0) {
         empty_note('No chemical-gene interactions found.')
       } else {
         DT::DTOutput(ns('chem_table'))
       }
 
       # Section 9: PubMed co-occurrence (external search links).
-      pm <- db_protein_pubmed(con(), pid)
-      pm_body <- if (nrow(pm) == 0) {
+      pm <- if (db_enabled('pubmed', enabled_dbs)) {
+        db_protein_pubmed(con(), pid)
+      } else {
+        NULL
+      }
+      pm_body <- if (!db_enabled('pubmed', enabled_dbs)) {
+        empty_note('PubMed query was not enabled for this run.')
+      } else if (nrow(pm) == 0) {
         empty_note('No literature co-occurrence data.')
       } else {
         shiny::tags$table(class = 'mini-table',

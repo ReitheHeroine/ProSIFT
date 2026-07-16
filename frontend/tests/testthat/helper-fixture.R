@@ -203,19 +203,47 @@
   data.frame(run_id = 'SYN_RUN', stringsAsFactors = FALSE)
 }
 
+.fx_run_parameters <- function(fdr = '0.05',
+                               enabled = c('uniprot', 'pubmed', 'disgenet',
+                                           'dgidb', 'ctd')) {
+  # Module 07 stores params as key/value strings; databases.enabled is a JSON
+  # string array (the real wire format the frontend jsonlite::fromJSON parses).
+  data.frame(
+    key        = c('enrichment.fdr_threshold', 'databases.enabled'),
+    value      = c(fdr, as.character(jsonlite::toJSON(enabled))),
+    value_type = c('float', 'list'),
+    stringsAsFactors = FALSE
+  )
+}
+
 
 # --- Assembly ---------------------------------------------------------------
 
-#' Write the full synthetic fixture database to `path`.
-build_fixture_db <- function(path) {
+#' Write the synthetic fixture database to `path`. `variant` selects an
+#' adversarial run configuration:
+#'   'default'   - all databases enabled, FDR threshold 0.05, run_parameters present
+#'   'threshold' - FDR threshold 0.10 (GOBP_Y ORA @0.05 becomes significant)
+#'   'disabled'  - dgidb removed from databases.enabled; drug_interactions emptied
+#'   'no_params' - run_parameters table omitted entirely (fail-open path)
+build_fixture_db <- function(path, variant = 'default') {
   con <- DBI::dbConnect(RSQLite::SQLite(), path)
   on.exit(DBI::dbDisconnect(con), add = TRUE)
+
+  drug <- .fx_drug_interactions()
+  enabled <- c('uniprot', 'pubmed', 'disgenet', 'dgidb', 'ctd')
+  fdr <- '0.05'
+  if (variant == 'threshold') fdr <- '0.10'
+  if (variant == 'disabled') {
+    enabled <- setdiff(enabled, 'dgidb')
+    drug <- drug[0, , drop = FALSE]
+  }
+
   tables <- list(
     proteins                = .fx_proteins(),
     differential_abundance  = .fx_differential_abundance(),
     uniprot_annotations     = .fx_uniprot_annotations(),
     disease_associations    = .fx_disease_associations(),
-    drug_interactions       = .fx_drug_interactions(),
+    drug_interactions       = drug,
     pubmed_cooccurrence     = .fx_pubmed_cooccurrence(),
     chemical_interactions   = .fx_chemical_interactions(),
     sample_qc_flags         = .fx_sample_qc_flags(),
@@ -224,6 +252,9 @@ build_fixture_db <- function(path) {
     protein_term_mapping    = .fx_protein_term_mapping(),
     run_metadata            = .fx_run_metadata()
   )
+  if (variant != 'no_params') {
+    tables$run_parameters <- .fx_run_parameters(fdr, enabled)
+  }
   for (nm in names(tables)) {
     DBI::dbWriteTable(con, nm, tables[[nm]], overwrite = TRUE)
   }
@@ -236,14 +267,16 @@ build_fixture_db <- function(path) {
 .fx_cache <- new.env(parent = emptyenv())
 
 #' Path to a lazily-built, process-cached fixture database (tests read only).
-fixture_path <- function() {
-  if (is.null(.fx_cache$path) || !file.exists(.fx_cache$path %||% '')) {
-    p <- tempfile('prosift_fixture_', fileext = '.db')
-    build_fixture_db(p)
-    .fx_cache$path <- p
+#' One cached DB per `variant`.
+fixture_path <- function(variant = 'default') {
+  key <- paste0('path_', variant)
+  if (is.null(.fx_cache[[key]]) || !file.exists(.fx_cache[[key]] %||% '')) {
+    p <- tempfile(paste0('prosift_fixture_', variant, '_'), fileext = '.db')
+    build_fixture_db(p, variant)
+    .fx_cache[[key]] <- p
   }
-  .fx_cache$path
+  .fx_cache[[key]]
 }
 
 #' Open a read-only connection to the fixture (exercises db.R open_results_db).
-fixture_con <- function() open_results_db(fixture_path())
+fixture_con <- function(variant = 'default') open_results_db(fixture_path(variant))

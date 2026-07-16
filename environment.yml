@@ -52,6 +52,7 @@ dependencies:
   - r-bslib                           # Bootstrap theming (teal accent)
   - r-rsqlite                         # SQLite driver for the Module 07 results DB
   - r-dbi                             # DB interface layer used by db.R
+  - r-jsonlite                        # Parse run_parameters JSON values (databases.enabled)
 
   # --- Testing ---
   - pytest>=7.4

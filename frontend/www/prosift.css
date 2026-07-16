@@ -57,6 +57,7 @@
 }
 .view-controls .form-group { margin-bottom: 0; }
 .row-count { color: var(--prosift-muted); font-size: 13px; }
+.nq-legend { color: var(--prosift-muted); font-size: 12px; margin-left: 14px; font-style: italic; }
 
 /* --- Placeholder panels (profile / process, pre-implementation) --- */
 .placeholder {
