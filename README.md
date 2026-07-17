@@ -152,7 +152,7 @@ ProSIFT/
 ├── prosift_inputs/                  Per-study inputs: samplesheets, metadata, params.yml (not tracked)
 ├── results/                         Pipeline outputs, one subdirectory per run (not tracked)
 ├── work/                            Nextflow work directory (not tracked)
-├── project_documentation/           Private module specs, decision register, handoff (not tracked)
+├── project_documentation/           Project documentation (not tracked)
 └── CTX_synaptosome_project_data/    Unpublished source data (not tracked)
 ```
 
