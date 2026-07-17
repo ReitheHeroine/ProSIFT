@@ -1,0 +1,174 @@
+<svg width="100%" viewBox="0 0 820 968" xmlns="http://www.w3.org/2000/svg">
+<style>
+  text { font-family: "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+  .title { font-size: 18px; font-weight: 600; fill: #D0D0D0; letter-spacing: 0.5px; stroke: #000000; stroke-width: 3px; paint-order: stroke; stroke-linejoin: round; }
+  .subtitle { font-size: 11px; font-weight: 400; fill: #B0B0B0; letter-spacing: 1.5px; text-transform: uppercase; stroke: #000000; stroke-width: 2.5px; paint-order: stroke; stroke-linejoin: round; }
+  .node-title { font-size: 13px; font-weight: 600; }
+  .node-sub { font-size: 11px; font-weight: 400; }
+  .node-num { font-size: 10px; font-weight: 700; opacity: 0.35; }
+  .arr { stroke: #9E9E9E; stroke-width: 1.4; }
+  .diag-arrow { stroke: #C4C4C4; stroke-width: 1; stroke-dasharray: 5 3; }
+  .fanout-label { font-size: 10px; fill: #B0B0B0; letter-spacing: 0.3px; stroke: #000000; stroke-width: 2.5px; paint-order: stroke; stroke-linejoin: round; }
+  .legend-text { font-size: 10.5px; fill: #B0B0B0; stroke: #000000; stroke-width: 2.5px; paint-order: stroke; stroke-linejoin: round; }
+
+  .n-teal { fill: #E8F6F0; stroke: #3DAA8A; stroke-width: 1; rx: 10; }
+  .n-teal-t { fill: #1B6B52; }
+  .n-teal-s { fill: #3DAA8A; }
+
+  .n-indigo { fill: #EEEDF8; stroke: #6C63AC; stroke-width: 1; rx: 10; }
+  .n-indigo-t { fill: #3E3780; }
+  .n-indigo-s { fill: #6C63AC; }
+
+  .n-warm { fill: #FDF0EB; stroke: #C0724E; stroke-width: 1; rx: 10; }
+  .n-warm-t { fill: #7A3D22; }
+  .n-warm-s { fill: #C0724E; }
+  .n-coral { fill: #FDF0EB; stroke: #C0724E; stroke-width: 1; rx: 10; }
+  .n-coral-t { fill: #7A3D22; }
+  .n-coral-s { fill: #C0724E; }
+
+  .n-neutral { fill: #F4F3F0; stroke: #AAAAAA; stroke-width: 1; rx: 10; }
+  .n-neutral-t { fill: #555; }
+</style>
+
+<defs>
+  <marker id="arr-end" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+    <path d="M1 1.5L8 5L1 8.5" fill="none" stroke="#9E9E9E" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  </marker>
+  <marker id="arr-diag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+    <path d="M1 1.5L8 5L1 8.5" fill="none" stroke="#C4C4C4" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  </marker>
+  <filter id="shadow" x="-4%" y="-4%" width="110%" height="112%">
+    <feDropShadow dx="0" dy="1.5" stdDeviation="2.5" flood-color="#000" flood-opacity="0.06"/>
+  </filter>
+  <filter id="shadow-sm" x="-4%" y="-4%" width="110%" height="112%">
+    <feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="#000" flood-opacity="0.04"/>
+  </filter>
+</defs>
+
+<!-- =============== TITLE =============== -->
+<text class="subtitle" x="410" y="28" text-anchor="middle">PROSIFT</text>
+<text class="title" x="410" y="50" text-anchor="middle">Pipeline Architecture</text>
+<line x1="330" y1="58" x2="490" y2="58" stroke="#888888" stroke-width="1"/>
+
+<!-- =============== ROW 0: Input =============== -->
+<rect x="318" y="78" width="184" height="42" class="n-neutral" filter="url(#shadow-sm)"/>
+<text class="node-num n-neutral-t" x="332" y="103" dominant-baseline="central">IN</text>
+<text class="node-title n-neutral-t" x="410" y="103" text-anchor="middle" dominant-baseline="central">Input data</text>
+
+<!-- Arrow: Input -> M01 -->
+<line x1="410" y1="120" x2="410" y2="148" class="arr" marker-end="url(#arr-end)"/>
+
+<!-- =============== ROW 1: Module 01 =============== -->
+<rect x="308" y="152" width="204" height="54" class="n-teal" filter="url(#shadow)"/>
+<text class="node-num n-teal-s" x="322" y="172" dominant-baseline="central">01</text>
+<text class="node-title n-teal-t" x="410" y="172" text-anchor="middle" dominant-baseline="central">Validation &amp; ID Mapping</text>
+<text class="node-sub n-teal-s" x="410" y="190" text-anchor="middle" dominant-baseline="central">schema check · detection filter · UniProt</text>
+
+<!-- Fork: M01 -> M03 (straight), M01 -> M02 (L-bend left) -->
+<line x1="410" y1="206" x2="410" y2="240" class="arr" marker-end="url(#arr-end)"/>
+<path d="M340 206 L340 224 L175 224 L175 240" fill="none" class="arr" marker-end="url(#arr-end)"/>
+
+<!-- =============== ROW 2: M02 (left) + M03 (center-right) =============== -->
+<rect x="70" y="244" width="210" height="54" class="n-teal" filter="url(#shadow)"/>
+<text class="node-num n-teal-s" x="84" y="264" dominant-baseline="central">02</text>
+<text class="node-title n-teal-t" x="175" y="264" text-anchor="middle" dominant-baseline="central">Pre-normalization QC</text>
+<text class="node-sub n-teal-s" x="175" y="282" text-anchor="middle" dominant-baseline="central">PCA · boxplots · correlation · flags</text>
+
+<rect x="328" y="244" width="164" height="54" class="n-teal" filter="url(#shadow)"/>
+<text class="node-num n-teal-s" x="342" y="264" dominant-baseline="central">03</text>
+<text class="node-title n-teal-t" x="410" y="264" text-anchor="middle" dominant-baseline="central">Normalization</text>
+<text class="node-sub n-teal-s" x="410" y="282" text-anchor="middle" dominant-baseline="central">median · quantile · VSN</text>
+
+<!-- Arrow: M03 -> M04 -->
+<line x1="410" y1="298" x2="410" y2="332" class="arr" marker-end="url(#arr-end)"/>
+
+<!-- =============== ROW 3: Module 04 =============== -->
+<rect x="318" y="336" width="184" height="54" class="n-teal" filter="url(#shadow)"/>
+<text class="node-num n-teal-s" x="332" y="356" dominant-baseline="central">04</text>
+<text class="node-title n-teal-t" x="410" y="356" text-anchor="middle" dominant-baseline="central">Imputation</text>
+<text class="node-sub n-teal-s" x="410" y="374" text-anchor="middle" dominant-baseline="central">MNAR MinProb · MAR KNN</text>
+
+<!-- Arrow: M04 -> M05 -->
+<line x1="410" y1="390" x2="410" y2="474" class="arr" marker-end="url(#arr-end)"/>
+
+<!-- =============== ROW 3.5: QC Report Assembly (left) =============== -->
+<rect x="70" y="400" width="210" height="54" class="n-teal" filter="url(#shadow)"/>
+<text class="node-title n-teal-t" x="175" y="420" text-anchor="middle" dominant-baseline="central">QC Report Assembly</text>
+<text class="node-sub n-teal-s" x="175" y="438" text-anchor="middle" dominant-baseline="central">consolidated HTML checkpoint</text>
+
+<!-- Dashed: M02 -> QC assembly (straight down) -->
+<line x1="175" y1="298" x2="175" y2="398" class="diag-arrow" marker-end="url(#arr-diag)"/>
+<!-- Dashed: M03 exits left to x=300, M04 joins at x=300, single line enters QC assembly -->
+<path d="M328 272 L300 272 L300 362" fill="none" class="diag-arrow"/>
+<path d="M318 362 L300 362" fill="none" class="diag-arrow"/>
+<path d="M300 362 L300 422 L282 422" fill="none" class="diag-arrow" marker-end="url(#arr-diag)"/>
+<!-- Junction dot where M04 meets the shared vertical -->
+<circle cx="300" cy="362" r="2.5" fill="#C4C4C4"/>
+
+<!-- =============== ROW 4: Module 05 =============== -->
+<rect x="308" y="478" width="204" height="54" class="n-teal" filter="url(#shadow)"/>
+<text class="node-num n-teal-s" x="322" y="498" dominant-baseline="central">05</text>
+<text class="node-title n-teal-t" x="410" y="498" text-anchor="middle" dominant-baseline="central">Differential Abundance</text>
+<text class="node-sub n-teal-s" x="410" y="516" text-anchor="middle" dominant-baseline="central">limma + DEqMS via rpy2</text>
+
+<!-- Fork: M05 -> M06 (left), M07 (right) - no fanout line -->
+<path d="M360 532 L360 562 L200 562 L200 580" fill="none" class="arr" marker-end="url(#arr-end)"/>
+<path d="M460 532 L460 562 L610 562 L610 580" fill="none" class="arr" marker-end="url(#arr-end)"/>
+
+<!-- =============== ROW 5: M06 (left) + M07 (right) =============== -->
+<rect x="85" y="584" width="230" height="54" class="n-teal" filter="url(#shadow)"/>
+<text class="node-num n-teal-s" x="99" y="604" dominant-baseline="central">06</text>
+<text class="node-title n-teal-t" x="200" y="604" text-anchor="middle" dominant-baseline="central">Enrichment</text>
+<text class="node-sub n-teal-s" x="200" y="622" text-anchor="middle" dominant-baseline="central">ORA + preranked GSEA · MSigDB</text>
+
+<rect x="490" y="584" width="240" height="54" class="n-indigo" filter="url(#shadow)"/>
+<text class="node-num n-indigo-s" x="504" y="604" dominant-baseline="central">07</text>
+<text class="node-title n-indigo-t" x="610" y="604" text-anchor="middle" dominant-baseline="central">Database Queries</text>
+<text class="node-sub n-indigo-s" x="610" y="622" text-anchor="middle" dominant-baseline="central">UniProt · PubMed · DisGeNET · DGIdb · CTD</text>
+
+<!-- Arrows: M06, M07 -> M08 -->
+<path d="M230 638 L230 672 L408 672 L408 688" fill="none" class="arr" marker-end="url(#arr-end)"/>
+<path d="M580 638 L580 672 L412 672 L412 688" fill="none" class="arr" marker-end="url(#arr-end)"/>
+
+<!-- =============== ROW 6: Module 08 =============== -->
+<rect x="298" y="692" width="224" height="54" class="n-warm" filter="url(#shadow)"/>
+<text class="node-num n-warm-s" x="312" y="712" dominant-baseline="central">08</text>
+<text class="node-title n-warm-t" x="410" y="712" text-anchor="middle" dominant-baseline="central">Results Assembly</text>
+<text class="node-sub n-warm-s" x="410" y="730" text-anchor="middle" dominant-baseline="central">SQLite database · Parquet · HTML reports</text>
+
+<!-- Long-range dashed: QC assembly -> M08, routed OUTSIDE enrichment block (far left) -->
+<path d="M70 440 L50 440 L50 714 L296 714" fill="none" class="diag-arrow" marker-end="url(#arr-diag)"/>
+
+<!-- Arrow: M08 -> Results -->
+<line x1="410" y1="746" x2="410" y2="780" class="arr" marker-end="url(#arr-end)"/>
+
+<!-- =============== ROW 7: Results =============== -->
+<rect x="318" y="784" width="184" height="42" class="n-neutral" filter="url(#shadow-sm)"/>
+<text class="node-num n-neutral-t" x="332" y="809" dominant-baseline="central">OUT</text>
+<text class="node-title n-neutral-t" x="410" y="809" text-anchor="middle" dominant-baseline="central">Results directory</text>
+
+<!-- Arrow: Results -> Frontend -->
+<line x1="410" y1="826" x2="410" y2="858" class="arr" marker-end="url(#arr-end)"/>
+
+<!-- =============== ROW 8: Interactive Frontend =============== -->
+<rect x="318" y="862" width="184" height="54" class="n-coral" filter="url(#shadow)"/>
+<text class="node-num n-coral-s" x="332" y="882" dominant-baseline="central">09</text>
+<text class="node-title n-coral-t" x="410" y="882" text-anchor="middle" dominant-baseline="central">Interactive Frontend</text>
+<text class="node-sub n-coral-s" x="410" y="900" text-anchor="middle" dominant-baseline="central">exploration + query interface</text>
+
+<!-- =============== LEGEND =============== -->
+<g transform="translate(560, 78)">
+  <text class="fanout-label" x="0" y="0" font-weight="600">LEGEND</text>
+  <rect x="0" y="10" width="14" height="14" rx="3" class="n-teal"/>
+  <text class="legend-text" x="22" y="22">Analytical step</text>
+  <rect x="0" y="32" width="14" height="14" rx="3" class="n-indigo"/>
+  <text class="legend-text" x="22" y="44">Database operations</text>
+  <rect x="0" y="54" width="14" height="14" rx="3" class="n-warm"/>
+  <text class="legend-text" x="22" y="66">Convergence / assembly</text>
+  <rect x="0" y="76" width="14" height="14" rx="3" class="n-neutral"/>
+  <text class="legend-text" x="22" y="88">Input / output</text>
+  <line x1="0" y1="104" x2="14" y2="104" class="diag-arrow"/>
+  <text class="legend-text" x="22" y="108">Diagnostic / QC feed</text>
+</g>
+
+</svg>
