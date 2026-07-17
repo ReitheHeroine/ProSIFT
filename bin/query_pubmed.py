@@ -4,7 +4,9 @@
 # author: Reina Hastings
 # contact: reinahastings13@gmail.com
 # date created: 2026-04-07
-# last modified: 2026-04-07
+# last modified: 2026-07-14  (compound OR/AND search terms honoured in the
+#                co-occurrence query, not just the term-total; cache keys made
+#                filesystem-safe via cache_token)
 #
 # purpose:
 #   Module 06 QUERY_PUBMED process. Queries NCBI ESearch API for literature
@@ -16,9 +18,11 @@
 #     1. Load mapping table, extract gene symbols (mouse + human orthologs)
 #     2. Get total PubMed article count (single query, cached per-run)
 #     3. For each protein x search term pair:
-#        a. Query co-occurrence: "{symbol}"[tiab] AND "{term}"[tiab]
+#        a. Query co-occurrence: "{symbol}"[tiab] AND <term query>, where the
+#           term query is "{term}"[tiab] for a plain term or the parenthesised
+#           boolean expression for a compound term (see build_term_query)
 #        b. Query total pubs for symbol: "{symbol}"[tiab]
-#        c. Cache results per {symbol}_{term} key
+#        c. Cache results per {symbol}_<cache_token(term)> key (filesystem-safe)
 #     4. Compute PMI = log2(p(protein AND term) / (p(protein) * p(term)))
 #        - Skip if total pubs below min_pubs_for_score threshold
 #        - Take max(mouse_pmi, human_pmi) as normalized_score
@@ -50,6 +54,7 @@ import argparse
 import logging
 import math
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -66,6 +71,38 @@ from prosift_cache import ProteinCache, get_api_key, is_database_enabled, load_d
 # ============================================================
 
 ESEARCH_URL = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi'
+
+
+def build_term_query(term: str) -> str:
+    """PubMed query fragment for one search term.
+
+    A *compound* term -- one containing ' AND ' or ' OR ' -- is passed through
+    as a parenthesised boolean expression exactly as written, so variant
+    spellings can be combined, e.g.
+    '"TBI"[tiab] OR "traumatic brain injury"[tiab]'. Add the [tiab] field tag to
+    each operand yourself to keep the title/abstract restriction; a bare
+    compound like 'TBI OR traumatic brain injury' runs under PubMed's default
+    field mapping. A plain term is matched as an exact title/abstract phrase.
+
+    Used for BOTH the per-term total count and the per-protein co-occurrence
+    query, so the PMI numerator and denominator share the same term semantics.
+    """
+    if ' AND ' in term or ' OR ' in term:
+        return f'({term})'
+    return f'"{term}"[tiab]'
+
+
+def cache_token(term: str) -> str:
+    """Filesystem-safe token for a search term, used only in cache keys.
+
+    The cache stores one JSON file per key, so the key must be a safe filename
+    (ProteinCache does not sanitise). A plain single-word term is returned
+    unchanged so existing caches stay valid; spaces, quotes, apostrophes, and
+    boolean operators in a compound term collapse to underscores. This affects
+    the filename only -- the query and the output `search_term` use the raw term.
+    """
+    token = re.sub(r'[^A-Za-z0-9._-]+', '_', term).strip('_')
+    return token or 'term'
 
 # Rate limits: 10/sec with API key, 3/sec without.
 # Use slightly conservative values to avoid 429 errors from burst patterns.
@@ -306,17 +343,12 @@ def main() -> None:
     # --- Step 2: Get per-term total counts (cached) ---
     term_counts: Dict[str, int] = {}
     for term in search_terms:
-        term_key = f'_term_count_{term}'
+        term_key = f'_term_count_{cache_token(term)}'
         cached_term = cache.get(term_key)
         if cached_term is not None:
             term_counts[term] = cached_term['count']
         else:
-            # Query: "{term}"[tiab] (or compound query as-is)
-            if ' AND ' in term or ' OR ' in term:
-                query = f'({term})'
-            else:
-                query = f'"{term}"[tiab]'
-            count = client.esearch_count(query)
+            count = client.esearch_count(build_term_query(term))
             if count is not None:
                 term_counts[term] = count
                 cache.put(term_key, {'count': count})
@@ -373,7 +405,7 @@ def main() -> None:
 
             # --- Mouse symbol queries ---
             if has_mouse:
-                mouse_cache_key = f'{mouse_sym}_{term}'
+                mouse_cache_key = f'{mouse_sym}_{cache_token(term)}'
                 cached = cache.get(mouse_cache_key)
                 if cached is not None:
                     mouse_co = cached['cooccurrence']
@@ -381,7 +413,7 @@ def main() -> None:
                     cache_hits += 1
                 else:
                     # Co-occurrence query
-                    co_query = f'"{mouse_sym}"[tiab] AND "{term}"[tiab]'
+                    co_query = f'"{mouse_sym}"[tiab] AND {build_term_query(term)}'
                     mouse_co = client.esearch_count(co_query)
                     queries_made += 1
 
@@ -406,14 +438,14 @@ def main() -> None:
 
             # --- Human symbol queries ---
             if has_human:
-                human_cache_key = f'{human_sym}_{term}'
+                human_cache_key = f'{human_sym}_{cache_token(term)}'
                 cached = cache.get(human_cache_key)
                 if cached is not None:
                     human_co = cached['cooccurrence']
                     human_total = cached['total_pubs']
                     cache_hits += 1
                 else:
-                    co_query = f'"{human_sym}"[tiab] AND "{term}"[tiab]'
+                    co_query = f'"{human_sym}"[tiab] AND {build_term_query(term)}'
                     human_co = client.esearch_count(co_query)
                     queries_made += 1
 
