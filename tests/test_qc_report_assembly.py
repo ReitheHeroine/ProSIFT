@@ -4,7 +4,7 @@
 # author: Reina Hastings
 # contact: reinahastings13@gmail.com
 # date created: 2026-07-09
-# last modified: 2026-07-09
+# last modified: 2026-07-21
 #
 # purpose:
 #   Unit tests for Module 03b QC Report Assembly (bin/qc_report_assembly.py).
@@ -16,7 +16,14 @@
 #     - build_table_html        : DataFrame -> HTML with row truncation
 #     - make_link               : path -> link or "not available"
 #
-#   Not tested here: the plot_* Plotly functions, fig_to_div, load_params,
+#   Section 5 (added 2026-07-21) pins WEAK-ANCHOR handling. filter_proteins.py
+#   now emits a WEAK-ANCHOR filter_status for proteins that would be PARTIAL or
+#   SINGLE-GROUP but lack a fully-detected anchor group. WEAK-ANCHOR is a REMOVED
+#   category (like SPARSE/ABSENT); only PASSED/PARTIAL/SINGLE-GROUP are RETAINED.
+#   These tests confirm the overview counts and the category bar chart both know
+#   about WEAK-ANCHOR (listed, counted as removed, not dropped, has a color).
+#
+#   Not tested here: the other plot_* Plotly functions, fig_to_div, load_params,
 #   parse_args, main (I/O / rendering).
 #
 #   Note: extract_abundance defaults abundance_type to 'raw' via .get(), which
@@ -35,6 +42,7 @@
 #
 #   copy/paste: pytest tests/test_qc_report_assembly.py -v
 
+import re
 import sys
 from pathlib import Path
 
@@ -50,6 +58,7 @@ from qc_report_assembly import (
     build_table_html,
     extract_abundance,
     make_link,
+    plot_filter_categories,
 )
 
 # ============================================================
@@ -240,3 +249,103 @@ class TestMakeLink:
         f.write_text('x')
         out = make_link(str(f), 'Report')
         assert out == '<a href="report.html">Report</a>'   # links by basename
+
+
+# ============================================================
+# Section 5: WEAK-ANCHOR handling (approved 2026-07-21)
+# ============================================================
+# filter_proteins.py emits WEAK-ANCHOR as a REMOVED category. These tests pin
+# that both the overview counts and the filter-category bar chart know about it.
+
+# A mixed filter table exercising every category. Deliberately > 1 of some so
+# counts are distinguishable from a trivial "1 each" pass.
+#   3 PASSED + 1 PARTIAL + 1 SINGLE-GROUP + 2 WEAK-ANCHOR + 1 SPARSE + 1 ABSENT
+#   = 9 total; RETAINED (PASSED+PARTIAL+SINGLE-GROUP) = 5.
+_WEAK_ANCHOR_STATUSES = [
+    'PASSED', 'PASSED', 'PASSED',
+    'PARTIAL', 'SINGLE-GROUP',
+    'WEAK-ANCHOR', 'WEAK-ANCHOR',
+    'SPARSE', 'ABSENT',
+]
+
+
+class TestWeakAnchorHandling:
+
+    def _overview_args(self, filter_status):
+        '''Same shape as TestBuildRunOverview._args, kept local so this section
+        is self-contained. n_flags/cv/imputation values are irrelevant here.'''
+        metadata = pd.DataFrame({
+            'sample_id': ['WT-1', 'WT-2', 'WT-3', 'KO-1', 'KO-2', 'KO-3'],
+            'genotype': ['WT', 'WT', 'WT', 'KO', 'KO', 'KO'],
+        })
+        filter_df = pd.DataFrame({
+            'protein_id': [f'P{i}' for i in range(len(filter_status))],
+            'filter_status': filter_status,
+        })
+        sample_flags = pd.DataFrame({
+            'sample_id': ['WT-1', 'WT-2', 'WT-3', 'KO-1', 'KO-2', 'KO-3'],
+            'n_flags': [0] * 6,
+        })
+        cv_summary = pd.DataFrame({
+            'protein_id': ['P0', 'P1', 'P2'],
+            'cv_WT': [0.1, 0.2, 0.3],
+            'cv_KO': [0.4, 0.5, 0.6],
+        })
+        imp_summary = pd.DataFrame({
+            'protein_id': ['P0', 'P1'],
+            'n_mnar_imputed': [2, 0],
+            'n_mar_imputed': [0, 3],
+            'n_imputed_total': [2, 3],
+        })
+        params = {
+            'design': {'group_column': 'genotype'},
+            'normalization': {'method': 'median'},
+            'imputation': {'mode': 'mixed', 'mnar_method': 'minprob', 'mar_method': 'knn'},
+            'qc': {'min_detections_per_group': 2},
+        }
+        return dict(run_id='run', metadata_df=metadata, filter_df=filter_df,
+                    sample_flags_df=sample_flags, cv_summary_df=cv_summary,
+                    imp_summary_df=imp_summary, params=params)
+
+    # --- Check A.1: overview lists WEAK-ANCHOR with its correct count ---
+    def test_overview_lists_weak_anchor_count(self):
+        html = build_run_overview(**self._overview_args(_WEAK_ANCHOR_STATUSES))
+        assert 'WEAK-ANCHOR: 2' in html               # not silently omitted
+
+    # --- Check A.2: WEAK-ANCHOR counted as REMOVED, not retained ---
+    def test_weak_anchor_excluded_from_retained(self):
+        html = build_run_overview(**self._overview_args(_WEAK_ANCHOR_STATUSES))
+        # RETAINED = PASSED(3) + PARTIAL(1) + SINGLE-GROUP(1) = 5; total = 9.
+        # If WEAK-ANCHOR were (wrongly) retained, this would read 7 / 9.
+        assert '5 / 9' in html
+
+    # --- Check A.3: per-category counts shown sum to total input ---
+    def test_category_counts_sum_to_total(self):
+        args = self._overview_args(_WEAK_ANCHOR_STATUSES)
+        html = build_run_overview(**args)
+        total_input = len(args['filter_df'])
+        # Parse each "<li>CATEGORY: N (pct%)</li>" row. The Retained summary row
+        # is "<li><b>Retained..." and does not match this pattern, so it is
+        # excluded from the per-category sum.
+        pairs = re.findall(r'<li>([A-Z-]+): ([\d,]+) \(', html)
+        counts = {cat: int(n.replace(',', '')) for cat, n in pairs}
+        assert sum(counts.values()) == total_input     # no category dropped
+        assert counts['WEAK-ANCHOR'] == 2
+
+    # --- Check A.4: bar chart has a WEAK-ANCHOR bar of correct height ---
+    def test_plot_filter_categories_has_weak_anchor_bar(self):
+        filter_df = pd.DataFrame({
+            'protein_id': [f'P{i}' for i in range(len(_WEAK_ANCHOR_STATUSES))],
+            'filter_status': _WEAK_ANCHOR_STATUSES,
+        })
+        # Must not raise on the WEAK-ANCHOR color lookup.
+        fig = plot_filter_categories(filter_df, 'run')
+        bar = fig.data[0]
+        x_cats = list(bar.x)
+        y_vals = list(bar.y)
+        assert 'WEAK-ANCHOR' in x_cats                 # present on the axis
+        idx = x_cats.index('WEAK-ANCHOR')
+        assert y_vals[idx] == 2                         # correct height
+        # A color was assigned for every bar (no missing marker color).
+        assert bar.marker.color is not None
+        assert len(list(bar.marker.color)) == len(x_cats)

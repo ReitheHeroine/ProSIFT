@@ -24,6 +24,7 @@ design:
 qc:
   min_samples_per_group: 2
   min_detections_per_group: 2
+  min_detections_present_group: null   # null = require the present/anchor group fully detected (recommended); or an integer minimum
 
 normalization:
   method: "median"

@@ -48,6 +48,25 @@ def make_color_map(groups: list[str]) -> dict[str, str]:
     return {g: _PALETTE[i % len(_PALETTE)] for i, g in enumerate(unique_groups)}
 
 
+# Detection-filter category display order and colors. Canonical, shared by every
+# report that renders filter categories (Module 01 missingness_report.py, Module
+# 03b qc_report_assembly.py) so the same category is always the same color and no
+# category is silently dropped. Retained: PASSED, PARTIAL, SINGLE-GROUP.
+# Removed: WEAK-ANCHOR, SPARSE, ABSENT.
+FILTER_CATEGORY_ORDER = [
+    'PASSED', 'PARTIAL', 'SINGLE-GROUP', 'WEAK-ANCHOR', 'SPARSE', 'ABSENT',
+]
+
+FILTER_CATEGORY_COLORS = {
+    'PASSED':       '#2ca02c',   # green  -- retained, quantitative
+    'PARTIAL':      '#ff7f0e',   # orange -- retained, flagged (sub-threshold group)
+    'SINGLE-GROUP': '#1f77b4',   # blue   -- retained, presence/absence
+    'WEAK-ANCHOR':  '#8c564b',   # brown  -- removed, imputation-heavy (no full anchor)
+    'SPARSE':       '#9467bd',   # purple -- removed, sub-threshold in all groups
+    'ABSENT':       '#d62728',   # red    -- removed, undetected in this run
+}
+
+
 # ============================================================
 # PLOT I/O
 # ============================================================

@@ -214,6 +214,12 @@ design:
 qc:
   min_samples_per_group: 2
   min_detections_per_group: 2
+  # Anchor for presence/absence (SINGLE-GROUP) and PARTIAL proteins: at least
+  # one group must reach this many detections or the protein is removed
+  # (WEAK-ANCHOR), preventing MNAR-imputation-driven results from resting on
+  # too few real measurements. null = require the anchor group to be FULLY
+  # detected (recommended); an integer sets a fixed minimum instead.
+  min_detections_present_group: null
 
 databases:
   enabled:                              # which databases to query (remove to skip)

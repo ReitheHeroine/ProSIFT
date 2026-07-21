@@ -55,6 +55,8 @@ import scipy.stats
 import yaml
 
 from prosift_plot_utils import (
+    FILTER_CATEGORY_COLORS,
+    FILTER_CATEGORY_ORDER,
     compute_and_plot_correlation,
     compute_and_plot_pca,
     make_color_map,
@@ -201,7 +203,7 @@ def build_run_overview(
     groups = metadata_df[group_col].value_counts().sort_index()
 
     # Detection filter counts
-    category_order = ['PASSED', 'PARTIAL', 'SINGLE-GROUP', 'SPARSE', 'ABSENT']
+    category_order = FILTER_CATEGORY_ORDER
     filter_counts = filter_df['filter_status'].value_counts()
     total_input = len(filter_df)
     retained_cats = ['PASSED', 'PARTIAL', 'SINGLE-GROUP']
@@ -308,14 +310,8 @@ def build_run_overview(
 
 def plot_filter_categories(filter_df: pd.DataFrame, run_id: str) -> go.Figure:
     """Re-render the filter category bar chart from detection_filter_table.csv."""
-    category_order = ['PASSED', 'PARTIAL', 'SINGLE-GROUP', 'SPARSE', 'ABSENT']
-    category_colors = {
-        'PASSED': '#2ca02c',
-        'PARTIAL': '#ff7f0e',
-        'SINGLE-GROUP': '#1f77b4',
-        'SPARSE': '#9467bd',
-        'ABSENT': '#d62728',
-    }
+    category_order = FILTER_CATEGORY_ORDER
+    category_colors = FILTER_CATEGORY_COLORS
 
     counts = filter_df['filter_status'].value_counts()
     total = len(filter_df)

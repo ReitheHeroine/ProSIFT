@@ -160,12 +160,16 @@ def count_detections_per_group(
     abund_cols: list[str],
     abund_prefix: str,
     group_col: str
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, dict[str, int]]:
     '''
     For each protein, count non-missing abundance values per group.
 
-    Returns a DataFrame indexed by protein_id with one column per group
-    containing the integer detection count for that group.
+    Returns:
+      detection_counts -- DataFrame indexed by protein_id with one column per
+                          group containing the integer detection count.
+      group_sizes      -- dict {group: number of abundance columns in that
+                          group} = the maximum possible detection count. Used
+                          by the anchor gate to define "fully detected".
     '''
     # map sample_id -> group
     sample_to_group: dict[str, str] = dict(
@@ -183,19 +187,24 @@ def count_detections_per_group(
     abund = matrix.set_index(id_col)[abund_cols]
 
     detection_counts = pd.DataFrame(index=abund.index)
+    group_sizes: dict[str, int] = {}
     for grp in groups:
         grp_cols = [c for c, g in col_to_group.items() if g == grp]
         detection_counts[grp] = abund[grp_cols].notna().sum(axis=1)
+        group_sizes[grp] = len(grp_cols)
 
-    return detection_counts
+    return detection_counts, group_sizes
 
 
 def classify_proteins(
     detection_counts: pd.DataFrame,
-    min_detections: int
+    min_detections: int,
+    group_sizes: dict[str, int],
+    min_present_detections: int | None = None
 ) -> pd.Series:
     '''
-    Classify each protein into PASSED, SINGLE-GROUP, PARTIAL, SPARSE, or ABSENT.
+    Classify each protein into PASSED, SINGLE-GROUP, PARTIAL, WEAK-ANCHOR,
+    SPARSE, or ABSENT.
 
     Rules (applied in order):
       ABSENT       -- zero detections in ALL groups
@@ -205,8 +214,26 @@ def classify_proteins(
                       one other group (e.g., 2/3 WT, 1/3 KO with min=2)
       SINGLE-GROUP -- >= min_detections in exactly one group AND
                       zero detections in all other groups
+      WEAK-ANCHOR  -- would be PARTIAL or SINGLE-GROUP, but NO group is a
+                      solid detection anchor (see below). These proteins
+                      rely on heavy MNAR imputation resting on few real
+                      measurements, so they are REMOVED.
       SPARSE       -- everything else (detections exist but no group meets
                       the threshold)
+
+    Anchor gate (added 2026-07-21):
+      PARTIAL and SINGLE-GROUP proteins have missing values imputed as MNAR
+      (synthetic low-end MinProb draws) in their absent / sub-threshold
+      group. That imputation is only defensible when the *present* group is
+      a solid anchor. We require at least one group to be "fully detected":
+      detections >= anchor threshold, where the threshold defaults to that
+      group's replicate count (full detection) and can be relaxed to a fixed
+      integer via qc.min_detections_present_group. Proteins that pass the
+      lenient min_detections filter in one group but have no fully-detected
+      anchor group (e.g. 2/3-vs-0/3, or 2/3-vs-1/3 at n=3) become WEAK-ANCHOR
+      and are removed. This does NOT touch PASSED proteins (all groups meet
+      min_detections, missing values are MAR only). See Module 01 spec
+      Section 5 and the 2026-07-21 Decision Register entry.
     '''
     total_detections = detection_counts.sum(axis=1)
     meets_threshold = detection_counts >= min_detections
@@ -237,6 +264,23 @@ def classify_proteins(
     # Only apply to proteins still labeled SPARSE (not already SINGLE-GROUP)
     status[(status == 'SPARSE') & partial] = 'PARTIAL'
 
+    # --- Anchor gate: demote imputation-heavy PARTIAL/SINGLE-GROUP proteins ---
+    # A group is an anchor if its detection count reaches the anchor threshold.
+    # Default threshold = group's replicate count (full detection); an explicit
+    # integer in min_present_detections overrides this uniformly.
+    anchor_reached = pd.DataFrame(index=detection_counts.index)
+    for grp in detection_counts.columns:
+        threshold = (
+            min_present_detections
+            if min_present_detections is not None
+            else int(group_sizes[grp])
+        )
+        anchor_reached[grp] = detection_counts[grp] >= threshold
+    has_anchor = anchor_reached.any(axis=1)
+
+    needs_anchor = status.isin(['SINGLE-GROUP', 'PARTIAL'])
+    status[needs_anchor & ~has_anchor] = 'WEAK-ANCHOR'
+
     # SPARSE: anything remaining (already set as default)
 
     return status
@@ -254,60 +298,84 @@ def write_detection_filter_block(
     report: Report,
     status: pd.Series,
     min_detections: int,
-    n_input: int
+    n_input: int,
+    min_present_detections: int | None = None
 ) -> None:
     counts = status.value_counts()
     n_passed = counts.get('PASSED', 0)
     n_single = counts.get('SINGLE-GROUP', 0)
     n_partial = counts.get('PARTIAL', 0)
+    n_weak = counts.get('WEAK-ANCHOR', 0)
     n_sparse = counts.get('SPARSE', 0)
     n_absent = counts.get('ABSENT', 0)
     n_retained = n_passed + n_single + n_partial
-    n_removed = n_sparse + n_absent
+    n_removed = n_weak + n_sparse + n_absent
+
+    anchor_desc = (
+        'fully detected (all replicates)'
+        if min_present_detections is None
+        else f'detected in >= {min_present_detections} replicates'
+    )
 
     report.section('DETECTION FILTER SUMMARY')
     report.line()
     report.line(f'Filter threshold: min_detections_per_group = {min_detections}')
     report.line(f'  A protein passes if detected (non-missing) in at least '
                 f'{min_detections} replicates')
-    report.line(f'  in at least one group.')
+    report.line('  in at least one group.')
+    report.line(f'Anchor requirement: presence/absence and partial proteins are '
+                f'retained only')
+    report.line(f'  if at least one group is an anchor ({anchor_desc}). This prevents '
+                f'proteins')
+    report.line('  whose results would rest on heavy MNAR imputation over few real '
+                'values.')
     report.line()
     report.line('Category definitions:')
     report.line(f'  PASSED           - Detected in >= {min_detections} replicates '
                 f'in both groups.')
-    report.line(f'                     Sufficient data for reliable statistical testing.')
+    report.line('                     Sufficient data for reliable statistical testing.')
+    report.line('                     Missing values (if any) imputed as MAR only.')
     report.line(f'  PARTIAL          - Detected in >= {min_detections} replicates '
                 f'in one group')
     report.line(f'                     but below threshold (1 to {min_detections - 1} '
-                f'detections) in the other.')
-    report.line(f'                     Retained: the sub-threshold group has some data')
-    report.line(f'                     but not enough for reliable group-level estimates.')
-    report.line(f'                     Missing values imputed as a mix of MNAR and MAR.')
+                f'detections) in the other,')
+    report.line(f'                     WITH a fully-detected anchor group.')
+    report.line('                     Missing values imputed as a mix of MNAR and MAR.')
     report.line(f'  SINGLE-GROUP     - Detected in >= {min_detections} replicates '
                 f'in one group')
-    report.line(f'                     but completely absent (0 detections) in the other.')
-    report.line(f'                     Retained as potential presence/absence candidates.')
-    report.line(f'                     Flagged for careful interpretation: the absent')
-    report.line(f'                     group will be entirely imputed.')
+    report.line('                     but completely absent (0 detections) in the other,')
+    report.line('                     WITH a fully-detected anchor group.')
+    report.line('                     Retained as presence/absence candidates. The absent')
+    report.line('                     group is entirely MNAR-imputed; interpret as')
+    report.line('                     qualitative, and read direction from the detection')
+    report.line('                     pattern, not the imputation-driven fold change.')
+    report.line('  WEAK-ANCHOR      - Would be PARTIAL or SINGLE-GROUP, but no group')
+    report.line(f'     (removed)        reaches the anchor ({anchor_desc}).')
+    report.line('                     Results would be dominated by MNAR imputation over')
+    report.line('                     as few as 2 real measurements. Removed.')
     report.line(f'  SPARSE (removed) - Detected in < {min_detections} replicates '
                 f'in ALL groups.')
-    report.line(f'                     Insufficient data for reliable statistical testing')
-    report.line(f'                     in any group.')
-    report.line(f'  ABSENT (removed) - Zero detections across all samples in this run.')
-    report.line(f'                     Protein was retained in the source dataset only')
-    report.line(f'                     because it was detected in conditions not included')
-    report.line(f'                     in this run.')
+    report.line('                     Insufficient data for reliable statistical testing')
+    report.line('                     in any group.')
+    report.line('  ABSENT (removed) - Zero detections across all samples in this run.')
+    report.line('                     Protein was retained in the source dataset only')
+    report.line('                     because it was detected in conditions not included')
+    report.line('                     in this run.')
     report.line()
     report.line('Results:')
-    report.line(f'  Input proteins:    {n_input:>6,}')
-    report.line(f'  Passed:            {n_passed:>6,}  ({format_pct(n_passed, n_input)})')
-    report.line(f'  Partial:           {n_partial:>6,}  ({format_pct(n_partial, n_input)})  [flagged]')
-    report.line(f'  Single-group:      {n_single:>6,}  ({format_pct(n_single, n_input)})  [flagged]')
-    report.line(f'  Sparse (removed):  {n_sparse:>6,}  ({format_pct(n_sparse, n_input)})')
-    report.line(f'  Absent (removed):  {n_absent:>6,}  ({format_pct(n_absent, n_input)})')
-    report.line(f'  {"─" * 34}')
-    report.line(f'  Retained:          {n_retained:>6,}  ({format_pct(n_retained, n_input)})')
-    report.line(f'  Removed:           {n_removed:>6,}  ({format_pct(n_removed, n_input)})')
+    # Fixed 22-char label column so counts stay aligned regardless of label
+    # length (the WEAK-ANCHOR label is the longest).
+    lbl = 22
+    report.line(f'  {"Input proteins:":<{lbl}}{n_input:>6,}')
+    report.line(f'  {"Passed:":<{lbl}}{n_passed:>6,}  ({format_pct(n_passed, n_input)})')
+    report.line(f'  {"Partial:":<{lbl}}{n_partial:>6,}  ({format_pct(n_partial, n_input)})  [flagged]')
+    report.line(f'  {"Single-group:":<{lbl}}{n_single:>6,}  ({format_pct(n_single, n_input)})  [flagged]')
+    report.line(f'  {"Weak-anchor (removed):":<{lbl}}{n_weak:>6,}  ({format_pct(n_weak, n_input)})')
+    report.line(f'  {"Sparse (removed):":<{lbl}}{n_sparse:>6,}  ({format_pct(n_sparse, n_input)})')
+    report.line(f'  {"Absent (removed):":<{lbl}}{n_absent:>6,}  ({format_pct(n_absent, n_input)})')
+    report.line(f'  {"─" * (lbl + 6)}')
+    report.line(f'  {"Retained:":<{lbl}}{n_retained:>6,}  ({format_pct(n_retained, n_input)})')
+    report.line(f'  {"Removed:":<{lbl}}{n_removed:>6,}  ({format_pct(n_removed, n_input)})')
 
 
 def write_missingness_overview_block(
@@ -399,6 +467,13 @@ def main() -> None:
     pep_prefix: str | None = params['input'].get('peptide_count_prefix') or None
     group_col: str = params['design']['group_column']
     min_detections: int = params['qc']['min_detections_per_group']
+    # Anchor threshold for presence/absence and partial proteins. Default
+    # (None / absent / null in YAML) requires the anchor group to be FULLY
+    # detected; an explicit integer sets a fixed minimum instead. See the
+    # anchor gate in classify_proteins() and Module 01 spec Section 5.
+    min_present_detections: int | None = params['qc'].get(
+        'min_detections_present_group'
+    )
 
     abund_cols = get_abundance_cols(matrix, id_col, pep_prefix)
     n_input = len(matrix)
@@ -409,17 +484,22 @@ def main() -> None:
     )
 
     # --- Classify proteins ---
-    detection_counts = count_detections_per_group(
+    detection_counts, group_sizes = count_detections_per_group(
         matrix, metadata, id_col, abund_cols, abund_prefix, group_col
     )
-    status = classify_proteins(detection_counts, min_detections)
+    status = classify_proteins(
+        detection_counts, min_detections, group_sizes, min_present_detections
+    )
 
     # --- Detection filter summary block ---
-    write_detection_filter_block(report, status, min_detections, n_input)
+    write_detection_filter_block(
+        report, status, min_detections, n_input, min_present_detections
+    )
 
     # --- Warnings and hard stops ---
-    # NOTE: PARTIAL is retained (one group passes + non-meeting groups have
-    # some non-zero detections); see Section 4.4 of the module spec.
+    # NOTE: PASSED, PARTIAL, and SINGLE-GROUP are retained. PARTIAL/SINGLE-GROUP
+    # only survive if they have a fully-detected anchor group; anchor failures
+    # are relabeled WEAK-ANCHOR (removed). See Section 4.4 of the module spec.
     retain_mask = status.isin(['PASSED', 'PARTIAL', 'SINGLE-GROUP'])
     n_retained = int(retain_mask.sum())
     n_removed = n_input - n_retained

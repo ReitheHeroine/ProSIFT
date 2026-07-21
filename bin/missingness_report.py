@@ -46,20 +46,16 @@ import plotly.express as px
 import plotly.graph_objects as go
 import yaml
 
+from prosift_plot_utils import FILTER_CATEGORY_COLORS, FILTER_CATEGORY_ORDER
+
 # Color palette (D3, colorblind-friendly)
 _PALETTE = px.colors.qualitative.D3
 
-# Detection filter category display order
-_CATEGORY_ORDER = ["PASSED", "PARTIAL", "SINGLE-GROUP", "SPARSE", "ABSENT"]
-
-# Colors per filter category
-_CATEGORY_COLORS = {
-    "PASSED":       "#2ca02c",   # green
-    "SINGLE-GROUP": "#1f77b4",   # blue
-    "PARTIAL":      "#9467bd",   # purple
-    "SPARSE":       "#ff7f0e",   # orange
-    "ABSENT":       "#d62728",   # red
-}
+# Detection filter category display order and colors. Sourced from the canonical
+# shared definitions in prosift_plot_utils so this Module 01 report and the
+# Module 03b QC report always use the same category-to-color mapping.
+_CATEGORY_ORDER = FILTER_CATEGORY_ORDER
+_CATEGORY_COLORS = FILTER_CATEGORY_COLORS
 
 
 # ============================================================
@@ -258,7 +254,7 @@ def plot_missingness_heatmap(
     Columns grouped by condition.
     """
     # Subset to filtered-out proteins
-    removed_categories = ["PARTIAL", "SINGLE-GROUP", "SPARSE", "ABSENT"]
+    removed_categories = ["PARTIAL", "SINGLE-GROUP", "WEAK-ANCHOR", "SPARSE", "ABSENT"]
     removed_ids = filter_df.loc[
         filter_df["filter_status"].isin(removed_categories), "protein_id"
     ].tolist()
