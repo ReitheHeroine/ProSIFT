@@ -28,7 +28,7 @@ process QUERY_DISGENET {
         --mapping  ${mapping_table} \\
         --params   ${params_yml} \\
         --run-id   ${meta.run_id} \\
-        --cachedir ${cachedir} \\
+        --cachedir "${cachedir}" \\
         --outdir   .
     """
 
