@@ -234,6 +234,14 @@ def classify_proteins(
       and are removed. This does NOT touch PASSED proteins (all groups meet
       min_detections, missing values are MAR only). See Module 01 spec
       Section 5 and the 2026-07-21 Decision Register entry.
+
+    Assumptions (enforced upstream by validate_inputs.py, so not re-checked
+    here): at least 2 distinct groups (validate_inputs hard-stops on fewer),
+    and every group has >= qc.min_samples_per_group samples (default 2), so a
+    group is never size 1 at default config. Callers outside the pipeline
+    (e.g. unit tests) must uphold these for the anchor semantics to hold: with
+    a single group, the SINGLE-GROUP assignment can shadow PASSED; with a
+    size-1 group, "full detection" is a single measurement.
     '''
     total_detections = detection_counts.sum(axis=1)
     meets_threshold = detection_counts >= min_detections
@@ -284,6 +292,53 @@ def classify_proteins(
     # SPARSE: anything remaining (already set as default)
 
     return status
+
+
+def validate_min_present_detections(
+    value: object,
+    group_sizes: dict[str, int]
+) -> str | None:
+    '''
+    Validate the qc.min_detections_present_group parameter (the anchor
+    threshold used by classify_proteins).
+
+    Returns an error message string if the value is invalid, or None if it is
+    acceptable. Acceptable values:
+      - None                       -- anchor requires FULL detection in some
+                                       group (the default behavior).
+      - int in [1, max group size] -- a fixed anchor threshold.
+
+    Rejects (each would silently corrupt filtering, so we fail loudly instead):
+      - non-integers, including bool and YAML strings -- would raise deep in
+        classify_proteins or bypass the intended comparison.
+      - values < 1 (0 or negative) -- would make every group an anchor,
+        silently disabling the gate.
+      - values larger than every group size -- no group could ever anchor, so
+        all SINGLE-GROUP/PARTIAL proteins would be silently removed.
+    '''
+    if value is None:
+        return None
+    # bool is a subclass of int; reject it explicitly so True/False cannot pass.
+    if isinstance(value, bool) or not isinstance(value, int):
+        return (
+            'qc.min_detections_present_group must be an integer or null '
+            f'(got {type(value).__name__}: {value!r}). Use null to require '
+            'full detection in the anchor group.'
+        )
+    if value < 1:
+        return (
+            'qc.min_detections_present_group must be >= 1 (or null for full '
+            f'detection), got {value}.'
+        )
+    max_size = max(group_sizes.values()) if group_sizes else 0
+    if value > max_size:
+        return (
+            f'qc.min_detections_present_group ({value}) exceeds the largest '
+            f'group size ({max_size}); no group could ever be an anchor, so '
+            'every presence/absence and partial protein would be removed. '
+            'Lower it or set it to null (full detection).'
+        )
+    return None
 
 
 # ============================================================
@@ -478,6 +533,11 @@ def main() -> None:
     abund_cols = get_abundance_cols(matrix, id_col, pep_prefix)
     n_input = len(matrix)
 
+    # Guard the empty-matrix case up front (avoids a divide-by-zero in the
+    # percentage accounting below, and there is nothing to filter anyway).
+    if n_input == 0:
+        report.error_exit('Input matrix contains no proteins; nothing to filter.')
+
     # --- Pre-filter missingness overview (captures state before any removal) ---
     write_missingness_overview_block(
         report, matrix, metadata, id_col, abund_cols, abund_prefix, group_col
@@ -487,6 +547,14 @@ def main() -> None:
     detection_counts, group_sizes = count_detections_per_group(
         matrix, metadata, id_col, abund_cols, abund_prefix, group_col
     )
+
+    # Validate the anchor parameter now that group sizes are known. An invalid
+    # value (out-of-range, wrong type) would silently corrupt filtering, so we
+    # fail loudly with a clear message instead.
+    param_err = validate_min_present_detections(min_present_detections, group_sizes)
+    if param_err is not None:
+        report.error_exit(param_err)
+
     status = classify_proteins(
         detection_counts, min_detections, group_sizes, min_present_detections
     )

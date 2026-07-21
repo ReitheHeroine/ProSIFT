@@ -42,6 +42,7 @@ sys.path.insert(0, str(_BIN_DIR))
 from filter_proteins import (
     classify_proteins,
     count_detections_per_group,
+    validate_min_present_detections,
 )
 
 FILTER_SCRIPT = _BIN_DIR / 'filter_proteins.py'
@@ -288,8 +289,19 @@ class TestEndToEndCLI:
             vals[i] = float(rng.normal(22, 1))
         return vals
 
-    def _run(self, tmp_path):
-        '''Build a synthetic run and invoke bin/filter_proteins.py on it.'''
+    def _run(self, tmp_path, present_param=None):
+        '''Build a synthetic run and invoke bin/filter_proteins.py; assert it
+        succeeds and return (filter table, retained protein IDs).'''
+        proc = self._invoke(tmp_path, present_param)
+        assert proc.returncode == 0, f'filter_proteins failed:\n{proc.stderr}'
+        table = pd.read_csv(tmp_path / 'run.detection_filter_table.csv') \
+            .set_index('protein_id')
+        filtered = pd.read_parquet(tmp_path / 'run.filtered_matrix.parquet')
+        return table, set(filtered['protein_id'])
+
+    def _invoke(self, tmp_path, present_param=None):
+        '''Build inputs and run the CLI; return the completed process (no
+        success assertion) so failure paths can be tested too.'''
         import yaml
         rng = np.random.default_rng(7)
 
@@ -320,23 +332,18 @@ class TestEndToEndCLI:
             'input': {'protein_id_column': 'protein_id', 'abundance_prefix': ''},
             'design': {'group_column': 'group'},
             'qc': {'min_detections_per_group': 2,
-                   'min_detections_present_group': None},
+                   'min_detections_present_group': present_param},
         }
         ppath = tmp_path / 'run_params.yml'
         ppath.write_text(yaml.safe_dump(params))
 
-        proc = subprocess.run(
+        return subprocess.run(
             [sys.executable, str(FILTER_SCRIPT),
              '--matrix', str(mpath), '--metadata', str(mdpath),
              '--params', str(ppath), '--run-id', 'run',
              '--outdir', str(tmp_path)],
             capture_output=True, text=True,
         )
-        assert proc.returncode == 0, f'filter_proteins failed:\n{proc.stderr}'
-        table = pd.read_csv(tmp_path / 'run.detection_filter_table.csv') \
-            .set_index('protein_id')
-        filtered = pd.read_parquet(tmp_path / 'run.filtered_matrix.parquet')
-        return table, set(filtered['protein_id'])
 
     def test_weak_anchor_dropped_from_matrix(self, tmp_path):
         '''The bug rows (2,0) and (2,1) are labeled WEAK-ANCHOR and do NOT
@@ -355,3 +362,114 @@ class TestEndToEndCLI:
         assert table.loc['PASS_22', 'filter_status'] == 'PASSED'
         assert table.loc['PARTIAL_31', 'filter_status'] == 'PARTIAL'
         assert {'SINGLE_30', 'PASS_22', 'PARTIAL_31'} <= retained_ids
+
+    def test_out_of_range_anchor_param_fails_loudly(self, tmp_path):
+        '''An anchor threshold above the group size (4 with n=3/group) makes
+        the CLI exit non-zero with a clear message, instead of silently
+        removing every presence/absence protein.'''
+        proc = self._invoke(tmp_path, present_param=4)
+        assert proc.returncode != 0
+        assert 'min_detections_present_group' in proc.stderr
+
+    def test_explicit_valid_anchor_param_runs(self, tmp_path):
+        '''An explicit in-range anchor (2) is accepted and, being more lenient
+        than full detection, retains the 2/3-vs-0/3 protein as SINGLE-GROUP.'''
+        table, retained_ids = self._run(tmp_path, present_param=2)
+        assert table.loc['WEAK_20', 'filter_status'] == 'SINGLE-GROUP'
+        assert 'WEAK_20' in retained_ids
+
+
+# ============================================================
+# Section 7: anchor-parameter validation
+# ============================================================
+
+class TestValidateMinPresentDetections:
+    '''validate_min_present_detections rejects footgun values loudly.
+
+    Guards the code-review finding that an out-of-range or wrong-typed
+    qc.min_detections_present_group silently corrupts filtering (removes all
+    presence/absence proteins, or disables the gate).
+    '''
+
+    SIZES = {'WT': 3, 'KO': 3}
+
+    def test_none_is_valid(self):
+        '''None (default) means "require full detection" -- always valid.'''
+        assert validate_min_present_detections(None, self.SIZES) is None
+
+    def test_in_range_integer_is_valid(self):
+        for v in (1, 2, 3):
+            assert validate_min_present_detections(v, self.SIZES) is None
+
+    def test_zero_and_negative_rejected(self):
+        '''0 or negative would make every group an anchor (gate disabled).'''
+        assert validate_min_present_detections(0, self.SIZES) is not None
+        assert validate_min_present_detections(-1, self.SIZES) is not None
+
+    def test_larger_than_every_group_rejected(self):
+        '''A threshold above the largest group can never be met -> all
+        presence/absence proteins would silently vanish.'''
+        assert validate_min_present_detections(4, self.SIZES) is not None
+
+    def test_unequal_groups_bound_is_the_max(self):
+        '''With unequal groups the bound is the LARGER group; a value that only
+        the larger group can meet is still valid (that group can anchor).'''
+        sizes = {'WT': 4, 'KO': 3}
+        assert validate_min_present_detections(4, sizes) is None   # WT can hit 4
+        assert validate_min_present_detections(5, sizes) is not None
+
+    def test_non_integer_types_rejected(self):
+        '''Floats, strings, and bool must be rejected (bool is an int
+        subclass, so it is checked explicitly).'''
+        for bad in (2.5, '2', True, False, [2]):
+            assert validate_min_present_detections(bad, self.SIZES) is not None
+
+
+# ============================================================
+# Section 8: more than two groups
+# ============================================================
+
+class TestMultiGroup:
+    '''The anchor gate generalizes beyond two groups (the pipeline supports
+    >= 2 groups). Per-group anchor thresholds are independent.'''
+
+    SIZES_3 = {'A': 3, 'B': 3, 'C': 3}
+
+    def _counts(self, a, b, c):
+        return pd.DataFrame({'A': [a], 'B': [b], 'C': [c]}, index=['prot'])
+
+    def test_full_anchor_one_group_retains_single_group(self):
+        '''Detected fully in exactly one group, zero elsewhere -> SINGLE-GROUP
+        (has a full anchor).'''
+        status = classify_proteins(
+            self._counts(3, 0, 0), min_detections=2,
+            group_sizes=self.SIZES_3, min_present_detections=None,
+        )
+        assert status.loc['prot'] == 'SINGLE-GROUP'
+
+    def test_partial_with_full_anchor_retained(self):
+        '''Full anchor in A, sub-threshold non-zero in B, zero in C ->
+        PARTIAL (retained).'''
+        status = classify_proteins(
+            self._counts(3, 1, 0), min_detections=2,
+            group_sizes=self.SIZES_3, min_present_detections=None,
+        )
+        assert status.loc['prot'] == 'PARTIAL'
+
+    def test_single_group_without_full_anchor_is_weak(self):
+        '''Meets min_detections in exactly one group (2/3) but that group is
+        not fully detected, zero elsewhere -> WEAK-ANCHOR (removed).'''
+        status = classify_proteins(
+            self._counts(2, 0, 0), min_detections=2,
+            group_sizes=self.SIZES_3, min_present_detections=None,
+        )
+        assert status.loc['prot'] == 'WEAK-ANCHOR'
+
+    def test_two_of_three_groups_full_is_passed(self):
+        '''Fully detected in two of three groups and meeting threshold in the
+        third stays PASSED; the anchor gate does not touch it.'''
+        status = classify_proteins(
+            self._counts(3, 3, 2), min_detections=2,
+            group_sizes=self.SIZES_3, min_present_detections=None,
+        )
+        assert status.loc['prot'] == 'PASSED'
